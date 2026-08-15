@@ -1,0 +1,312 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>鸭鸭日记本 · 幼儿端</title>
+<style>
+  :root {
+    --duck-yellow: #ffb800;
+    --duck-orange: #ff8a00;
+    --sky: #2f80ed;
+    --sky-light: #e8f1fe;
+    --coral: #ff6b5e;
+    --green: #34d399;
+    --ink: #2c2c2a;
+    --paper: #fffdf5;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: var(--sky-light);
+    min-height: 100vh;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    overflow: hidden;
+  }
+  /* 投影画布：明亮高对比 */
+  #stage {
+    width: min(96vw, 820px);
+    height: min(92vh, 640px);
+    background: var(--paper);
+    border-radius: 28px;
+    box-shadow: 0 12px 40px rgba(47, 128, 237, .18);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+    position: relative;
+  }
+  header {
+    padding: 18px 22px 12px;
+    display: flex;
+    align-items: center;
+    gap: 14px;
+    border-bottom: 3px dashed var(--duck-yellow);
+  }
+  header .duck-avatar { width: 64px; height: 64px; }
+  header h1 { font-size: 30px; color: var(--ink); letter-spacing: 1px; }
+  header .sub { font-size: 15px; color: #888; }
+  #messages {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+  .bubble {
+    max-width: 78%;
+    padding: 16px 20px;
+    font-size: 22px;
+    line-height: 1.5;
+    border-radius: 20px;
+    animation: pop .35s ease;
+    white-space: pre-wrap;
+  }
+  .bubble.child { align-self: flex-end; background: var(--sky); color: #fff; border-bottom-right-radius: 6px; }
+  .bubble.diary { align-self: flex-start; background: #fff; color: var(--ink); border: 2px solid var(--duck-yellow); border-bottom-left-radius: 6px; }
+  .bubble .who { font-size: 14px; opacity: .7; display: block; margin-bottom: 4px; }
+  @keyframes pop { from { transform: translateY(14px) scale(.94); opacity: 0; } to { transform: none; opacity: 1; } }
+
+  /* 说话按钮 */
+  #ptt-wrap { padding: 18px 24px 26px; display: flex; flex-direction: column; align-items: center; gap: 12px; }
+  #ptt {
+    width: 200px; height: 200px; border-radius: 50%;
+    border: 8px solid #fff; background: var(--duck-yellow);
+    color: #fff; font-size: 30px; font-weight: bold;
+    cursor: pointer; user-select: none; -webkit-user-select: none;
+    box-shadow: 0 8px 0 var(--duck-orange), 0 14px 30px rgba(255, 138, 0, .35);
+    transition: transform .08s ease, box-shadow .08s ease;
+    display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 6px;
+  }
+  #ptt:active, #ptt.recording { transform: translateY(6px) scale(.98); box-shadow: 0 2px 0 var(--duck-orange), 0 8px 18px rgba(255, 138, 0, .3); }
+  #ptt .mic { width: 44px; height: 44px; }
+  #ptt.recording { background: var(--coral); box-shadow: 0 2px 0 #c94b3c, 0 8px 18px rgba(255, 107, 94, .3); }
+  #ptt-hint { font-size: 17px; color: #888; }
+  .recording #ptt-hint { color: var(--coral); }
+
+  /* 波纹 */
+  .wave { display: none; }
+  .recording .wave { display: flex; gap: 8px; align-items: center; height: 44px; }
+  .wave span { width: 8px; height: 14px; background: #fff; border-radius: 4px; animation: wave 1s infinite ease-in-out; }
+  .wave span:nth-child(2) { animation-delay: .1s; } .wave span:nth-child(3) { animation-delay: .2s; }
+  .wave span:nth-child(4) { animation-delay: .3s; } .wave span:nth-child(5) { animation-delay: .4s; }
+  @keyframes wave { 0%,100% { height: 12px; } 50% { height: 40px; } }
+
+  /* 选择幼儿 */
+  #picker { flex: 1; overflow-y: auto; padding: 24px; }
+  #picker h2 { font-size: 26px; color: var(--ink); margin-bottom: 18px; text-align: center; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 16px; }
+  .child-card {
+    background: #fff; border: 3px solid var(--duck-yellow); border-radius: 18px;
+    padding: 22px 10px; text-align: center; font-size: 24px; cursor: pointer;
+    transition: transform .1s; animation: pop .3s ease;
+  }
+  .child-card:hover { transform: translateY(-3px); }
+  .child-card .emoji { font-size: 40px; display: block; margin-bottom: 6px; }
+
+  /* 开场与结束遮罩 */
+  .overlay {
+    position: absolute; inset: 0; background: rgba(255, 253, 245, .96);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 18px;
+    z-index: 10;
+  }
+  .overlay .big-duck { width: 160px; height: 160px; animation: bob 1.4s ease-in-out infinite; }
+  @keyframes bob { 0%,100% { transform: translateY(0); } 50% { transform: translateY(-16px); } }
+  .overlay .title { font-size: 34px; color: var(--ink); }
+  .overlay .btn {
+    font-size: 24px; padding: 14px 40px; border-radius: 40px; border: none; cursor: pointer;
+    background: var(--sky); color: #fff; box-shadow: 0 6px 0 #1d5fb0;
+  }
+  .overlay .btn:active { transform: translateY(4px); box-shadow: 0 2px 0 #1d5fb0; }
+  .overlay .btn.start { background: var(--duck-yellow); color: #fff; box-shadow: 0 6px 0 var(--duck-orange); }
+  .overlay .btn.start:active { box-shadow: 0 2px 0 var(--duck-orange); }
+
+  /* 撒花 */
+  .confetti { position: absolute; top: -20px; border-radius: 4px; animation: fall linear forwards; }
+  @keyframes fall { to { transform: translateY(110vh) rotate(720deg); opacity: .2; } }
+
+  .text-fallback { width: 100%; display: flex; gap: 10px; }
+  .text-fallback input { flex: 1; font-size: 20px; padding: 12px 16px; border-radius: 14px; border: 2px solid var(--duck-yellow); }
+  .text-fallback button { font-size: 20px; padding: 12px 22px; border-radius: 14px; border: none; background: var(--sky); color: #fff; cursor: pointer; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <div id="root"></div>
+</div>
+
+<script>
+const API = '';
+const DUCK_SVG = `<svg viewBox="0 0 100 100" width="100%" height="100%">
+  <ellipse cx="50" cy="58" rx="34" ry="30" fill="#ffb800"/>
+  <circle cx="42" cy="46" r="26" fill="#ffc53d"/>
+  <ellipse cx="72" cy="44" rx="18" ry="11" fill="#ffb800" transform="rotate(-14 72 44)"/>
+  <circle cx="52" cy="42" r="4" fill="#2c2c2a"/><circle cx="53.4" cy="40.6" r="1.6" fill="#fff"/>
+  <ellipse cx="74" cy="34" rx="6" ry="10" fill="#ff8a00" transform="rotate(14 74 34)"/>
+  <path d="M40 72 q10 12 20 0" stroke="#ff8a00" stroke-width="3" fill="none"/>
+</svg>`;
+
+function el(tag, attrs, ...children) {
+  const n = document.createElement(tag);
+  if (attrs) for (const k in attrs) {
+    if (k === 'onclick' || k === 'onmousedown' || k === 'onmouseup' || k === 'ontouchend' || k === 'oninput') n.addEventListener(k.slice(2), attrs[k]);
+    else n.setAttribute(k, attrs[k]);
+  }
+  for (const c of children) n.append(c);
+  return n;
+}
+function duckIcon(size) { const d = el('div'); d.className = 'duck-avatar'; d.style.width = d.style.height = size + 'px'; d.innerHTML = DUCK_SVG; return d; }
+
+const root = document.getElementById('root');
+const state = { child: null, convId: null, round: 0, maxRounds: 3, recognizing: false, ended: false };
+
+function renderPicker() {
+  root.innerHTML = '';
+  const picker = el('div', { id: 'picker' });
+  picker.append(el('h2', null, '今天轮到谁值日呀？'));
+  const grid = el('div', { class: 'grid' });
+  fetch(API + '/api/children').then(r => r.json()).then(children => {
+    children.forEach(c => {
+      grid.append(el('div', { class: 'child-card', onclick: () => startChat(c) },
+        el('span', { class: 'emoji' }, c.avatar || '🐤'),
+        document.createTextNode(c.nickname || c.name)));
+    });
+  });
+  picker.append(grid);
+  root.append(picker);
+}
+
+function startChat(child) {
+  state.child = child;
+  state.convId = null; state.round = 0; state.ended = false;
+  showOpening();
+}
+
+function showOpening() {
+  root.innerHTML = '';
+  const ov = el('div', { class: 'overlay' });
+  ov.append(duckIcon(160));
+  ov.append(el('div', { class: 'title' }, `你好呀，${state.child.nickname || state.child.name}！`));
+  ov.append(el('div', { style: 'font-size:20px;color:#666' }, '我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～'));
+  ov.append(el('button', { class: 'btn start', onclick: startConversation }, '开始说话'));
+  root.append(ov);
+}
+
+function startConversation() {
+  root.innerHTML = '';
+  const msgs = el('div', { id: 'messages' });
+  const pttWrap = el('div', { id: 'ptt-wrap' });
+  const ptt = el('div', { id: 'ptt' });
+  ptt.innerHTML = `<svg class="mic" viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"><rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0014 0"/><path d="M12 18v3"/></svg>`;
+  const wave = el('div', { class: 'wave' });
+  for (let i = 0; i < 5; i++) wave.append(el('span'));
+  ptt.append(wave);
+  ptt.append(el('span', null, '按住说话'));
+  const hint = el('div', { id: 'ptt-hint' }, '按住大按钮说话，松开就发送');
+  // 文字兜底
+  const fb = el('div', { class: 'text-fallback', style: 'display:none' });
+  const inp = el('input', { placeholder: '也可以打字告诉我' });
+  const sendBtn = el('button', null, '发送');
+  sendBtn.addEventListener('click', () => { const t = inp.value.trim(); if (t) { inp.value = ''; sendText(t); } });
+  inp.addEventListener('keydown', e => { if (e.key === 'Enter') sendBtn.click(); });
+  fb.append(inp, sendBtn);
+
+  pttWrap.append(ptt, hint, fb);
+  const stage = document.getElementById('stage');
+  root.append(el('header', null, duckIcon(64), el('div', null, el('h1', null, '鸭鸭日记本'), el('div', { class: 'sub' }, `值日小朋友：${state.child.nickname || state.child.name}`))));
+  root.append(msgs, pttWrap);
+
+  addBubble('diary', `今天你照顾小鸭了吗？跟日记本说说吧～`);
+
+  // 语音识别
+  const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+  let rec = null;
+  if (SR) {
+    rec = new SR(); rec.lang = 'zh-CN'; rec.interimResults = false; rec.continuous = false;
+    rec.onresult = e => { const t = e.results[0][0].transcript; stopRec(); sendText(t); };
+    rec.onerror = () => stopRec();
+    rec.onend = () => stopRec();
+  } else {
+    hint.textContent = '当前浏览器不支持语音，请用下方文字输入';
+    fb.style.display = 'flex';
+  }
+
+  function stopRec() {
+    state.recognizing = false;
+    pttWrap.classList.remove('recording');
+    hint.textContent = '按住大按钮说话，松开就发送';
+  }
+  ptt.addEventListener('mousedown', e => { e.preventDefault(); if (!rec) return; try { rec.start(); state.recognizing = true; pttWrap.classList.add('recording'); hint.textContent = '正在听……'; } catch (err) {} });
+  ptt.addEventListener('mouseup', () => { if (state.recognizing) try { rec.stop(); } catch (err) {} });
+  ptt.addEventListener('mouseleave', () => { if (state.recognizing) try { rec.stop(); } catch (err) {} });
+  ptt.addEventListener('touchstart', e => { e.preventDefault(); if (!rec) return; try { rec.start(); state.recognizing = true; pttWrap.classList.add('recording'); hint.textContent = '正在听……'; } catch (err) {} });
+  ptt.addEventListener('touchend', () => { if (state.recognizing) try { rec.stop(); } catch (err) {} });
+
+  function addBubble(role, text) {
+    const b = el('div', { class: 'bubble ' + role });
+    b.append(el('span', { class: 'who' }, role === 'child' ? (state.child.nickname || state.child.name) : '鸭鸭日记本'));
+    b.append(document.createTextNode(text));
+    msgs.append(b);
+    msgs.scrollTop = msgs.scrollHeight;
+    return b;
+  }
+
+  function speak(text) {
+    if (!('speechSynthesis' in window)) return;
+    const u = new SpeechSynthesisUtterance(text); u.lang = 'zh-CN'; u.rate = 1.0; u.pitch = 1.15;
+    speechSynthesis.cancel(); speechSynthesis.speak(u);
+  }
+
+  async function sendText(text) {
+    addBubble('child', text);
+    const resp = await fetch(API + '/api/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ child_id: state.child.id, text, conversation_id: state.convId, max_rounds: state.maxRounds }),
+    });
+    const data = await resp.json();
+    state.convId = data.conversation_id; state.round = data.round;
+    addBubble('diary', data.reply);
+    speak(data.reply);
+    if (data.ended) { endSession(); }
+  }
+
+  async function endSession() {
+    state.ended = true;
+    try { await fetch(API + `/api/conversations/${state.convId}/finalize`, { method: 'POST' }); } catch (e) {}
+    showEnding();
+  }
+
+  function showEnding() {
+    root.innerHTML = '';
+    const ov = el('div', { class: 'overlay' });
+    ov.append(duckIcon(160));
+    ov.append(el('div', { class: 'title' }, '太棒啦！'));
+    ov.append(el('div', { style: 'font-size:20px;color:#666' }, '今天的故事，鸭鸭日记本都记好啦～'));
+    ov.append(el('button', { class: 'btn', onclick: renderPicker }, '换下一位小朋友'));
+    root.append(ov);
+    confetti();
+  }
+}
+
+function confetti() {
+  const stage = document.getElementById('stage');
+  const colors = ['#ffb800', '#2f80ed', '#ff6b5e', '#34d399', '#ff8a00'];
+  for (let i = 0; i < 60; i++) {
+    const c = el('div', { class: 'confetti' });
+    c.style.left = Math.random() * 100 + '%';
+    c.style.width = (6 + Math.random() * 8) + 'px';
+    c.style.height = (10 + Math.random() * 10) + 'px';
+    c.style.background = colors[i % colors.length];
+    c.style.animationDuration = (2 + Math.random() * 2) + 's';
+    c.style.animationDelay = Math.random() * 0.8 + 's';
+    stage.append(c);
+    setTimeout(() => c.remove(), 5000);
+  }
+}
+
+renderPicker();
+</script>
+</body>
+</html>

@@ -1,0 +1,435 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>鸭鸭日记本 · 教师端</title>
+<style>
+  :root {
+    --bg: #f5f6f8; --panel: #ffffff; --ink: #1f2937; --muted: #6b7280;
+    --brand: #2f80ed; --brand-dark: #1d5fb0; --yellow: #ffb800;
+    --green: #16a34a; --red: #dc2626; --border: #e5e7eb;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); }
+  .layout { display: flex; min-height: 100vh; }
+  aside { width: 220px; background: #12233f; color: #cbd5e1; padding: 22px 0; flex-shrink: 0; }
+  aside .logo { padding: 0 22px 20px; font-size: 20px; color: #fff; font-weight: bold; }
+  aside .nav { display: flex; flex-direction: column; }
+  aside .nav button {
+    text-align: left; background: none; border: none; color: #cbd5e1; font-size: 15px;
+    padding: 13px 22px; cursor: pointer; border-left: 3px solid transparent;
+  }
+  aside .nav button:hover { background: #1c3155; }
+  aside .nav button.active { background: #1c3155; color: #fff; border-left-color: var(--yellow); }
+  main { flex: 1; padding: 26px 30px; overflow-y: auto; }
+  .view { display: none; }
+  .view.active { display: block; }
+  h2 { font-size: 22px; margin-bottom: 18px; }
+  .card { background: var(--panel); border-radius: 14px; padding: 20px; box-shadow: 0 1px 3px rgba(0,0,0,.06); }
+  table { width: 100%; border-collapse: collapse; font-size: 14px; }
+  th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 500; background: #fafafa; }
+  .btn { background: var(--brand); color: #fff; border: none; padding: 9px 16px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+  .btn:hover { background: var(--brand-dark); }
+  .btn.gray { background: #e5e7eb; color: var(--ink); }
+  .btn.green { background: var(--green); }
+  .btn.small { padding: 5px 10px; font-size: 13px; }
+  input, select, textarea { padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+  .row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+  .muted { color: var(--muted); font-size: 13px; }
+  .tag { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 12px; }
+  .tag.pending { background: #fef3c7; color: #92400e; }
+  .tag.confirmed { background: #dcfce7; color: #166534; }
+  .tag.ended { background: #e0e7ff; color: #3730a3; }
+  .bubble { padding: 8px 12px; border-radius: 10px; margin: 6px 0; font-size: 14px; max-width: 80%; }
+  .bubble.c { background: #dbeafe; margin-left: auto; }
+  .bubble.d { background: #fff7e0; }
+  .score-box { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+  .score-box .name { width: 120px; font-size: 14px; }
+  .stars { display: flex; gap: 4px; }
+  .stars button { background: none; border: none; font-size: 22px; cursor: pointer; color: #d1d5db; }
+  .stars button.on { color: var(--yellow); }
+  textarea { width: 100%; min-height: 46px; }
+  .metric { text-align: center; padding: 18px; }
+  .metric .num { font-size: 30px; font-weight: bold; }
+  .metric .label { color: var(--muted); font-size: 13px; margin-top: 4px; }
+  .metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+  .chart-wrap svg { width: 100%; height: auto; }
+</style>
+</head>
+<body>
+<div class="layout">
+  <aside>
+    <div class="logo">🦆 鸭鸭日记本</div>
+    <nav class="nav" id="nav">
+      <button data-v="overview" class="active">概览</button>
+      <button data-v="children">幼儿管理</button>
+      <button data-v="ducks">小鸭管理</button>
+      <button data-v="roster">值日排班</button>
+      <button data-v="review">值日审阅</button>
+      <button data-v="growth">能力成长曲线</button>
+      <button data-v="search">明细检索</button>
+    </nav>
+  </aside>
+  <main id="main"></main>
+</div>
+
+<script>
+const API = '';
+const main = document.getElementById('main');
+const views = {};
+
+function h(tag, attrs, ...children) {
+  const n = document.createElement(tag);
+  if (attrs) for (const k in attrs) {
+    if (k === 'onclick') n.addEventListener('click', attrs[k]);
+    else if (k === 'oninput') n.addEventListener('input', attrs[k]);
+    else if (k === 'onchange') n.addEventListener('change', attrs[k]);
+    else if (k === 'style') n.style.cssText = attrs[k];
+    else n.setAttribute(k, attrs[k]);
+  }
+  for (const c of children) n.append(c);
+  return n;
+}
+function api(path, opts) { return fetch(API + path, opts).then(r => r.json()); }
+
+// 导航
+document.getElementById('nav').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  document.querySelectorAll('#nav button').forEach(x => x.classList.remove('active'));
+  b.classList.add('active');
+  show(b.dataset.v);
+});
+function show(name) {
+  Object.values(views).forEach(v => v.classList.remove('active'));
+  if (!views[name]) views[name] = buildView(name);
+  views[name].classList.add('active');
+}
+
+function buildView(name) {
+  const v = h('div', { class: 'view' });
+  const fns = { overview, children, ducks, roster, review, growth, search };
+  fns[name](v);
+  return v;
+}
+
+// ---------------- 概览 ----------------
+function overview(v) {
+  v.append(h('h2', null, '概览'));
+  const metrics = h('div', { class: 'metrics' });
+  v.append(metrics);
+  api('/api/analysis/overview').then(rows => {
+    const total = rows.length;
+    const convs = rows.reduce((s, r) => s + r.conversations, 0);
+    const assessed = rows.filter(r => r.latest_overall != null).length;
+    metrics.innerHTML = '';
+    metrics.append(
+      metric(total, '幼儿人数'), metric(convs, '累计会话'), metric(assessed, '已评估'),
+      metric(rows.reduce((s, r) => s + (r.latest_overall || 0), 0) / (assessed || 1), '平均综合分'),
+    );
+  });
+  v.append(h('div', { class: 'card' }, h('div', { class: 'muted' }, '从左侧导航进入各功能模块。日常流程：值日排班 → 幼儿端对话 → 值日审阅确认评估 → 查看成长曲线。')));
+}
+
+function metric(num, label) {
+  const n = typeof num === 'number' ? (Math.round(num * 100) / 100) : num;
+  return h('div', { class: 'card metric' }, h('div', { class: 'num' }, String(n)), h('div', { class: 'label' }, label));
+}
+
+// ---------------- 幼儿管理 ----------------
+function children(v) {
+  v.append(h('h2', null, '幼儿管理'));
+  const form = h('div', { class: 'row card' });
+  const nameIn = h('input', { placeholder: '全名' });
+  const nickIn = h('input', { placeholder: '小名（选填）' });
+  form.append(nameIn, nickIn, h('button', { class: 'btn', onclick: () => {
+    api('/api/children', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: nameIn.value, nickname: nickIn.value }) }).then(() => { nameIn.value = nickIn.value = ''; reload(); });
+  } }, '添加幼儿'));
+  v.append(form);
+  const tbl = h('table');
+  v.append(h('div', { class: 'card' }, tbl));
+  function reload() {
+    api('/api/children').then(rows => {
+      tbl.innerHTML = '';
+      tbl.append(h('tr', null, th('ID'), th('全名'), th('小名'), th('状态'), th('操作')));
+      rows.forEach(c => {
+        const tr = h('tr');
+        tr.append(td(c.id), td(c.name), td(c.nickname || '-'), td(c.active ? '在园' : '离园'),
+          td(h('button', { class: 'btn small gray', onclick: () => api('/api/children/' + c.id, { method: 'DELETE' }).then(reload) }, '删除')));
+        tbl.append(tr);
+      });
+    });
+  }
+  reload();
+}
+
+function th(t) { return h('th', null, t); }
+function td(...c) { const n = h('td'); c.forEach(x => n.append(x)); return n; }
+
+// ---------------- 小鸭管理 ----------------
+function ducks(v) {
+  v.append(h('h2', null, '小鸭管理'));
+  const form = h('div', { class: 'row card' });
+  const nameIn = h('input', { placeholder: '小鸭名字' });
+  const statusIn = h('input', { placeholder: '状态（如：活泼健康）' });
+  form.append(nameIn, statusIn, h('button', { class: 'btn', onclick: () => {
+    api('/api/ducks', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: nameIn.value, status: statusIn.value }) }).then(() => { nameIn.value = statusIn.value = ''; reload(); });
+  } }, '添加小鸭'));
+  v.append(form);
+  const tbl = h('table');
+  v.append(h('div', { class: 'card' }, tbl));
+  function reload() {
+    api('/api/ducks').then(rows => {
+      tbl.innerHTML = '';
+      tbl.append(h('tr', null, th('ID'), th('名字'), th('状态'), th('档案'), th('操作')));
+      rows.forEach(d => {
+        const tr = h('tr');
+        tr.append(td(d.id), td(d.name), td(d.status || '-'),
+          td(h('button', { class: 'btn small gray', onclick: () => summarizeDuck(d) }, '生成档案')),
+          td(h('button', { class: 'btn small gray', onclick: () => api('/api/ducks/' + d.id, { method: 'DELETE' }).then(reload) }, '删除')));
+        tbl.append(tr);
+      });
+    });
+  }
+  function summarizeDuck(d) {
+    api('/api/ducks/' + d.id + '/summarize', { method: 'POST' }).then(r => alert('「' + d.name + '」档案：\n' + (r.summary || '（暂无足够记录）')));
+  }
+  reload();
+}
+
+// ---------------- 排班 ----------------
+function roster(v) {
+  v.append(h('h2', null, '值日排班'));
+  const autoCard = h('div', { class: 'card' });
+  const startIn = h('input', { type: 'date' });
+  const daysIn = h('input', { type: 'number', value: 10, style: 'width:80px' });
+  const cycleIn = h('input', { placeholder: '周期（如 第1周）', value: '第1周' });
+  autoCard.append(h('div', { class: 'row' }, h('b', null, '自动轮值：'), '开始日期', startIn, '天数', daysIn, '周期', cycleIn,
+    h('button', { class: 'btn', onclick: () => {
+      api('/api/roster/auto', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ start_date: startIn.value, days: +daysIn.value, cycle: cycleIn.value }) }).then(() => reload());
+    } }, '生成排班')));
+  v.append(autoCard);
+
+  const manualCard = h('div', { class: 'card' });
+  const dateIn = h('input', { type: 'date' });
+  const cycle2 = h('input', { placeholder: '周期', value: '第1周' });
+  const selBox = h('div', { class: 'row' });
+  const chosen = [];
+  manualCard.append(h('div', { class: 'row' }, '手动指定：日期', dateIn, '周期', cycle2, h('button', { class: 'btn green', onclick: () => {
+    if (chosen.length !== 2) return alert('请选择 2 名幼儿');
+    api('/api/roster', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ cycle: cycle2.value, date: dateIn.value, child_ids: chosen }) }).then(() => reload());
+  } }, '保存当日排班')));
+  manualCard.append(h('div', { class: 'muted' }, '点击幼儿卡片选择 2 名值日幼儿：'));
+  manualCard.append(selBox);
+  api('/api/children').then(rows => {
+    rows.forEach(c => {
+      const b = h('button', { class: 'btn gray small', onclick: () => {
+        const i = chosen.indexOf(c.id);
+        if (i >= 0) { chosen.splice(i, 1); b.classList.remove('on'); b.style.background = ''; }
+        else { if (chosen.length >= 2) return alert('最多 2 名'); chosen.push(c.id); b.classList.add('on'); b.style.background = '#ffb800'; }
+      } }, c.nickname || c.name);
+      selBox.append(b);
+    });
+  });
+  v.append(manualCard);
+
+  const tbl = h('table');
+  v.append(h('div', { class: 'card' }, tbl));
+  function reload() {
+    api('/api/roster').then(rows => {
+      api('/api/children').then(children => {
+        const map = Object.fromEntries(children.map(c => [c.id, c.nickname || c.name]));
+        const byDate = {};
+        rows.forEach(r => { (byDate[r.date] = byDate[r.date] || []).push(r); });
+        tbl.innerHTML = '';
+        tbl.append(h('tr', null, th('日期'), th('周期'), th('值日幼儿')));
+        Object.keys(byDate).sort().forEach(d => {
+          tbl.append(h('tr', null, td(d), td(byDate[d][0].cycle), td(byDate[d].map(r => map[r.child_id] || r.child_id).join('、'))));
+        });
+      });
+    });
+  }
+  reload();
+}
+
+// ---------------- 审阅 ----------------
+function review(v) {
+  v.append(h('h2', null, '值日审阅'));
+  const list = h('div');
+  v.append(list);
+  const detail = h('div');
+  v.append(detail);
+  api('/api/conversations').then(rows => {
+    list.innerHTML = '';
+    const tbl = h('table');
+    tbl.append(h('tr', null, th('ID'), th('日期'), th('状态'), th('结束原因'), th('操作')));
+    rows.forEach(c => {
+      const tr = h('tr');
+      const reasonMap = { max_rounds: '达到轮次', complete: '信息充分', manual: '手动结束' };
+      tr.append(td(c.id), td(c.date), td(c.status), td(reasonMap[c.end_reason] || c.end_reason || '-'),
+        td(h('button', { class: 'btn small', onclick: () => openDetail(c.id) }, '审阅')));
+      tbl.append(tr);
+    });
+    list.append(h('div', { class: 'card' }, tbl));
+  });
+
+  function openDetail(convId) {
+    api('/api/conversations/' + convId).then(d => {
+      detail.innerHTML = '';
+      const card = h('div', { class: 'card' });
+      card.append(h('h2', null, '会话 #' + d.id + ' 详情'));
+
+      // 对话
+      card.append(h('b', null, '对话记录'));
+      const msgs = h('div', { style: 'max-height:300px;overflow-y:auto;margin:10px 0' });
+      d.messages.forEach(m => msgs.append(h('div', { class: 'bubble ' + (m.role === 'child' ? 'c' : 'd') }, (m.role === 'child' ? '幼儿：' : '日记本：') + m.text)));
+      card.append(msgs);
+
+      // 提炼流水（可编辑）
+      card.append(h('b', null, '饲养流水（可修正）'));
+      const logsBox = h('div');
+      (d.feeding_logs || []).forEach(f => {
+        const catIn = h('select');
+        ['喂食','清洁','观察','其它'].forEach(c => catIn.append(new Option(c, c)));
+        catIn.value = f.category;
+        const contentIn = h('input', { value: f.content, style: 'flex:1' });
+        logsBox.append(h('div', { class: 'row' }, catIn, contentIn));
+      });
+      card.append(logsBox);
+
+      // 情绪（可编辑）
+      card.append(h('b', null, '情绪'));
+      const emoIn = h('select');
+      ['开心','平静','疲惫','期待','其它'].forEach(c => emoIn.append(new Option(c, c)));
+      if (d.emotion) emoIn.value = d.emotion.emotion;
+      const intIn = h('input', { type: 'number', min: 1, max: 5, value: d.emotion ? d.emotion.intensity : 3, style: 'width:60px' });
+      card.append(h('div', { class: 'row', style: 'margin-top:8px' }, '情绪', emoIn, '强度(1-5)', intIn));
+
+      // 评估
+      let scoreState = {};
+      if (d.assessment) {
+        card.append(h('b', null, '能力评估（可调整后确认）'));
+        const sbox = h('div');
+        d.assessment.scores.forEach(s => {
+          scoreState[s.dimension_id] = s.score;
+          const name = h('span', { class: 'name' }, s.dimension_name);
+          const stars = h('div', { class: 'stars' });
+          const reasonIn = h('textarea', { placeholder: '评分理由（引用对话原句）' });
+          reasonIn.value = s.reason || '';
+          const row = h('div', { class: 'score-box' }, name);
+          for (let i = 1; i <= 5; i++) {
+            const st = h('button', { onclick: () => { scoreState[s.dimension_id] = i; renderStars(); } }, '★');
+            stars.append(st);
+          }
+          function renderStars() { [...stars.children].forEach((st, i) => st.classList.toggle('on', i < scoreState[s.dimension_id])); }
+          renderStars();
+          row.append(stars);
+          sbox.append(row);
+          sbox.append(reasonIn);
+        });
+        card.append(sbox);
+        card.append(h('div', { class: 'row', style: 'margin-top:14px' },
+          h('button', { class: 'btn', onclick: () => saveReview(convId, d) }, '保存修正'),
+          h('button', { class: 'btn green', onclick: () => confirmAssessment(convId, d) }, '确认评估'),
+        ));
+
+        function saveReview(convId, d) {
+          const body = {
+            feeding_logs: d.feeding_logs.map((f, i) => ({ id: f.id, category: logsBox.children[i].children[0].value, content: logsBox.children[i].children[1].value })),
+            emotion: { emotion: emoIn.value, intensity: +intIn.value },
+          };
+          api('/api/conversations/' + convId + '/logs', { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(() => alert('已保存修正'));
+        }
+        function confirmAssessment(convId, d) {
+          const scores = {};
+          Object.keys(scoreState).forEach(k => scores[k] = { score: scoreState[k] });
+          api('/api/assessments/' + d.assessment.id + '/confirm', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ scores }) }).then(() => { alert('评估已确认'); openDetail(convId); });
+        }
+      }
+      detail.append(card);
+    });
+  }
+}
+
+// ---------------- 成长曲线 ----------------
+function growth(v) {
+  v.append(h('h2', null, '能力成长曲线'));
+  const sel = h('select');
+  sel.append(new Option('— 选择幼儿 —', ''));
+  const wrap = h('div');
+  v.append(h('div', { class: 'row' }, sel));
+  v.append(wrap);
+  api('/api/children').then(rows => rows.forEach(c => sel.append(new Option(c.nickname || c.name, c.id))));
+  sel.addEventListener('change', () => {
+    if (!sel.value) return;
+    api('/api/analysis/growth?child_id=' + sel.value).then(d => drawGrowth(wrap, d));
+  });
+}
+
+function drawGrowth(wrap, d) {
+  wrap.innerHTML = '';
+  const dims = d.dimensions.filter(x => x.points.length);
+  if (!dims.length) { wrap.append(h('div', { class: 'card muted' }, '暂无已确认的评估数据')); return; }
+  const colors = ['#2f80ed', '#16a34a', '#f59e0b', '#8b5cf6', '#ef4444'];
+  const W = 760, H = 320, pad = 48;
+  const allDates = [...new Set(dims.flatMap(x => x.points.map(p => p.date)))].sort();
+  const x = i => allDates.length === 1 ? W / 2 : pad + i * (W - 2 * pad) / (allDates.length - 1);
+  const y = s => H - pad - (s - 1) * (H - 2 * pad) / 4;
+  let svg = `<svg viewBox="0 0 ${W} ${H}" xmlns="http://www.w3.org/2000/svg">`;
+  for (let s = 1; s <= 5; s++) svg += `<line x1="${pad}" y1="${y(s)}" x2="${W - pad}" y2="${y(s)}" stroke="#e5e7eb" stroke-width="1"/><text x="${pad - 8}" y="${y(s) + 4}" text-anchor="end" font-size="11" fill="#9ca3af">${s}分</text>`;
+  allDates.forEach((dt, i) => svg += `<text x="${x(i)}" y="${H - pad + 18}" text-anchor="middle" font-size="11" fill="#9ca3af">${dt}</text>`);
+  dims.forEach((dim, di) => {
+    const pts = dim.points.map(p => ({ x: x(allDates.indexOf(p.date)), y: y(p.score) }));
+    let path = pts.map((p, i) => (i ? 'L' : 'M') + p.x + ',' + p.y).join(' ');
+    svg += `<path d="${path}" fill="none" stroke="${colors[di % colors.length]}" stroke-width="2.5"/>`;
+    pts.forEach(p => svg += `<circle cx="${p.x}" cy="${p.y}" r="4" fill="${colors[di % colors.length]}"/>`);
+  });
+  svg += '</svg>';
+  const legend = h('div', { class: 'row', style: 'margin-top:8px' });
+  dims.forEach((dim, di) => legend.append(h('span', { class: 'muted' }, '● ' + dim.name + '  ')).style.color = colors[di % colors.length]);
+  wrap.append(h('div', { class: 'card chart-wrap', style: 'overflow-x:auto' }, h('div', { style: 'min-width:700px' }).innerHTML ? null : null));
+  const chartDiv = h('div', { class: 'card chart-wrap', style: 'overflow-x:auto' });
+  chartDiv.innerHTML = `<div style="min-width:700px">${svg}</div>`;
+  wrap.append(chartDiv, legend);
+}
+
+// ---------------- 明细检索 ----------------
+function search(v) {
+  v.append(h('h2', null, '明细检索'));
+  const childSel = h('select');
+  childSel.append(new Option('全部幼儿', ''));
+  const box = h('div');
+  v.append(h('div', { class: 'row' }, childSel));
+  v.append(box);
+  api('/api/children').then(rows => rows.forEach(c => childSel.append(new Option(c.nickname || c.name, c.id))));
+  childSel.addEventListener('change', load);
+  function load() {
+    const q = childSel.value ? '?child_id=' + childSel.value : '';
+    api('/api/conversations' + q).then(rows => {
+      box.innerHTML = '';
+      if (!rows.length) { box.append(h('div', { class: 'card muted' }, '暂无记录')); return; }
+      const tbl = h('table');
+      tbl.append(h('tr', null, th('会话'), th('日期'), th('结束原因'), th('操作')));
+      rows.forEach(c => tbl.append(h('tr', null, td(c.id), td(c.date), td(c.end_reason || '-'), td(h('button', { class: 'btn small', onclick: () => showConv(c.id) }, '查看')))));
+      box.append(h('div', { class: 'card' }, tbl));
+    });
+  }
+  function showConv(id) {
+    api('/api/conversations/' + id).then(d => {
+      box.innerHTML = '';
+      const card = h('div', { class: 'card' });
+      card.append(h('b', null, '会话 #' + id));
+      d.messages.forEach(m => card.append(h('div', { class: 'bubble ' + (m.role === 'child' ? 'c' : 'd') }, (m.role === 'child' ? '幼儿：' : '日记本：') + m.text)));
+      if (d.feeding_logs.length) card.append(h('div', { class: 'muted', style: 'margin-top:10px' }, '饲养流水：' + d.feeding_logs.map(f => f.category + '·' + f.content).join('；')));
+      if (d.emotion) card.append(h('div', { class: 'muted' }, '情绪：' + d.emotion.emotion + '（强度 ' + d.emotion.intensity + '）'));
+      box.append(card);
+    });
+  }
+  load();
+}
+
+show('overview');
+</script>
+</body>
+</html>

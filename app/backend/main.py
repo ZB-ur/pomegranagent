@@ -1,0 +1,529 @@
+"""鸭鸭日记本 FastAPI 后端应用入口。"""
+from datetime import date, datetime, timedelta
+
+from fastapi import Depends, FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from . import ai_engine, models, schemas
+from .database import Base, SessionLocal, engine, get_db
+
+app = FastAPI(title="鸭鸭日记本", version="1.0.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def _seed_dimensions() -> None:
+    defaults = [
+        ("language", "语言表达能力", "能清晰、连贯地表达自己的观察与感受"),
+        ("empathy", "同理心", "能体会并关心小鸭与同伴的感受"),
+        ("diligence", "勤劳启蒙", "积极参与饲养劳动并承担责任"),
+    ]
+    db = SessionLocal()
+    try:
+        for key, name, desc in defaults:
+            if not db.scalar(select(models.AssessmentDimension).where(models.AssessmentDimension.key == key)):
+                db.add(models.AssessmentDimension(key=key, name=name, description=desc))
+        db.commit()
+    finally:
+        db.close()
+
+
+# ---------------- 幼儿 ----------------
+@app.get("/api/children", response_model=list[schemas.ChildOut])
+def list_children(db: Session = Depends(get_db)):
+    return db.scalars(select(models.Child).order_by(models.Child.id)).all()
+
+
+@app.post("/api/children", response_model=schemas.ChildOut)
+def create_child(payload: schemas.ChildCreate, db: Session = Depends(get_db)):
+    child = models.Child(**payload.model_dump())
+    db.add(child)
+    db.commit()
+    db.refresh(child)
+    return child
+
+
+@app.put("/api/children/{child_id}", response_model=schemas.ChildOut)
+def update_child(child_id: int, payload: schemas.ChildCreate, db: Session = Depends(get_db)):
+    child = db.get(models.Child, child_id)
+    if not child:
+        raise HTTPException(404, "幼儿不存在")
+    for k, v in payload.model_dump().items():
+        setattr(child, k, v)
+    db.commit()
+    db.refresh(child)
+    return child
+
+
+@app.delete("/api/children/{child_id}")
+def delete_child(child_id: int, db: Session = Depends(get_db)):
+    child = db.get(models.Child, child_id)
+    if not child:
+        raise HTTPException(404, "幼儿不存在")
+    db.delete(child)
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------- 小鸭 ----------------
+@app.get("/api/ducks", response_model=list[schemas.DuckOut])
+def list_ducks(db: Session = Depends(get_db)):
+    return db.scalars(select(models.Duck).order_by(models.Duck.id)).all()
+
+
+@app.post("/api/ducks", response_model=schemas.DuckOut)
+def create_duck(payload: schemas.DuckCreate, db: Session = Depends(get_db)):
+    duck = models.Duck(**payload.model_dump())
+    db.add(duck)
+    db.commit()
+    db.refresh(duck)
+    return duck
+
+
+@app.put("/api/ducks/{duck_id}", response_model=schemas.DuckOut)
+def update_duck(duck_id: int, payload: schemas.DuckCreate, db: Session = Depends(get_db)):
+    duck = db.get(models.Duck, duck_id)
+    if not duck:
+        raise HTTPException(404, "小鸭不存在")
+    for k, v in payload.model_dump().items():
+        setattr(duck, k, v)
+    db.commit()
+    db.refresh(duck)
+    return duck
+
+
+@app.delete("/api/ducks/{duck_id}")
+def delete_duck(duck_id: int, db: Session = Depends(get_db)):
+    duck = db.get(models.Duck, duck_id)
+    if not duck:
+        raise HTTPException(404, "小鸭不存在")
+    db.delete(duck)
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------- 排班 ----------------
+@app.get("/api/roster")
+def list_roster(cycle: str | None = None, db: Session = Depends(get_db)):
+    q = select(models.DutyRoster).order_by(models.DutyRoster.date)
+    if cycle:
+        q = q.where(models.DutyRoster.cycle == cycle)
+    rows = db.scalars(q).all()
+    return [
+        {"id": r.id, "cycle": r.cycle, "date": r.date, "child_id": r.child_id}
+        for r in rows
+    ]
+
+
+@app.post("/api/roster")
+def set_roster(payload: schemas.RosterIn, db: Session = Depends(get_db)):
+    # 删除该日期旧排班，写入新排班
+    for old in db.scalars(select(models.DutyRoster).where(models.DutyRoster.date == payload.date)).all():
+        db.delete(old)
+    for cid in payload.child_ids:
+        db.add(models.DutyRoster(cycle=payload.cycle, date=payload.date, child_id=cid))
+    db.commit()
+    return {"ok": True, "date": payload.date, "child_ids": payload.child_ids}
+
+
+@app.post("/api/roster/auto")
+def auto_roster(payload: dict, db: Session = Depends(get_db)):
+    """自动轮值：从 start_date 起，每个工作日 2 名幼儿按名单顺序轮转。"""
+    child_ids = [c.id for c in db.scalars(select(models.Child).where(models.Child.active == True).order_by(models.Child.id)).all()]
+    start = date.fromisoformat(payload["start_date"])
+    days = int(payload.get("days", 10))
+    cycle = payload.get("cycle", "auto")
+    created = []
+    idx = 0
+    d = start
+    for _ in range(days):
+        while d.weekday() >= 5:  # 跳过周末
+            d += timedelta(days=1)
+        pair = [child_ids[(idx + j) % len(child_ids)] for j in range(2)]
+        for cid in pair:
+            db.add(models.DutyRoster(cycle=cycle, date=d.isoformat(), child_id=cid))
+        created.append({"date": d.isoformat(), "child_ids": pair})
+        idx += 2
+        d += timedelta(days=1)
+    db.commit()
+    return {"ok": True, "schedule": created}
+
+
+# ---------------- 能力维度 ----------------
+@app.get("/api/dimensions")
+def list_dimensions(db: Session = Depends(get_db)):
+    rows = db.scalars(select(models.AssessmentDimension).order_by(models.AssessmentDimension.id)).all()
+    return [
+        {"id": r.id, "key": r.key, "name": r.name, "enabled": r.enabled, "weight": r.weight, "description": r.description}
+        for r in rows
+    ]
+
+
+@app.post("/api/dimensions")
+def create_dimension(payload: dict, db: Session = Depends(get_db)):
+    dim = models.AssessmentDimension(
+        key=payload["key"], name=payload["name"],
+        description=payload.get("description"), enabled=payload.get("enabled", True),
+    )
+    db.add(dim)
+    db.commit()
+    db.refresh(dim)
+    return {"id": dim.id, "key": dim.key, "name": dim.name}
+
+
+@app.put("/api/dimensions/{dim_id}")
+def update_dimension(dim_id: int, payload: dict, db: Session = Depends(get_db)):
+    dim = db.get(models.AssessmentDimension, dim_id)
+    if not dim:
+        raise HTTPException(404, "维度不存在")
+    for k in ("name", "enabled", "weight", "description"):
+        if k in payload:
+            setattr(dim, k, payload[k])
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------- 对话（核心） ----------------
+@app.post("/api/chat", response_model=schemas.ChatReply)
+def chat(payload: schemas.ChatRequest, db: Session = Depends(get_db)):
+    child = db.get(models.Child, payload.child_id)
+    if not child:
+        raise HTTPException(404, "幼儿不存在")
+
+    # 新建或继续会话
+    if payload.conversation_id:
+        conv = db.get(models.Conversation, payload.conversation_id)
+        if not conv:
+            raise HTTPException(404, "会话不存在")
+    else:
+        conv = models.Conversation(child_id=child.id, date=date.today().isoformat(), status="active")
+        db.add(conv)
+        db.commit()
+        db.refresh(conv)
+
+    child_text = (payload.text or "").strip()
+    if not child_text:
+        raise HTTPException(400, "语音识别结果为空")
+
+    # 保存幼儿消息
+    db.add(models.Message(conversation_id=conv.id, role="child", text=child_text))
+    db.flush()
+
+    # 查询该会话全部消息（含刚保存的幼儿消息）
+    all_msgs = db.scalars(
+        select(models.Message).where(models.Message.conversation_id == conv.id).order_by(models.Message.id)
+    ).all()
+
+    # 构造历史（映射为 user/assistant）
+    history = [{"role": "user" if m.role == "child" else "assistant", "text": m.text} for m in all_msgs]
+
+    # 近期摘要：最近 6 条消息文本
+    recent = " / ".join(m.text for m in all_msgs[-6:])
+
+    # 小鸭档案
+    ducks = db.scalars(select(models.Duck)).all()
+    ducks_info = "；".join(f"{d.name}：{d.status or '暂无状态'}" for d in ducks)
+
+    # 轮次（一问一答算 1 轮 = 幼儿发言次数，含当前这条）
+    round_num = sum(1 for m in all_msgs if m.role == "child")
+
+    max_rounds = payload.max_rounds
+
+    # 达到最大轮次：强制收尾
+    if round_num >= max_rounds:
+        reply = "谢谢你今天的分享，鸭鸭日记本都记好啦！我们下次再见～"
+        db.add(models.Message(conversation_id=conv.id, role="diary", text=reply))
+        conv.status = "ended"
+        conv.end_reason = "max_rounds"
+        conv.ended_at = datetime.utcnow()
+        db.commit()
+        return schemas.ChatReply(
+            conversation_id=conv.id, reply=reply, ended=True,
+            end_reason="max_rounds", round=round_num,
+        )
+
+    # 调用 LLM
+    try:
+        result = ai_engine.chat_reply(
+            child={"name": child.name, "nickname": child.nickname},
+            recent_summary=recent,
+            ducks_info=ducks_info,
+            history=history,
+            round_num=round_num,
+            max_rounds=max_rounds,
+        )
+    except Exception:
+        result = {"reply": "嗯嗯，我在认真听呢，然后呢？", "ended": False, "end_reason": None}
+
+    reply = result.get("reply", "嗯嗯，我在认真听呢。")
+    ended = bool(result.get("ended", False))
+
+    db.add(models.Message(conversation_id=conv.id, role="diary", text=reply))
+    if ended:
+        conv.status = "ended"
+        conv.end_reason = "complete"
+        conv.ended_at = datetime.utcnow()
+    db.commit()
+
+    return schemas.ChatReply(
+        conversation_id=conv.id, reply=reply, ended=ended,
+        end_reason="complete" if ended else None, round=round_num,
+    )
+
+
+# ---------------- 会话 ---------------- 
+@app.get("/api/conversations")
+def list_conversations(child_id: int | None = None, db: Session = Depends(get_db)):
+    q = select(models.Conversation).order_by(models.Conversation.id.desc())
+    if child_id:
+        q = q.where(models.Conversation.child_id == child_id)
+    rows = db.scalars(q).all()
+    return [
+        {
+            "id": c.id, "child_id": c.child_id, "date": c.date,
+            "status": c.status, "end_reason": c.end_reason,
+            "started_at": c.started_at.isoformat() if c.started_at else None,
+        }
+        for c in rows
+    ]
+
+
+@app.get("/api/conversations/{conv_id}")
+def get_conversation(conv_id: int, db: Session = Depends(get_db)):
+    conv = db.get(models.Conversation, conv_id)
+    if not conv:
+        raise HTTPException(404, "会话不存在")
+    messages = [
+        {"id": m.id, "role": m.role, "text": m.text}
+        for m in sorted(conv.messages, key=lambda x: x.id)
+    ]
+    feeding = [
+        {"id": f.id, "category": f.category, "content": f.content, "duck_id": f.duck_id}
+        for f in db.scalars(select(models.FeedingLog).where(models.FeedingLog.conversation_id == conv_id)).all()
+    ]
+    emotion = db.scalar(select(models.EmotionLog).where(models.EmotionLog.conversation_id == conv_id))
+    assessment = db.scalar(select(models.Assessment).where(models.Assessment.conversation_id == conv_id))
+    scores = []
+    if assessment:
+        for s in db.scalars(select(models.AssessmentScore).where(models.AssessmentScore.assessment_id == assessment.id)).all():
+            dim = db.get(models.AssessmentDimension, s.dimension_id)
+            scores.append({"dimension_id": s.dimension_id, "dimension_name": dim.name if dim else "", "score": s.score, "reason": s.reason})
+
+    return {
+        "id": conv.id, "child_id": conv.child_id, "date": conv.date,
+        "status": conv.status, "end_reason": conv.end_reason,
+        "messages": messages, "feeding_logs": feeding,
+        "emotion": {"emotion": emotion.emotion, "intensity": emotion.intensity, "note": emotion.note} if emotion else None,
+        "assessment": {
+            "id": assessment.id, "status": assessment.status, "overall": assessment.overall, "scores": scores,
+        } if assessment else None,
+    }
+
+
+# ---------------- 提炼与评估 ----------------
+@app.post("/api/conversations/{conv_id}/finalize")
+def finalize(conv_id: int, db: Session = Depends(get_db)):
+    """会话结束后：提炼流水/情绪 + 生成能力评估初评。"""
+    conv = db.get(models.Conversation, conv_id)
+    if not conv:
+        raise HTTPException(404, "会话不存在")
+
+    transcript = "\n".join(f"{'幼儿' if m.role == 'child' else '日记本'}：{m.text}" for m in sorted(conv.messages, key=lambda x: x.id))
+    conv.status = "ended"
+    if not conv.end_reason:
+        conv.end_reason = "manual"
+    conv.ended_at = datetime.utcnow()
+
+    # 提炼
+    try:
+        info = ai_engine.extract_info(transcript)
+    except Exception:
+        info = {"feeding_logs": [], "emotion": {"emotion": "平静", "intensity": 3, "note": ""}, "insight": ""}
+
+    for log in info.get("feeding_logs", []):
+        duck_id = None
+        if log.get("duck_name"):
+            d = db.scalar(select(models.Duck).where(models.Duck.name == log["duck_name"]))
+            duck_id = d.id if d else None
+        db.add(models.FeedingLog(
+            conversation_id=conv_id, child_id=conv.child_id, duck_id=duck_id,
+            category=log.get("category", "其它"), content=log.get("content", ""),
+        ))
+    emo = info.get("emotion", {})
+    db.add(models.EmotionLog(
+        conversation_id=conv_id, child_id=conv.child_id,
+        emotion=emo.get("emotion", "平静"), intensity=emo.get("intensity", 3), note=emo.get("note"),
+    ))
+
+    # 评估初评
+    dims = [
+        {"key": d.key, "name": d.name, "description": d.description}
+        for d in db.scalars(select(models.AssessmentDimension).where(models.AssessmentDimension.enabled == True)).all()
+    ]
+    try:
+        assess = ai_engine.assess_conversation(transcript, dims)
+    except Exception:
+        assess = {"scores": [], "overall": 3.0}
+
+    assessment = models.Assessment(conversation_id=conv_id, child_id=conv.child_id, status="pending", overall=assess.get("overall", 3.0))
+    db.add(assessment)
+    db.commit()
+    db.refresh(assessment)
+
+    key_to_id = {d["key"]: d_id for d_id, d in ((d.id, {"key": d.key}) for d in db.scalars(select(models.AssessmentDimension)).all())}
+    for s in assess.get("scores", []):
+        dim_id = key_to_id.get(s.get("dimension_key"))
+        if dim_id:
+            db.add(models.AssessmentScore(assessment_id=assessment.id, dimension_id=dim_id, score=s.get("score", 3), reason=s.get("reason")))
+
+    db.commit()
+    return {"ok": True, "assessment_id": assessment.id, "insight": info.get("insight", "")}
+
+
+# ---------------- 评估审阅 ----------------
+@app.get("/api/assessments")
+def list_assessments(status: str | None = None, db: Session = Depends(get_db)):
+    q = select(models.Assessment).order_by(models.Assessment.id.desc())
+    if status:
+        q = q.where(models.Assessment.status == status)
+    return [{"id": a.id, "conversation_id": a.conversation_id, "child_id": a.child_id, "status": a.status, "overall": a.overall} for a in db.scalars(q).all()]
+
+
+@app.post("/api/assessments/{assessment_id}/confirm")
+def confirm_assessment(assessment_id: int, payload: schemas.AssessmentConfirm, db: Session = Depends(get_db)):
+    assessment = db.get(models.Assessment, assessment_id)
+    if not assessment:
+        raise HTTPException(404, "评估不存在")
+    if payload.scores:
+        for dim_id, patch in payload.scores.items():
+            row = db.scalar(select(models.AssessmentScore).where(
+                models.AssessmentScore.assessment_id == assessment_id,
+                models.AssessmentScore.dimension_id == dim_id,
+            ))
+            if row:
+                if patch.score is not None:
+                    row.score = patch.score
+                if patch.reason is not None:
+                    row.reason = patch.reason
+    assessment.status = "confirmed"
+    # 重算 overall
+    scores = db.scalars(select(models.AssessmentScore).where(models.AssessmentScore.assessment_id == assessment_id)).all()
+    if scores:
+        assessment.overall = round(sum(s.score for s in scores) / len(scores), 2)
+    db.commit()
+    return {"ok": True, "overall": assessment.overall}
+
+
+# ---------------- 流水/情绪修正 ----------------
+@app.patch("/api/conversations/{conv_id}/logs")
+def patch_logs(conv_id: int, payload: dict, db: Session = Depends(get_db)):
+    if "feeding_logs" in payload:
+        for item in payload["feeding_logs"]:
+            row = db.get(models.FeedingLog, item.get("id"))
+            if row:
+                if "category" in item:
+                    row.category = item["category"]
+                if "content" in item:
+                    row.content = item["content"]
+    if "emotion" in payload:
+        emo = payload["emotion"]
+        row = db.scalar(select(models.EmotionLog).where(models.EmotionLog.conversation_id == conv_id))
+        if row:
+            if "emotion" in emo:
+                row.emotion = emo["emotion"]
+            if "intensity" in emo:
+                row.intensity = emo["intensity"]
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------- 小鸭档案 ----------------
+@app.get("/api/ducks/{duck_id}/archive")
+def get_archive(duck_id: int, db: Session = Depends(get_db)):
+    row = db.scalar(select(models.DuckArchive).where(models.DuckArchive.duck_id == duck_id))
+    return {"duck_id": duck_id, "summary": row.summary if row else None}
+
+
+@app.post("/api/ducks/{duck_id}/summarize")
+def summarize(duck_id: int, db: Session = Depends(get_db)):
+    duck = db.get(models.Duck, duck_id)
+    if not duck:
+        raise HTTPException(404, "小鸭不存在")
+    texts = [
+        f.content
+        for f in db.scalars(select(models.FeedingLog).where(models.FeedingLog.duck_id == duck_id)).all()
+    ]
+    summary = ai_engine.summarize_duck(duck.name, texts)
+    row = db.scalar(select(models.DuckArchive).where(models.DuckArchive.duck_id == duck_id))
+    if row:
+        row.summary = summary
+    else:
+        db.add(models.DuckArchive(duck_id=duck_id, summary=summary))
+    db.commit()
+    return {"duck_id": duck_id, "summary": summary}
+
+
+@app.put("/api/ducks/{duck_id}/archive")
+def update_archive(duck_id: int, payload: dict, db: Session = Depends(get_db)):
+    row = db.scalar(select(models.DuckArchive).where(models.DuckArchive.duck_id == duck_id))
+    if row:
+        row.summary = payload.get("summary")
+    else:
+        db.add(models.DuckArchive(duck_id=duck_id, summary=payload.get("summary")))
+    db.commit()
+    return {"ok": True}
+
+
+# ---------------- 成长曲线分析 ----------------
+@app.get("/api/analysis/growth")
+def growth_analysis(child_id: int, db: Session = Depends(get_db)):
+    """按时间返回该幼儿各维度的评估分数序列（成长曲线）。"""
+    assessments = db.scalars(
+        select(models.Assessment).where(
+            models.Assessment.child_id == child_id,
+            models.Assessment.status == "confirmed",
+        ).order_by(models.Assessment.id)
+    ).all()
+
+    dims = db.scalars(select(models.AssessmentDimension).where(models.AssessmentDimension.enabled == True)).all()
+    series = {d.id: {"key": d.key, "name": d.name, "points": []} for d in dims}
+
+    for a in assessments:
+        conv = db.get(models.Conversation, a.conversation_id)
+        label = conv.date if conv else str(a.id)
+        for s in db.scalars(select(models.AssessmentScore).where(models.AssessmentScore.assessment_id == a.id)).all():
+            if s.dimension_id in series:
+                series[s.dimension_id]["points"].append({"date": label, "score": s.score})
+
+    return {"child_id": child_id, "dimensions": list(series.values())}
+
+
+@app.get("/api/analysis/overview")
+def overview(db: Session = Depends(get_db)):
+    children = db.scalars(select(models.Child).order_by(models.Child.id)).all()
+    result = []
+    for c in children:
+        convs = db.scalars(select(models.Conversation).where(models.Conversation.child_id == c.id)).all()
+        assessments = db.scalars(select(models.Assessment).where(models.Assessment.child_id == c.id, models.Assessment.status == "confirmed")).all()
+        latest = assessments[-1].overall if assessments else None
+        result.append({"child_id": c.id, "name": c.name, "nickname": c.nickname, "conversations": len(convs), "latest_overall": latest})
+    return result
+
+
+# 前端静态托管（生产：由 uvicorn 直接托管 app/frontend）
+FRONTEND_DIR = __import__("pathlib").Path(__file__).resolve().parent.parent / "frontend"
+if FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
+
+
+# 模块加载即初始化数据库与默认维度（兼容 TestClient 与 uvicorn）
+Base.metadata.create_all(bind=engine)
+_seed_dimensions()

@@ -1,0 +1,14 @@
+# CrewAI 核心框架 + LiteLLM（用于接入 DeepSeek 等 OpenAI 兼容模型）
+# 国内网络建议加镜像源：pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt
+crewai[litellm]>=1.15,<2.0
+python-dotenv>=1.0
+
+# 后端 Web 框架与数据层
+fastapi>=0.110
+uvicorn[standard]>=0.29
+sqlalchemy>=2.0
+pydantic>=2.6
+
+# 测试
+pytest>=8.0
+httpx>=0.27

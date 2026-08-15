@@ -1,0 +1,23 @@
+# 密钥与敏感信息
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# CrewAI 运行时产物
+.crewai/
+*.log
+
+# 运行时数据与产物
+data/
+outputs/
+*.db
+
+# 系统
+.DS_Store
