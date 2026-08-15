@@ -13,12 +13,12 @@ def build_crew() -> Crew:
     child_fe = Agent(
         role="前端工程师（幼儿端）",
         goal=(
-            "实现幼儿端页面：按住说话(PTT) 语音对话、开场/过程/结束动画、"
+            "产出幼儿端实现方案说明：按住说话(PTT) 语音对话、开场/过程/结束动画、"
             "大字号大按钮高对比、投影友好"
         ),
         backstory=(
             "你是一名擅长儿童交互的前端工程师，精通 React 与 CSS 动画，"
-            "能把语音与动画体验做得直观、有趣、响应迅速。"
+            "能把语音与动画体验做得直观、有趣、响应迅速。你只输出方案文字，不直接写文件。"
         ),
         llm=llm, verbose=True, allow_delegation=False,
     )
@@ -26,31 +26,31 @@ def build_crew() -> Crew:
     teacher_fe = Agent(
         role="前端工程师（教师端）",
         goal=(
-            "实现教师端页面：班级管理、排班、值日审阅（提炼修正+评估确认）、"
+            "产出教师端实现方案说明：班级管理、排班、值日审阅（提炼修正+评估确认）、"
             "能力成长曲线、明细检索"
         ),
         backstory=(
             "你是一名擅长数据后台的前端工程师，注重信息密度与操作效率，"
-            "能做出清晰、专业、数据完整的教师工作台。"
+            "能做出清晰、专业、数据完整的教师工作台。你只输出方案文字，不直接写文件。"
         ),
         llm=llm, verbose=True, allow_delegation=False,
     )
 
     child_task = Task(
         description=(
-            "实现幼儿端：PTT 语音采集（浏览器 Web Speech API）、对话流、"
-            "鸭鸭日记本动画与语音播报、投影友好的大字号布局。"
+            "产出幼儿端实现方案说明（文字）：PTT 语音采集（浏览器 Web Speech API）、"
+            "对话流、鸭鸭日记本动画与语音播报、投影友好的大字号布局。"
         ),
-        expected_output="幼儿端前端代码（React + Tailwind）。",
+        expected_output="幼儿端实现方案说明（Markdown 文字）。",
         agent=child_fe,
     )
 
     teacher_task = Task(
         description=(
-            "实现教师端：幼儿/小鸭/排班管理、值日审阅（可修正提炼与评估并确认）、"
-            "能力成长曲线图表、对话明细与流水检索。"
+            "产出教师端实现方案说明（文字）：幼儿/小鸭/排班管理、值日审阅"
+            "（可修正提炼与评估并确认）、能力成长曲线图表、对话明细与流水检索。"
         ),
-        expected_output="教师端前端代码（React + Tailwind）。",
+        expected_output="教师端实现方案说明（Markdown 文字）。",
         agent=teacher_fe,
     )
 

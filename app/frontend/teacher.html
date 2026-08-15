@@ -387,8 +387,11 @@ function drawGrowth(wrap, d) {
   });
   svg += '</svg>';
   const legend = h('div', { class: 'row', style: 'margin-top:8px' });
-  dims.forEach((dim, di) => legend.append(h('span', { class: 'muted' }, '● ' + dim.name + '  ')).style.color = colors[di % colors.length]);
-  wrap.append(h('div', { class: 'card chart-wrap', style: 'overflow-x:auto' }, h('div', { style: 'min-width:700px' }).innerHTML ? null : null));
+  dims.forEach((dim, di) => {
+    const s = h('span', { class: 'muted' }, '● ' + dim.name + '  ');
+    s.style.color = colors[di % colors.length];
+    legend.append(s);
+  });
   const chartDiv = h('div', { class: 'card chart-wrap', style: 'overflow-x:auto' });
   chartDiv.innerHTML = `<div style="min-width:700px">${svg}</div>`;
   wrap.append(chartDiv, legend);

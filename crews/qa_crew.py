@@ -13,12 +13,12 @@ def build_crew() -> Crew:
     tester = Agent(
         role="测试工程师",
         goal=(
-            "围绕核心链路（排班→对话→提炼→评估→审阅→成长曲线）编写并运行"
-            "单元/集成/端到端测试，产出通过/不通过结论与缺陷清单"
+            "产出测试方案说明与测试结论：围绕核心链路（排班→对话→提炼→评估→审阅→"
+            "成长曲线）说明用例设计与验证结果"
         ),
         backstory=(
             "你是一名测试工程师，擅长设计覆盖关键路径与边界情况的用例，"
-            "并以可复现的方式给出测试结论。"
+            "并以可复现的方式给出测试结论。你只输出文字，不直接运行测试。"
         ),
         llm=llm, verbose=True, allow_delegation=False,
     )
@@ -31,26 +31,26 @@ def build_crew() -> Crew:
         ),
         backstory=(
             "你是一名严格的代码审查员，能从可维护性、健壮性与安全性角度"
-            "找出隐患并给出可执行的改进建议。"
+            "找出隐患并给出可执行的改进建议。你只输出文字，不修改代码。"
         ),
         llm=llm, verbose=True, allow_delegation=False,
     )
 
     test_task = Task(
         description=(
-            "对已实现的鸭鸭日记本应用编写并运行测试，覆盖核心链路与边界，"
-            "输出测试报告（通过/不通过 + 缺陷清单）。"
+            "产出测试方案说明与结论（文字）：核心链路（排班→对话→提炼→评估→审阅→"
+            "成长曲线）的用例设计与覆盖点、边界情况。"
         ),
-        expected_output="测试报告（结论 + 缺陷清单）。",
+        expected_output="测试方案说明与结论（文字）。",
         agent=tester,
     )
 
     review_task = Task(
         description=(
-            "审查后端与前端代码，对照 API 契约检查一致性，"
-            "输出代码审查意见（问题分级 + 建议）。"
+            "产出代码审查意见（文字）：对照 API 契约检查一致性，"
+            "输出问题分级与改进建议。"
         ),
-        expected_output="代码审查意见。",
+        expected_output="代码审查意见（文字）。",
         agent=reviewer, context=[test_task],
     )
 
