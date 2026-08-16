@@ -1,7 +1,8 @@
 # 鸭鸭日记本 — 验收报告
 
 - 日期：2026-08-16
-- 验收方式：真实运行 + 端到端（含真实 DeepSeek LLM）验证
+- 验收方式：真实运行 + 端到端（含真实 DeepSeek LLM）+ Playwright 真实浏览器截图
+- **v2 更新**：修复 teacher.html `show()` 未 append 节点致命 bug、加种子数据与 demo 评估数据、新增 hash+query 路由兼容
 
 ---
 
@@ -45,6 +46,8 @@
   - 提炼：喂食/清洁/观察三类流水 + 情绪（开心·强度4）正确；
   - 评估：三维度打分（语言4/同理心3/勤劳5）均带引用原句的理由；
   - 确认评估 → 成长曲线数据完整。
+- **真实浏览器截图（Playwright + 真实 Chromium）**：8 张截图全部完整渲染幼儿端/教师端全部 7 个视图，详见 `docs/e2e-screenshot-review.md`。
+- **CrewAI 形式验收**：`outputs/acceptance_e2e_review.md`（基于截图审查报告由 acceptance_crew 产出）。
 
 ## 4. 遗留问题与风险
 

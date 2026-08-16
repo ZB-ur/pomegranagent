@@ -36,6 +36,48 @@ def _seed_dimensions() -> None:
         db.close()
 
 
+def _seed_demo_data() -> None:
+    """首次启动且数据库空时，插入示例幼儿/小鸭/排班，便于开箱演示。"""
+    db = SessionLocal()
+    try:
+        if db.scalar(select(models.Child)) or db.scalar(select(models.Duck)):
+            return  # 已有数据则不重复插入
+        children = [
+            ("王小明", "小明"),
+            ("李小红", "小红"),
+            ("张小华", "小华"),
+            ("赵小乐", "小乐"),
+            ("陈小宝", "小宝"),
+        ]
+        ducks = [
+            ("小黄", "活泼健康，喜欢在水中嬉戏"),
+            ("小白", "性格温和，喜欢吃菜叶"),
+            ("小橙", "好奇心强，喜欢探索"),
+        ]
+        for name, nick in children:
+            db.add(models.Child(name=name, nickname=nick, active=True))
+        for name, status in ducks:
+            db.add(models.Duck(name=name, status=status))
+        db.commit()
+
+        # 本周示例排班（每日 2 名幼儿）
+        today = date.today()
+        ids = [c.id for c in db.scalars(select(models.Child).order_by(models.Child.id)).all()]
+        cycle = f"示例-{today.isocalendar().week}周"
+        d = today
+        idx = 0
+        for _ in range(7):
+            while d.weekday() >= 5:
+                d += timedelta(days=1)
+            for j in range(2):
+                db.add(models.DutyRoster(cycle=cycle, date=d.isoformat(), child_id=ids[(idx + j) % len(ids)]))
+            idx += 2
+            d += timedelta(days=1)
+        db.commit()
+    finally:
+        db.close()
+
+
 # ---------------- 幼儿 ----------------
 @app.get("/api/children", response_model=list[schemas.ChildOut])
 def list_children(db: Session = Depends(get_db)):
@@ -527,3 +569,4 @@ if FRONTEND_DIR.exists():
 # 模块加载即初始化数据库与默认维度（兼容 TestClient 与 uvicorn）
 Base.metadata.create_all(bind=engine)
 _seed_dimensions()
+_seed_demo_data()
