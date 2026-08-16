@@ -4,6 +4,7 @@
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
 <title>鸭鸭日记本 · 幼儿端</title>
+<link rel="icon" href="/assets/duck-front-favicon.png" type="image/png">
 <style>
   :root {
     --duck-yellow: #ffb800;
@@ -165,7 +166,19 @@ function el(tag, attrs, ...children) {
   for (const c of children) n.append(c);
   return n;
 }
-function duckIcon(size) { const d = el('div'); d.className = 'duck-avatar'; d.style.width = d.style.height = size + 'px'; d.innerHTML = DUCK_SVG; return d; }
+function duckIcon(size, src) {
+  const d = el('div');
+  d.className = 'duck-avatar';
+  d.style.width = d.style.height = size + 'px';
+  if (src) {
+    const img = el('img', { src, alt: '鸭鸭日记本' });
+    img.style.cssText = 'width:100%;height:100%;object-fit:contain;display:block';
+    d.append(img);
+  } else {
+    d.innerHTML = DUCK_SVG;
+  }
+  return d;
+}
 
 const root = document.getElementById('root');
 const state = { child: null, convId: null, round: 0, maxRounds: 3, recognizing: false, ended: false };
@@ -195,7 +208,7 @@ function startChat(child) {
 function showOpening() {
   root.innerHTML = '';
   const ov = el('div', { class: 'overlay' });
-  ov.append(duckIcon(160));
+  ov.append(duckIcon(160, '/assets/duck-happy.png'));
   ov.append(el('div', { class: 'title' }, `你好呀，${state.child.nickname || state.child.name}！`));
   ov.append(el('div', { style: 'font-size:20px;color:#666' }, '我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～'));
   ov.append(el('button', { class: 'btn start', onclick: startConversation }, '开始说话'));
@@ -223,7 +236,9 @@ function startConversation() {
 
   pttWrap.append(ptt, hint, fb);
   const stage = document.getElementById('stage');
-  root.append(el('header', null, duckIcon(64), el('div', null, el('h1', null, '鸭鸭日记本'), el('div', { class: 'sub' }, `值日小朋友：${state.child.nickname || state.child.name}`))));
+  root.append(el('header', null, duckIcon(64, '/assets/duck-front-128.png'), el('div', null, el('h1', null, '鸭鸭日记本'), el('div', { class: 'sub' }, `值日小朋友：${state.child.nickname || state.child.name}`))));
+  // header 鸭子头像引用（录音中切换为 listening 表情）
+  const headerDuck = root.querySelector('header .duck-avatar img');
   root.append(msgs, pttWrap);
 
   addBubble('diary', `今天你照顾小鸭了吗？跟日记本说说吧～`);
@@ -245,11 +260,18 @@ function startConversation() {
     state.recognizing = false;
     pttWrap.classList.remove('recording');
     hint.textContent = '按住大按钮说话，松开就发送';
+    if (headerDuck) headerDuck.src = '/assets/duck-front-128.png';
   }
-  ptt.addEventListener('mousedown', e => { e.preventDefault(); if (!rec) return; try { rec.start(); state.recognizing = true; pttWrap.classList.add('recording'); hint.textContent = '正在听……'; } catch (err) {} });
+  function startRecVisuals() {
+    state.recognizing = true;
+    pttWrap.classList.add('recording');
+    hint.textContent = '正在听……';
+    if (headerDuck) headerDuck.src = '/assets/duck-listening.png';
+  }
+  ptt.addEventListener('mousedown', e => { e.preventDefault(); if (!rec) return; try { rec.start(); startRecVisuals(); } catch (err) {} });
   ptt.addEventListener('mouseup', () => { if (state.recognizing) try { rec.stop(); } catch (err) {} });
   ptt.addEventListener('mouseleave', () => { if (state.recognizing) try { rec.stop(); } catch (err) {} });
-  ptt.addEventListener('touchstart', e => { e.preventDefault(); if (!rec) return; try { rec.start(); state.recognizing = true; pttWrap.classList.add('recording'); hint.textContent = '正在听……'; } catch (err) {} });
+  ptt.addEventListener('touchstart', e => { e.preventDefault(); if (!rec) return; try { rec.start(); startRecVisuals(); } catch (err) {} });
   ptt.addEventListener('touchend', () => { if (state.recognizing) try { rec.stop(); } catch (err) {} });
 
   function addBubble(role, text) {
@@ -289,8 +311,8 @@ function startConversation() {
   function showEnding() {
     root.innerHTML = '';
     const ov = el('div', { class: 'overlay' });
-    ov.append(duckIcon(160));
-    ov.append(el('div', { class: 'title' }, '太棒啦！'));
+ov.append(duckIcon(160, '/assets/duck-encouraging.png'));
+  ov.append(el('div', { class: 'title' }, '太棒啦！'));
     ov.append(el('div', { style: 'font-size:20px;color:#666' }, '今天的故事，鸭鸭日记本都记好啦～'));
     ov.append(el('button', { class: 'btn', onclick: renderPicker }, '换下一位小朋友'));
     root.append(ov);
