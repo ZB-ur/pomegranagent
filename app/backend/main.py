@@ -1,5 +1,8 @@
 """鸭鸭日记本 FastAPI 后端应用入口。"""
+import logging
+import time
 from datetime import date, datetime, timedelta
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -9,6 +12,19 @@ from sqlalchemy.orm import Session
 
 from . import ai_engine, models, schemas
 from .database import Base, SessionLocal, engine, get_db
+
+# 日志：同时输出到 logs/app.log 与控制台，便于排查
+LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    handlers=[
+        logging.FileHandler(LOG_DIR / "app.log", encoding="utf-8"),
+        logging.StreamHandler(),
+    ],
+)
+logger = logging.getLogger("duck_diary")
 
 app = FastAPI(title="鸭鸭日记本", version="1.0.0")
 
@@ -236,9 +252,11 @@ def update_dimension(dim_id: int, payload: dict, db: Session = Depends(get_db)):
 # ---------------- 对话（核心） ----------------
 @app.post("/api/chat", response_model=schemas.ChatReply)
 def chat(payload: schemas.ChatRequest, db: Session = Depends(get_db)):
+    t0 = time.time()
     child = db.get(models.Child, payload.child_id)
     if not child:
         raise HTTPException(404, "幼儿不存在")
+    logger.info("chat 请求: child_id=%s text=%r", payload.child_id, (payload.text or "")[:50])
 
     # 新建或继续会话
     if payload.conversation_id:
@@ -307,7 +325,9 @@ def chat(payload: schemas.ChatRequest, db: Session = Depends(get_db)):
             round_num=round_num,
             max_rounds=max_rounds,
         )
-    except Exception:
+        logger.info("chat LLM 完成: 耗时=%.2fs reply=%r", time.time() - t0, result.get("reply", "")[:50])
+    except Exception as e:
+        logger.error("chat LLM 失败: %s", e)
         result = {"reply": "嗯嗯，我在认真听呢，然后呢？", "ended": False, "end_reason": None}
 
     reply = result.get("reply", "嗯嗯，我在认真听呢。")
@@ -540,6 +560,7 @@ def update_archive(duck_id: int, payload: dict, db: Session = Depends(get_db)):
 @app.get("/api/tts")
 async def tts(text: str):
     """Edge-TTS 神经语音合成，返回 mp3 音频流。失败降级由前端处理。"""
+    t0 = time.time()
     text = (text or "").strip()
     if not text:
         raise HTTPException(400, "text 不能为空")
@@ -555,11 +576,14 @@ async def tts(text: str):
             if chunk["type"] == "audio":
                 audio.extend(chunk["data"])
         if not audio:
+            logger.error("tts 合成结果为空: text=%r", text[:50])
             raise HTTPException(502, "TTS 合成结果为空")
+        logger.info("tts 完成: 耗时=%.2fs 字节=%d text=%r", time.time() - t0, len(audio), text[:50])
         return Response(content=bytes(audio), media_type="audio/mpeg")
     except HTTPException:
         raise
     except Exception as e:  # noqa: BLE001
+        logger.error("tts 失败: %s text=%r", e, text[:50])
         raise HTTPException(502, f"TTS 合成失败：{e}")
 
 

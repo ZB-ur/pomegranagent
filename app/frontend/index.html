@@ -324,7 +324,7 @@ function startConversation() {
   let failCount = 0;  // 连续识别失败计数
   if (SR) {
     rec = new SR(); rec.lang = 'zh-CN'; rec.interimResults = false; rec.continuous = false;
-    rec.onresult = e => { const t = e.results[0][0].transcript; stopRec(); sendText(t); };
+    rec.onresult = e => { const t = e.results[0][0].transcript; stopRec(); hint.textContent = '识别到：' + t; sendText(t); };
     rec.onerror = (e) => {
       stopRec();  // 先重置视觉状态（会覆盖 hint，后面再设置错误提示）
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
@@ -334,7 +334,7 @@ function startConversation() {
         hint.textContent = failCount >= 3 ? '好像没听到声音，可以请老师帮忙输入文字～' : '没听清，再试一次吧';
       } else {
         failCount++;
-        hint.textContent = failCount >= 3 ? '语音有点小问题，可以用下方文字输入～' : '再试一次吧';
+        hint.textContent = failCount >= 3 ? `语音失败(${e.error})，可用下方文字输入～` : `识别失败(${e.error})，再试一次`;
       }
       if (failCount >= 3) fb.style.display = 'flex';
     };
