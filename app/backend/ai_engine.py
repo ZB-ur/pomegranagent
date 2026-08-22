@@ -3,6 +3,7 @@
 统一通过 DeepSeek（OpenAI 兼容接口）以结构化 JSON 输出。
 """
 import json
+import logging
 import os
 import re
 
@@ -11,14 +12,16 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+logger = logging.getLogger("duck_diary.ai_engine")
+
 BASE_URL = os.getenv("DEEPSEEK_BASE_URL", "https://api.deepseek.com/v1").rstrip("/")
 API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 TIMEOUT = float(os.getenv("DEEPSEEK_TIMEOUT", "120"))
 
 
-def _llm(messages: list[dict], json_mode: bool = False) -> str:
-    """调用 DeepSeek chat completions，返回文本内容。"""
+def _llm(messages: list[dict], json_mode: bool = False, retries: int = 1) -> str:
+    """调用 DeepSeek chat completions，返回文本内容（失败自动重试 1 次）。"""
     payload = {
         "model": MODEL,
         "messages": messages,
@@ -28,12 +31,22 @@ def _llm(messages: list[dict], json_mode: bool = False) -> str:
         payload["response_format"] = {"type": "json_object"}
 
     headers = {"Authorization": f"Bearer {API_KEY}", "Content-Type": "application/json"}
-    resp = httpx.post(
-        f"{BASE_URL}/chat/completions", json=payload, headers=headers, timeout=TIMEOUT
-    )
-    resp.raise_for_status()
-    data = resp.json()
-    return data["choices"][0]["message"]["content"] or ""
+    last_err = None
+    for attempt in range(retries + 1):
+        try:
+            resp = httpx.post(
+                f"{BASE_URL}/chat/completions", json=payload, headers=headers, timeout=TIMEOUT
+            )
+            resp.raise_for_status()
+            data = resp.json()
+            return data["choices"][0]["message"]["content"] or ""
+        except Exception as e:  # noqa: BLE001
+            last_err = e
+            logger.warning("LLM 调用失败（第 %d 次）：%s", attempt + 1, e)
+            if attempt < retries:
+                continue
+    logger.error("LLM 调用最终失败：%s", last_err)
+    raise last_err
 
 
 def _parse_json(text: str) -> dict:

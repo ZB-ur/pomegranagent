@@ -89,6 +89,16 @@ class EmotionLog(Base):
     occurred_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class InsightNote(Base):
+    __tablename__ = "insight_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"))
+    child_id: Mapped[int] = mapped_column(ForeignKey("children.id"))
+    content: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class AssessmentDimension(Base):
     __tablename__ = "assessment_dimensions"
 

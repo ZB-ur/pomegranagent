@@ -169,3 +169,39 @@ def test_frontend_served():
 def test_teacher_served():
     r = client.get("/teacher.html")
     assert r.status_code == 200
+
+
+# ---------------- 错误路径 ----------------
+def test_404_not_found():
+    assert client.get("/api/children/99999").status_code == 404
+    assert client.get("/api/ducks/99999").status_code == 404
+    assert client.get("/api/conversations/99999").status_code == 404
+    assert client.post("/api/conversations/99999/finalize").status_code == 404
+    assert client.post("/api/assessments/99999/confirm", json={"scores": {}}).status_code == 404
+
+
+def test_chat_400_empty_text(monkeypatch):
+    monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
+    cid = client.post("/api/children", json={"name": "错误测试"}).json()["id"]
+    # 空文本应返回 400
+    r = client.post("/api/chat", json={"child_id": cid, "text": ""})
+    assert r.status_code == 400
+    # 不存在的幼儿应返回 404
+    r = client.post("/api/chat", json={"child_id": 99999, "text": "你好"})
+    assert r.status_code == 404
+
+
+def test_tts_400_empty():
+    assert client.get("/api/tts", params={"text": ""}).status_code == 400
+
+
+def test_finalize_insight_persisted(monkeypatch):
+    monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
+    monkeypatch.setattr(ai_engine, "extract_info", _mock_extract)
+    monkeypatch.setattr(ai_engine, "assess_conversation", _mock_assess)
+    cid = client.post("/api/children", json={"name": "心得测试", "nickname": "心得"}).json()["id"]
+    r = client.post("/api/chat", json={"child_id": cid, "text": "我喂了小鸭"})
+    conv_id = r.json()["conversation_id"]
+    client.post(f"/api/conversations/{conv_id}/finalize")
+    detail = client.get(f"/api/conversations/{conv_id}").json()
+    assert detail["insight"] == "主动描述喂食过程"  # _mock_extract 返回的心得已落库

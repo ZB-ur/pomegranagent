@@ -196,33 +196,61 @@ function _pickVoice() {
   if (!zh.length) return null;
   return zh.find(v => /neural|natural|google|xiaoxiao|yunxi|yunjian|tingting|huihui/i.test(v.name)) || zh[0];
 }
+// ===== Edge-TTS 神经语音（优先），失败降级浏览器 TTS =====
+let _ttsAvailable = null;  // null=未测, true=可用, false=不可用
+let _currentAudio = null;
+async function _speakEdgeTTS(text) {
+  if (_ttsAvailable === false) return false;
+  try {
+    const resp = await fetch(API + '/api/tts?text=' + encodeURIComponent(text));
+    if (!resp.ok) { _ttsAvailable = false; return false; }
+    const blob = await resp.blob();
+    const url = URL.createObjectURL(blob);
+    if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
+    const audio = new Audio(url);
+    _currentAudio = audio;
+    _ttsAvailable = true;
+    audio.onended = () => { URL.revokeObjectURL(url); _currentAudio = null; };
+    await audio.play();
+    return true;
+  } catch (e) {
+    _ttsAvailable = false;
+    return false;
+  }
+}
 function speak(text) {
   if (!('speechSynthesis' in window)) return;
   const synth = window.speechSynthesis;
   synth.cancel();
-  // 延迟一帧再播：规避 cancel()+speak() 同帧竞态（Chrome/Safari 已知 bug，
-  // 会导致紧随 cancel 的新语音被误取消，表现为"首页有声、后续无声"）
+  if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
+  // 延迟一帧再播：规避 cancel()+speak() 同帧竞态（Chrome/Safari 已知 bug）
   setTimeout(() => {
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'zh-CN';
-    u.rate = 0.95;   // 稍慢，像耐心陪伴
-    u.pitch = 1.2;   // 略高，活泼亲切
-    u.volume = 1;
-    const v = _pickVoice();
-    if (v) u.voice = v;
-    u.onerror = () => {
-      // 指定 voice 播放失败时，用默认 voice 重播一次（降级兜底）
-      if (u.voice) {
-        const u2 = new SpeechSynthesisUtterance(text);
-        u2.lang = 'zh-CN'; u2.rate = 0.95; u2.pitch = 1.2; u2.volume = 1;
-        synth.speak(u2);
-      }
-    };
-    synth.speak(u);
+    _speakEdgeTTS(text).then(ok => {
+      if (ok) return;  // Edge-TTS 播放成功
+      // 降级：浏览器 SpeechSynthesis
+      const u = new SpeechSynthesisUtterance(text);
+      u.lang = 'zh-CN';
+      u.rate = 0.95;   // 稍慢，像耐心陪伴
+      u.pitch = 1.2;   // 略高，活泼亲切
+      u.volume = 1;
+      const v = _pickVoice();
+      if (v) u.voice = v;
+      u.onerror = () => {
+        if (u.voice) {
+          const u2 = new SpeechSynthesisUtterance(text);
+          u2.lang = 'zh-CN'; u2.rate = 0.95; u2.pitch = 1.2; u2.volume = 1;
+          synth.speak(u2);
+        }
+      };
+      synth.speak(u);
+    });
   }, 120);
 }
 // 静音（录音/播报冲突时调用）
-function stopSpeak() { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }
+function stopSpeak() {
+  if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+  if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
+}
 
 
 const root = document.getElementById('root');
@@ -293,10 +321,23 @@ function startConversation() {
   // 语音识别
   const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
   let rec = null;
+  let failCount = 0;  // 连续识别失败计数
   if (SR) {
     rec = new SR(); rec.lang = 'zh-CN'; rec.interimResults = false; rec.continuous = false;
     rec.onresult = e => { const t = e.results[0][0].transcript; stopRec(); sendText(t); };
-    rec.onerror = () => stopRec();
+    rec.onerror = (e) => {
+      if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
+        hint.textContent = '麦克风被禁用了，请点浏览器地址栏的麦克风图标允许使用';
+      } else if (e.error === 'no-speech') {
+        failCount++;
+        hint.textContent = failCount >= 3 ? '好像没听到声音，可以请老师帮忙输入文字～' : '没听清，再试一次吧';
+      } else {
+        failCount++;
+        hint.textContent = failCount >= 3 ? '语音有点小问题，可以用下方文字输入～' : '再试一次吧';
+      }
+      if (failCount >= 3) fb.style.display = 'flex';
+      stopRec();
+    };
     rec.onend = () => stopRec();
   } else {
     hint.textContent = '当前浏览器不支持语音，请用下方文字输入';

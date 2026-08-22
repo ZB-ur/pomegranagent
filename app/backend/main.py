@@ -1,7 +1,7 @@
 """鸭鸭日记本 FastAPI 后端应用入口。"""
 from datetime import date, datetime, timedelta
 
-from fastapi import Depends, FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
@@ -270,9 +270,14 @@ def chat(payload: schemas.ChatRequest, db: Session = Depends(get_db)):
     # 近期摘要：最近 6 条消息文本
     recent = " / ".join(m.text for m in all_msgs[-6:])
 
-    # 小鸭档案
+    # 小鸭档案（注入 status + archive summary，支持回答历史情况）
     ducks = db.scalars(select(models.Duck)).all()
-    ducks_info = "；".join(f"{d.name}：{d.status or '暂无状态'}" for d in ducks)
+    parts = []
+    for d in ducks:
+        arch = db.scalar(select(models.DuckArchive).where(models.DuckArchive.duck_id == d.id))
+        summary = arch.summary if arch and arch.summary else None
+        parts.append(f"{d.name}：{d.status or '暂无状态'}" + (f"；档案：{summary}" if summary else ""))
+    ducks_info = "；".join(parts)
 
     # 轮次（一问一答算 1 轮 = 幼儿发言次数，含当前这条）
     round_num = sum(1 for m in all_msgs if m.role == "child")
@@ -352,6 +357,7 @@ def get_conversation(conv_id: int, db: Session = Depends(get_db)):
         for f in db.scalars(select(models.FeedingLog).where(models.FeedingLog.conversation_id == conv_id)).all()
     ]
     emotion = db.scalar(select(models.EmotionLog).where(models.EmotionLog.conversation_id == conv_id))
+    insight = db.scalar(select(models.InsightNote).where(models.InsightNote.conversation_id == conv_id))
     assessment = db.scalar(select(models.Assessment).where(models.Assessment.conversation_id == conv_id))
     scores = []
     if assessment:
@@ -364,6 +370,7 @@ def get_conversation(conv_id: int, db: Session = Depends(get_db)):
         "status": conv.status, "end_reason": conv.end_reason,
         "messages": messages, "feeding_logs": feeding,
         "emotion": {"emotion": emotion.emotion, "intensity": emotion.intensity, "note": emotion.note} if emotion else None,
+        "insight": insight.content if insight else None,
         "assessment": {
             "id": assessment.id, "status": assessment.status, "overall": assessment.overall, "scores": scores,
         } if assessment else None,
@@ -404,6 +411,11 @@ def finalize(conv_id: int, db: Session = Depends(get_db)):
         conversation_id=conv_id, child_id=conv.child_id,
         emotion=emo.get("emotion", "平静"), intensity=emo.get("intensity", 3), note=emo.get("note"),
     ))
+
+    # 心得/亮点落库（若提炼出非空 insight）
+    insight_text = (info.get("insight") or "").strip()
+    if insight_text:
+        db.add(models.InsightNote(conversation_id=conv_id, child_id=conv.child_id, content=insight_text))
 
     # 评估初评
     dims = [
@@ -522,6 +534,33 @@ def update_archive(duck_id: int, payload: dict, db: Session = Depends(get_db)):
         db.add(models.DuckArchive(duck_id=duck_id, summary=payload.get("summary")))
     db.commit()
     return {"ok": True}
+
+
+# ---------------- 语音合成（Edge-TTS） ----------------
+@app.get("/api/tts")
+async def tts(text: str):
+    """Edge-TTS 神经语音合成，返回 mp3 音频流。失败降级由前端处理。"""
+    text = (text or "").strip()
+    if not text:
+        raise HTTPException(400, "text 不能为空")
+    if len(text) > 500:
+        text = text[:500]
+    try:
+        import edge_tts
+        communicate = edge_tts.Communicate(
+            text, "zh-CN-XiaoxiaoNeural", rate="+0%", pitch="+5Hz"
+        )
+        audio = bytearray()
+        async for chunk in communicate.stream():
+            if chunk["type"] == "audio":
+                audio.extend(chunk["data"])
+        if not audio:
+            raise HTTPException(502, "TTS 合成结果为空")
+        return Response(content=bytes(audio), media_type="audio/mpeg")
+    except HTTPException:
+        raise
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"TTS 合成失败：{e}")
 
 
 # ---------------- 成长曲线分析 ----------------
