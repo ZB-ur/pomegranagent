@@ -1,4 +1,5 @@
 """鸭鸭日记本 FastAPI 后端应用入口。"""
+import hashlib
 import logging
 import time
 from datetime import date, datetime, timedelta
@@ -179,6 +180,21 @@ def list_roster(cycle: str | None = None, db: Session = Depends(get_db)):
         {"id": r.id, "cycle": r.cycle, "date": r.date, "child_id": r.child_id}
         for r in rows
     ]
+
+
+@app.get("/api/roster/today")
+def today_roster(db: Session = Depends(get_db)):
+    """今日值日生（含幼儿信息）。无排班返回空列表，前端降级展示全部幼儿。"""
+    today = date.today().isoformat()
+    rows = db.scalars(
+        select(models.DutyRoster).where(models.DutyRoster.date == today).order_by(models.DutyRoster.id)
+    ).all()
+    children = []
+    for r in rows:
+        c = db.get(models.Child, r.child_id)
+        if c:
+            children.append({"id": c.id, "name": c.name, "nickname": c.nickname, "avatar": c.avatar})
+    return children
 
 
 @app.post("/api/roster")
@@ -557,15 +573,26 @@ def update_archive(duck_id: int, payload: dict, db: Session = Depends(get_db)):
 
 
 # ---------------- 语音合成（Edge-TTS） ----------------
+TTS_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "tts_cache"
+
+
 @app.get("/api/tts")
 async def tts(text: str):
-    """Edge-TTS 神经语音合成，返回 mp3 音频流。失败降级由前端处理。"""
+    """Edge-TTS 神经语音合成，返回 mp3 音频流。按文本哈希缓存，失败降级由前端处理。"""
     t0 = time.time()
     text = (text or "").strip()
     if not text:
         raise HTTPException(400, "text 不能为空")
     if len(text) > 500:
         text = text[:500]
+
+    # 缓存：相同文本直接返回已合成 mp3（秒回，避免重复合成）
+    cache_key = hashlib.md5(text.encode("utf-8")).hexdigest()
+    cache_file = TTS_CACHE_DIR / f"{cache_key}.mp3"
+    if cache_file.exists():
+        logger.info("tts 缓存命中: text=%r", text[:50])
+        return Response(content=cache_file.read_bytes(), media_type="audio/mpeg")
+
     try:
         import edge_tts
         communicate = edge_tts.Communicate(
@@ -579,6 +606,8 @@ async def tts(text: str):
             logger.error("tts 合成结果为空: text=%r", text[:50])
             raise HTTPException(502, "TTS 合成结果为空")
         logger.info("tts 完成: 耗时=%.2fs 字节=%d text=%r", time.time() - t0, len(audio), text[:50])
+        TTS_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+        cache_file.write_bytes(bytes(audio))
         return Response(content=bytes(audio), media_type="audio/mpeg")
     except HTTPException:
         raise

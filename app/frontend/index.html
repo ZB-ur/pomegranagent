@@ -94,6 +94,8 @@
   #ptt.recording { background: var(--coral); box-shadow: 0 2px 0 #c94b3c, 0 8px 18px rgba(255, 107, 94, .3); }
   #ptt-hint { font-size: 17px; color: #888; }
   .recording #ptt-hint { color: var(--coral); }
+  #ptt.busy { background: #cbd5e1; box-shadow: 0 3px 0 #94a3b8; cursor: not-allowed; opacity: .7; }
+  #ptt.busy + #ptt-hint { color: var(--ink); }
 
   /* 波纹 */
   .wave { display: none; }
@@ -199,73 +201,91 @@ function _pickVoice() {
 // ===== Edge-TTS 神经语音（优先），失败降级浏览器 TTS =====
 let _ttsAvailable = null;  // null=未测, true=可用, false=服务不可用
 let _currentAudio = null;
-async function _speakEdgeTTS(text) {
-  if (_ttsAvailable === false) return false;
-  let blob;
-  try {
-    const resp = await fetch(API + '/api/tts?text=' + encodeURIComponent(text));
-    if (!resp.ok) { _ttsAvailable = false; return false; }
-    blob = await resp.blob();
-  } catch (e) {
-    _ttsAvailable = false;  // 网络/服务不可用，后续直接降级
-    return false;
-  }
-  // 播放（audio.play 可能因 autoplay 拦截失败，此时不永久降级，下次有用户手势再试）
-  try {
-    const url = URL.createObjectURL(blob);
-    if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
-    const audio = new Audio(url);
-    _currentAudio = audio;
-    _ttsAvailable = true;
-    audio.onended = () => { URL.revokeObjectURL(url); _currentAudio = null; };
-    await audio.play();
-    return true;
-  } catch (e) {
-    return false;  // 播放被拦截，降级浏览器 TTS，但下次仍尝试 Edge-TTS
-  }
+function _speakEdgeTTS(text) {
+  return new Promise(async (resolve) => {
+    if (_ttsAvailable === false) { resolve(false); return; }
+    let blob;
+    try {
+      const resp = await fetch(API + '/api/tts?text=' + encodeURIComponent(text));
+      if (!resp.ok) { _ttsAvailable = false; resolve(false); return; }
+      blob = await resp.blob();
+    } catch (e) {
+      _ttsAvailable = false;  // 网络/服务不可用，后续直接降级
+      resolve(false);
+      return;
+    }
+    try {
+      const url = URL.createObjectURL(blob);
+      if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
+      const audio = new Audio(url);
+      _currentAudio = audio;
+      _ttsAvailable = true;
+      audio.onended = () => { URL.revokeObjectURL(url); if (_currentAudio === audio) _currentAudio = null; resolve(true); };
+      audio.onerror = () => { if (_currentAudio === audio) _currentAudio = null; resolve(false); };
+      await audio.play();
+    } catch (e) {
+      resolve(false);  // 播放被拦截，降级浏览器 TTS，但下次仍尝试 Edge-TTS
+    }
+  });
 }
 function _speakBrowser(text, synth) {
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'zh-CN';
-  u.rate = 0.95;   // 稍慢，像耐心陪伴
-  u.pitch = 1.2;   // 略高，活泼亲切
-  u.volume = 1;
-  const v = _pickVoice();
-  if (v) u.voice = v;
-  u.onerror = () => {
-    if (u.voice) {
-      const u2 = new SpeechSynthesisUtterance(text);
-      u2.lang = 'zh-CN'; u2.rate = 0.95; u2.pitch = 1.2; u2.volume = 1;
-      synth.speak(u2);
-    }
-  };
-  synth.speak(u);
+  return new Promise((resolve) => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-CN';
+    u.rate = 0.95;   // 稍慢，像耐心陪伴
+    u.pitch = 1.2;   // 略高，活泼亲切
+    u.volume = 1;
+    const v = _pickVoice();
+    if (v) u.voice = v;
+    let settled = false;
+    const done = () => { if (!settled) { settled = true; resolve(); } };
+    u.onend = done;
+    u.onerror = () => {
+      if (u.voice) {
+        const u2 = new SpeechSynthesisUtterance(text);
+        u2.lang = 'zh-CN'; u2.rate = 0.95; u2.pitch = 1.2; u2.volume = 1;
+        u2.onend = done;
+        u2.onerror = done;
+        synth.speak(u2);
+      } else {
+        done();
+      }
+    };
+    synth.speak(u);
+  });
 }
 function speak(text) {
-  if (!('speechSynthesis' in window)) return;
-  const synth = window.speechSynthesis;
-  synth.cancel();
-  if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
-  // 是否有过用户手势：无手势时 Edge-TTS 会被 autoplay 拦截，直接用浏览器 TTS
-  const hasGesture = !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
-  // 延迟一帧再播：规避 cancel()+speak() 同帧竞态（Chrome/Safari 已知 bug）
-  setTimeout(() => {
-    if (!hasGesture) { _speakBrowser(text, synth); return; }
-    _speakEdgeTTS(text).then(ok => {
-      if (ok) return;  // Edge-TTS 播放成功
-      _speakBrowser(text, synth);
-    });
-  }, 120);
+  return new Promise((resolve) => {
+    if (!('speechSynthesis' in window)) { resolve(); return; }
+    const synth = window.speechSynthesis;
+    synth.cancel();
+    if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
+    // 是否有过用户手势：无手势时 Edge-TTS 会被 autoplay 拦截，直接用浏览器 TTS
+    const hasGesture = !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
+    // 延迟一帧再播：规避 cancel()+speak() 同帧竞态（Chrome/Safari 已知 bug）
+    setTimeout(() => {
+      if (!hasGesture) { _speakBrowser(text, synth).then(resolve); return; }
+      _speakEdgeTTS(text).then(ok => {
+        if (ok) { resolve(); return; }
+        _speakBrowser(text, synth).then(resolve);
+      });
+    }, 120);
+  });
 }
 // 静音（录音/播报冲突时调用）
 function stopSpeak() {
   if ('speechSynthesis' in window) window.speechSynthesis.cancel();
   if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
 }
+// 预合成：提前触发后端 TTS 合成并缓存，之后播报秒回（结果丢弃，缓存生效）
+function preloadTTS(text) {
+  if (!text) return;
+  fetch(API + '/api/tts?text=' + encodeURIComponent(text)).catch(() => {});
+}
 
 
 const root = document.getElementById('root');
-const state = { child: null, convId: null, round: 0, maxRounds: 3, recognizing: false, ended: false };
+const state = { child: null, convId: null, round: 0, maxRounds: 3, recognizing: false, ended: false, busy: false };
 
 // 欢迎页：点击"开始"解锁音频播放（autoplay 限制），保证全程统一 Edge-TTS 晓晓音色
 function showWelcome() {
@@ -277,6 +297,9 @@ function showWelcome() {
   const btn = el('button', { class: 'btn start', onclick: renderPicker }, '开始');
   ov.append(btn);
   root.append(ov);
+  // 欢迎页停留期间预合成固定引导语，点"开始"后秒播
+  preloadTTS('今天轮到谁值日呀？点一点你的名字吧');
+  preloadTTS('太棒啦！今天的故事，鸭鸭日记本都记好啦，明天再来找我玩吧');
 }
 
 function renderPicker() {
@@ -284,12 +307,20 @@ function renderPicker() {
   const picker = el('div', { id: 'picker' });
   picker.append(el('h2', null, '今天轮到谁值日呀？'));
   const grid = el('div', { class: 'grid' });
-  fetch(API + '/api/children').then(r => r.json()).then(children => {
+  // 优先显示当天值日生，无排班则降级展示全部幼儿
+  fetch(API + '/api/roster/today').then(r => r.json()).then(today => {
+    if (today && today.length) {
+      return today;
+    }
+    return fetch(API + '/api/children').then(r => r.json());
+  }).then(children => {
     children.forEach(c => {
       grid.append(el('div', { class: 'child-card', onclick: () => startChat(c) },
         el('span', { class: 'emoji' }, c.avatar || '🐤'),
         document.createTextNode(c.nickname || c.name)));
     });
+    // 预合成当天值日生的开场语（含各自小名），点谁秒播
+    children.forEach(c => preloadTTS(openingTextFor(c)));
   });
   picker.append(grid);
   root.append(picker);
@@ -302,15 +333,23 @@ function startChat(child) {
   showOpening();
 }
 
+function openingTextFor(child) {
+  const nick = child.nickname || child.name;
+  return `你好呀，${nick}！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～`;
+}
+
 function showOpening() {
   root.innerHTML = '';
+  const nick = state.child.nickname || state.child.name;
   const ov = el('div', { class: 'overlay' });
   ov.append(duckIcon(160, '/assets/duck-happy.png'));
-  ov.append(el('div', { class: 'title' }, `你好呀，${state.child.nickname || state.child.name}！`));
-  ov.append(el('div', { style: 'font-size:20px;color:#666' }, '我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～'));
-  ov.append(el('button', { class: 'btn start', onclick: startConversation }, '开始说话'));
+  ov.append(el('div', { class: 'title' }, `你好呀，${nick}！`));
+  ov.append(el('div', { style: 'font-size:20px;color:#666' }, '我是鸭鸭日记本，正在认真听你讲～'));
   root.append(ov);
-  speak(`你好呀，${state.child.nickname || state.child.name}！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事`);
+  // 语音播报完毕后自动进入对话（保留开场仪式感，消除多余点击）
+  speak(openingTextFor(state.child)).then(() => {
+    if (!state.ended && document.body.contains(ov)) startConversation();
+  });
 }
 
 function startConversation() {
@@ -367,10 +406,15 @@ function startConversation() {
     fb.style.display = 'flex';
   }
 
+  function setBusy(busy) {
+    state.busy = busy;
+    ptt.classList.toggle('busy', busy);
+    hint.textContent = busy ? '鸭鸭在想……' : '按住大按钮说话，松开就发送';
+  }
   function stopRec() {
     state.recognizing = false;
     pttWrap.classList.remove('recording');
-    hint.textContent = '按住大按钮说话，松开就发送';
+    hint.textContent = state.busy ? '鸭鸭在想……' : '按住大按钮说话，松开就发送';
     if (headerDuck) headerDuck.src = '/assets/duck-front-128.png';
   }
   function startRecVisuals() {
@@ -380,10 +424,10 @@ function startConversation() {
     hint.textContent = '正在听……';
     if (headerDuck) headerDuck.src = '/assets/duck-listening.png';
   }
-  ptt.addEventListener('mousedown', e => { e.preventDefault(); if (!rec) return; try { rec.start(); startRecVisuals(); } catch (err) {} });
+  ptt.addEventListener('mousedown', e => { e.preventDefault(); if (!rec || state.busy) return; try { rec.start(); startRecVisuals(); } catch (err) {} });
   ptt.addEventListener('mouseup', () => { if (state.recognizing) try { rec.stop(); } catch (err) {} });
   ptt.addEventListener('mouseleave', () => { if (state.recognizing) try { rec.stop(); } catch (err) {} });
-  ptt.addEventListener('touchstart', e => { e.preventDefault(); if (!rec) return; try { rec.start(); startRecVisuals(); } catch (err) {} });
+  ptt.addEventListener('touchstart', e => { e.preventDefault(); if (!rec || state.busy) return; try { rec.start(); startRecVisuals(); } catch (err) {} });
   ptt.addEventListener('touchend', () => { if (state.recognizing) try { rec.stop(); } catch (err) {} });
 
   function addBubble(role, text) {
@@ -397,15 +441,27 @@ function startConversation() {
 
   async function sendText(text) {
     addBubble('child', text);
-    const resp = await fetch(API + '/api/chat', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ child_id: state.child.id, text, conversation_id: state.convId, max_rounds: state.maxRounds }),
-    });
-    const data = await resp.json();
-    state.convId = data.conversation_id; state.round = data.round;
-    addBubble('diary', data.reply);
-    speak(data.reply);
-    if (data.ended) { endSession(); }
+    setBusy(true);  // 锁死 PTT，等待 LLM 回复
+    try {
+      const resp = await fetch(API + '/api/chat', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ child_id: state.child.id, text, conversation_id: state.convId, max_rounds: state.maxRounds }),
+      });
+      const data = await resp.json();
+      state.convId = data.conversation_id; state.round = data.round;
+      addBubble('diary', data.reply);
+      if (data.ended) {
+        await speak(data.reply);
+        setBusy(false);
+        endSession();
+        return;
+      }
+      await speak(data.reply);  // 播报完毕后解锁
+      setBusy(false);
+    } catch (e) {
+      setBusy(false);
+      addBubble('diary', '嗯嗯，我在认真听呢，然后呢？');
+    }
   }
 
   async function endSession() {
