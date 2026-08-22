@@ -224,31 +224,36 @@ async function _speakEdgeTTS(text) {
     return false;  // 播放被拦截，降级浏览器 TTS，但下次仍尝试 Edge-TTS
   }
 }
+function _speakBrowser(text, synth) {
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'zh-CN';
+  u.rate = 0.95;   // 稍慢，像耐心陪伴
+  u.pitch = 1.2;   // 略高，活泼亲切
+  u.volume = 1;
+  const v = _pickVoice();
+  if (v) u.voice = v;
+  u.onerror = () => {
+    if (u.voice) {
+      const u2 = new SpeechSynthesisUtterance(text);
+      u2.lang = 'zh-CN'; u2.rate = 0.95; u2.pitch = 1.2; u2.volume = 1;
+      synth.speak(u2);
+    }
+  };
+  synth.speak(u);
+}
 function speak(text) {
   if (!('speechSynthesis' in window)) return;
   const synth = window.speechSynthesis;
   synth.cancel();
   if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
+  // 是否有过用户手势：无手势时 Edge-TTS 会被 autoplay 拦截，直接用浏览器 TTS
+  const hasGesture = !!(navigator.userActivation && navigator.userActivation.hasBeenActive);
   // 延迟一帧再播：规避 cancel()+speak() 同帧竞态（Chrome/Safari 已知 bug）
   setTimeout(() => {
+    if (!hasGesture) { _speakBrowser(text, synth); return; }
     _speakEdgeTTS(text).then(ok => {
       if (ok) return;  // Edge-TTS 播放成功
-      // 降级：浏览器 SpeechSynthesis
-      const u = new SpeechSynthesisUtterance(text);
-      u.lang = 'zh-CN';
-      u.rate = 0.95;   // 稍慢，像耐心陪伴
-      u.pitch = 1.2;   // 略高，活泼亲切
-      u.volume = 1;
-      const v = _pickVoice();
-      if (v) u.voice = v;
-      u.onerror = () => {
-        if (u.voice) {
-          const u2 = new SpeechSynthesisUtterance(text);
-          u2.lang = 'zh-CN'; u2.rate = 0.95; u2.pitch = 1.2; u2.volume = 1;
-          synth.speak(u2);
-        }
-      };
-      synth.speak(u);
+      _speakBrowser(text, synth);
     });
   }, 120);
 }
@@ -261,6 +266,18 @@ function stopSpeak() {
 
 const root = document.getElementById('root');
 const state = { child: null, convId: null, round: 0, maxRounds: 3, recognizing: false, ended: false };
+
+// 欢迎页：点击"开始"解锁音频播放（autoplay 限制），保证全程统一 Edge-TTS 晓晓音色
+function showWelcome() {
+  root.innerHTML = '';
+  const ov = el('div', { class: 'overlay' });
+  ov.append(duckIcon(200, '/assets/duck-front-512.png'));
+  ov.append(el('div', { class: 'title' }, '鸭鸭日记本'));
+  ov.append(el('div', { style: 'font-size:20px;color:#666' }, '和值日小朋友一起，记录小鸭的成长故事～'));
+  const btn = el('button', { class: 'btn start', onclick: renderPicker }, '开始');
+  ov.append(btn);
+  root.append(ov);
+}
 
 function renderPicker() {
   root.innerHTML = '';
@@ -426,7 +443,7 @@ function confetti() {
   }
 }
 
-renderPicker();
+showWelcome();
 </script>
 </body>
 </html>
