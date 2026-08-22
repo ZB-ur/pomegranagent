@@ -326,6 +326,7 @@ function startConversation() {
     rec = new SR(); rec.lang = 'zh-CN'; rec.interimResults = false; rec.continuous = false;
     rec.onresult = e => { const t = e.results[0][0].transcript; stopRec(); sendText(t); };
     rec.onerror = (e) => {
+      stopRec();  // 先重置视觉状态（会覆盖 hint，后面再设置错误提示）
       if (e.error === 'not-allowed' || e.error === 'service-not-allowed') {
         hint.textContent = '麦克风被禁用了，请点浏览器地址栏的麦克风图标允许使用';
       } else if (e.error === 'no-speech') {
@@ -336,7 +337,6 @@ function startConversation() {
         hint.textContent = failCount >= 3 ? '语音有点小问题，可以用下方文字输入～' : '再试一次吧';
       }
       if (failCount >= 3) fb.style.display = 'flex';
-      stopRec();
     };
     rec.onend = () => stopRec();
   } else {
