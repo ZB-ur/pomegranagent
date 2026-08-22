@@ -198,15 +198,28 @@ function _pickVoice() {
 }
 function speak(text) {
   if (!('speechSynthesis' in window)) return;
-  const u = new SpeechSynthesisUtterance(text);
-  u.lang = 'zh-CN';
-  u.rate = 0.95;   // 稍慢，像耐心陪伴
-  u.pitch = 1.2;   // 略高，活泼亲切
-  u.volume = 1;
-  const v = _pickVoice();
-  if (v) u.voice = v;
-  window.speechSynthesis.cancel();
-  window.speechSynthesis.speak(u);
+  const synth = window.speechSynthesis;
+  synth.cancel();
+  // 延迟一帧再播：规避 cancel()+speak() 同帧竞态（Chrome/Safari 已知 bug，
+  // 会导致紧随 cancel 的新语音被误取消，表现为"首页有声、后续无声"）
+  setTimeout(() => {
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'zh-CN';
+    u.rate = 0.95;   // 稍慢，像耐心陪伴
+    u.pitch = 1.2;   // 略高，活泼亲切
+    u.volume = 1;
+    const v = _pickVoice();
+    if (v) u.voice = v;
+    u.onerror = () => {
+      // 指定 voice 播放失败时，用默认 voice 重播一次（降级兜底）
+      if (u.voice) {
+        const u2 = new SpeechSynthesisUtterance(text);
+        u2.lang = 'zh-CN'; u2.rate = 0.95; u2.pitch = 1.2; u2.volume = 1;
+        synth.speak(u2);
+      }
+    };
+    synth.speak(u);
+  }, 120);
 }
 // 静音（录音/播报冲突时调用）
 function stopSpeak() { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }
