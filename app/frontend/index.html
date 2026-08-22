@@ -197,14 +197,21 @@ function _pickVoice() {
   return zh.find(v => /neural|natural|google|xiaoxiao|yunxi|yunjian|tingting|huihui/i.test(v.name)) || zh[0];
 }
 // ===== Edge-TTS 神经语音（优先），失败降级浏览器 TTS =====
-let _ttsAvailable = null;  // null=未测, true=可用, false=不可用
+let _ttsAvailable = null;  // null=未测, true=可用, false=服务不可用
 let _currentAudio = null;
 async function _speakEdgeTTS(text) {
   if (_ttsAvailable === false) return false;
+  let blob;
   try {
     const resp = await fetch(API + '/api/tts?text=' + encodeURIComponent(text));
     if (!resp.ok) { _ttsAvailable = false; return false; }
-    const blob = await resp.blob();
+    blob = await resp.blob();
+  } catch (e) {
+    _ttsAvailable = false;  // 网络/服务不可用，后续直接降级
+    return false;
+  }
+  // 播放（audio.play 可能因 autoplay 拦截失败，此时不永久降级，下次有用户手势再试）
+  try {
     const url = URL.createObjectURL(blob);
     if (_currentAudio) { _currentAudio.pause(); _currentAudio = null; }
     const audio = new Audio(url);
@@ -214,8 +221,7 @@ async function _speakEdgeTTS(text) {
     await audio.play();
     return true;
   } catch (e) {
-    _ttsAvailable = false;
-    return false;
+    return false;  // 播放被拦截，降级浏览器 TTS，但下次仍尝试 Edge-TTS
   }
 }
 function speak(text) {
