@@ -96,6 +96,12 @@
 | ASR | 抽象接口；MVP 浏览器 Web Speech API，预留腾讯云/讯飞 |
 | 结构化输出 | LLM 返回 JSON（对话提炼 / 评估） |
 
+> **实现落地说明（2026-08-22 更新，标注与规格的偏差）**：
+> 1. **前端技术栈**：实际采用**原生 HTML/CSS/JS（零构建、零 CDN）**，未用 React + Vite + Tailwind + Framer Motion。原因：单机 Windows 开箱即用，避免 node 构建链。功能等价覆盖（组件化交互 + CSS 动画），但技术栈与规格不一致，属**有意为之的务实简化**。
+> 2. **TTS**：已落地 Edge-TTS（`zh-CN-XiaoxiaoNeural` 神经语音，后端 `/api/tts` 接口），失败降级浏览器 SpeechSynthesis——与规格一致。
+> 3. **ASR**：仍用浏览器 Web Speech API，**未实现后端 `ASRProvider` 可插拔抽象**（前端直采）。
+> 4. **WebSocket**：架构图提到但实际未用，HTTP 请求/响应已满足单机需求。
+
 ## 7. 数据模型
 
 核心实体（SQLite）：

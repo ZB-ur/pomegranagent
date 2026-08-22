@@ -1,153 +1,98 @@
-# CrewAI + DeepSeek V4 Pro 配置模板
+# 鸭鸭日记本 🦆
 
-一个开箱即用的 CrewAI 多智能体项目模板，已接入 **DeepSeek V4 Pro**（`deepseek-v4-pro`）模型。
+一款面向幼儿园的**个人教学辅助 Web 应用**。幼儿通过「按住说话」与 AI 角色「鸭鸭日记本」语音对话，记录饲养小鸭的过程；系统自动提炼饲养流水、情绪、心得，并对幼儿进行隐性的多维能力评估，教师端做数据沉淀与成长分析。
 
-## 环境信息
+## 功能
 
-| 项 | 值 |
-| --- | --- |
-| CrewAI | 1.15.x（`crewai[litellm]`） |
-| 模型 | DeepSeek V4 Pro（2026-08-13 正式 GA） |
-| 模型名 | `deepseek-v4-pro` |
-| 接口 | OpenAI 兼容，base_url `https://api.deepseek.com/v1` |
-| Python | 3.13 |
+- **幼儿端**：IP 形象（柯尔鸭）+ 全程语音引导 + 按住说话（PTT）+ 对话流 + 开场/结束动画，投影友好大字号
+- **教师端**：幼儿/小鸭/排班管理、值日审阅（提炼修正 + 星级评分 + 确认）、能力成长曲线、明细检索
+- **AI 引擎**：对话（角色扮演 + 轮次控制 + 提前终止 + 历史感知）、信息提炼、多维评估（打分 + 理由）、小鸭档案汇总
+- **CrewAI 研发团队**：5 Crew 11 Agent + Flow 图工程编排（用于持续研发）
 
-> 注意：DeepSeek 旧的 `deepseek-chat` / `deepseek-reasoner` 别名已于 **2026-07-24 停用**，请使用 `deepseek-v4-pro` 或 `deepseek-v4-flash`。
+## 技术栈
 
-## ⚠️ Python 版本要求（重要）
+| 层 | 选型 |
+|---|---|
+| 前端 | 原生 HTML/CSS/JS（零构建零 CDN，单机开箱即用） |
+| 后端 | FastAPI + SQLAlchemy + SQLite |
+| LLM | DeepSeek `deepseek-v4-pro`（OpenAI 兼容接口） |
+| TTS | Edge-TTS（神经语音，失败降级浏览器 TTS） |
+| ASR | 浏览器 Web Speech API |
+| 研发编排 | CrewAI（5 Crew + Flow 图工程） |
 
-CrewAI 1.15.x 要求 Python **3.10 ~ 3.13**（`>=3.10,<3.14`），**不支持 3.14**，也低于 3.10 的版本不可用。
+## 快速开始
 
-你机器上的情况：
-
-| Python | 版本 | 是否可用 |
-| --- | --- | --- |
-| Homebrew `python3` | 3.14.x | ❌ 太新 |
-| macOS 自带 `/usr/bin/python3` | 3.9.6 | ❌ 太老 |
-| WorkBuddy 内置 Python | 3.13.12 | ✅ 可用 |
-
-**彻底脱离 WorkBuddy 独立运行（推荐）**：用 Homebrew 装一个标准 Python 3.13：
+### macOS / Linux
 
 ```bash
-brew install python@3.13
-
-# 然后用它重建项目内虚拟环境
 cd pomegranagent
-python3.13 -m venv .venv
+python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
+cp .env.example .env      # 填入真实 DEEPSEEK_API_KEY
+./run.sh                  # 或 uvicorn app.backend.main:app --port 8000
 ```
 
-之后 `python3.13` 就是系统级命令，完全不依赖 WorkBuddy。
+### Windows
 
-> 当前项目 `.venv` 是用 WorkBuddy 内置的 3.13.12 创建的，只要 `~/.workbuddy` 目录保留即可正常使用；若你要彻底卸载 WorkBuddy，请按上面步骤用 `python@3.13` 重建。
+```bat
+cd pomegranagent
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+copy .env.example .env    # 填入真实 DEEPSEEK_API_KEY
+run.bat                   # 双击，或 uvicorn app.backend.main:app --port 8000
+```
+
+启动后浏览器访问：
+
+- **幼儿端**：http://localhost:8000/
+- **教师端**：http://localhost:8000/teacher.html
+
+> 首次启动自动插入示例数据（5 幼儿 / 3 小鸭 / 排班），便于开箱演示。
 
 ## 目录结构
 
 ```
 pomegranagent/
-├── .env                  # 密钥与模型配置（已 gitignore，勿提交）
-├── .env.example          # 配置模板
-├── .gitignore
-├── requirements.txt      # 依赖清单
-├── README.md
-├── config/
-│   ├── __init__.py
-│   └── llm.py            # DeepSeek LLM 集中配置（单点修改、全局生效）
-├── crews/
-│   ├── __init__.py
-│   └── research_crew.py  # 示例 crew：研究员 -> 撰稿人
-├── main.py               # 入口
-└── scripts/
-    └── test_connection.py  # 快速验证连接与 key 有效性
+├── app/
+│   ├── backend/          # FastAPI 后端
+│   │   ├── main.py       # 路由（含 /api/tts 等）
+│   │   ├── models.py     # SQLAlchemy 数据模型
+│   │   ├── schemas.py    # Pydantic 模型
+│   │   ├── ai_engine.py  # 对话/提炼/评估/小鸭档案
+│   │   └── database.py   # SQLite 连接
+│   └── frontend/         # 幼儿端 + 教师端 + IP 素材
+│       ├── index.html    # 幼儿端
+│       ├── teacher.html  # 教师端
+│       └── assets/       # 柯尔鸭 IP 素材
+├── crews/                # CrewAI 研发团队（5 Crew）
+├── flows/                # Flow 图工程编排
+├── tests/                # 集成测试 + e2e + 截图
+├── docs/                 # 需求/方案/评估报告
+├── config/llm.py         # DeepSeek 集中配置
+├── main.py               # CrewAI 流水线入口
+├── run.sh / run.bat      # 一键启动脚本
+└── requirements.txt
 ```
 
-## 快速开始
-
-项目使用**项目内虚拟环境 `.venv`**，完全独立于 WorkBuddy——脱离 WorkBuddy 后，只要有系统 Python（≥3.10，推荐 3.11+）即可照常运行。
+## 测试
 
 ```bash
-# 1. 进入项目
-cd pomegranagent
-
-# 2. 创建虚拟环境（首次）
-python3 -m venv .venv
-source .venv/bin/activate        # Windows: .venv\Scripts\activate
-
-# 3. 安装依赖
-pip install -r requirements.txt
-
-# 4. 配置密钥：复制 .env.example 为 .env 并填入真实 key
-cp .env.example .env
-
-# 5. 验证连接
-python scripts/test_connection.py
-
-# 6. 运行示例 crew
-python main.py
+pytest tests/test_api.py -q      # 集成测试（13 个）
+python tests/e2e.py              # 端到端（真实 LLM）
+python tests/screenshot.py       # Playwright 全页面截图
 ```
 
-> `.venv` 已加入 `.gitignore`，不会随 Git 提交。以后每次使用前先 `source .venv/bin/activate` 激活环境即可。
+## 关键设计
 
-## DeepSeek 配置说明
+- **AI 角色**：「鸭鸭日记本」——会说话的日记本，**不是**任何一只真实小鸭；小鸭是幼儿照顾的对象
+- **对话机制**：一问一答算 1 轮，默认最大 3 轮；信息充分可提前终止；注入幼儿档案 + 近期摘要 + 小鸭档案营造「活人感」
+- **评估**：AI 初评 + 教师确认，按次打分 + 周期汇总，幼儿全程无感知
+- **语音**：Edge-TTS 神经语音（温柔女声）优先，失败自动降级浏览器 TTS
 
-所有模型相关配置集中在 `config/llm.py`，通过 `.env` 控制：
+## 成本与安全
 
-```bash
-DEEPSEEK_API_KEY=sk-xxx
-DEEPSEEK_MODEL=deepseek-v4-pro
-DEEPSEEK_BASE_URL=https://api.deepseek.com/v1
-DEEPSEEK_REASONING_EFFORT=     # 可选：low / high / max
-DEEPSEEK_MAX_TOKENS=8192       # 最大输出 token
-DEEPSEEK_TIMEOUT=120           # 请求超时（秒）
-```
-
-关键实现（`config/llm.py`）：
-
-```python
-from crewai import LLM
-
-llm = LLM(
-    model="openai/deepseek-v4-pro",          # openai 前缀走 OpenAI 兼容接口
-    base_url="https://api.deepseek.com/v1",
-    api_key=os.getenv("DEEPSEEK_API_KEY"),
-    max_tokens=8192,
-    timeout=120,
-)
-```
-
-要点：
-
-- **模型前缀**：CrewAI 的 `LLM` 底层是 LiteLLM，模型名必须带 provider 前缀。接入 DeepSeek 用 `openai/` 前缀 + 自定义 `base_url` 最稳妥。
-- **思考模式**：V4 Pro 默认开启 thinking（返回 `reasoning_content`）。若只想拿最终答案，可设置 `DEEPSEEK_REASONING_EFFORT` 或在 `LLM` 传 `reasoning_effort` 调整强度。
-- **温度参数**：推理模型可能忽略 `temperature`，若设置了却不生效属正常现象。
-
-## 如何扩展
-
-在 `crews/research_crew.py` 的 `build_crew()` 中新增 Agent / Task 即可：
-
-```python
-new_agent = Agent(
-    role="...", goal="...", backstory="...",
-    llm=llm, verbose=True,
-)
-new_task = Task(description="...", expected_output="...", agent=new_agent)
-```
-
-所有 Agent 共享同一个 `llm` 实例；如需给某个 Agent 单独换模型，可在该 Agent 的 `llm=` 传入新的 `LLM(...)` 实例。
-
-## 成本与安全提示
-
-- **轮换密钥**：本 key 曾明文出现在对话中，建议尽快到 DeepSeek 控制台 reset。
-- **密钥管理**：key 只放在 `.env`（已加入 `.gitignore`），切勿硬编码进源码或提交到 Git。
-- **成本**：多智能体单次运行会触发多次 LLM 调用，V4 Pro 价格约为 Flash 的 3 倍；DeepSeek 官方预告近期将整体上调 API 定价，重度使用请提前评估。
-- **中文输出**：若在 Windows 遇到 GBK 编码报错，运行前设置 `PYTHONIOENCODING=utf-8`。
-
-## 常见问题
-
-| 问题 | 处理 |
-| --- | --- |
-| `deepseek-chat` 报 400 / 模型不存在 | 旧别名已停用，改用 `deepseek-v4-pro` |
-| `content` 为空、只有思考过程 | 默认 thinking 模式，调整 `DEEPSEEK_REASONING_EFFORT` |
-| 温度不生效 | 推理模型忽略 temperature，属正常 |
-| 超时 | 调大 `DEEPSEEK_TIMEOUT` |
+- **密钥**：`DEEPSEEK_API_KEY` 只放 `.env`（已 gitignore），勿提交
+- **成本**：对话/提炼/评估均调用 DeepSeek，按量计费；V4 Pro 价格约为 Flash 的 3 倍
+- **中文编码**：Windows 遇 GBK 报错时，运行前设 `PYTHONIOENCODING=utf-8`
