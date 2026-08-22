@@ -180,6 +180,38 @@ function duckIcon(size, src) {
   return d;
 }
 
+// ===== 全局语音播报（拟人化） =====
+let _voices = [];
+function _loadVoices() {
+  if (!('speechSynthesis' in window)) return;
+  _voices = window.speechSynthesis.getVoices();
+}
+if ('speechSynthesis' in window) {
+  _loadVoices();
+  window.speechSynthesis.onvoiceschanged = _loadVoices;
+}
+function _pickVoice() {
+  // 优先自然/神经中文音色，避免机械的默认音
+  const zh = _voices.filter(v => v.lang && v.lang.toLowerCase().indexOf('zh') === 0);
+  if (!zh.length) return null;
+  return zh.find(v => /neural|natural|google|xiaoxiao|yunxi|yunjian|tingting|huihui/i.test(v.name)) || zh[0];
+}
+function speak(text) {
+  if (!('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'zh-CN';
+  u.rate = 0.95;   // 稍慢，像耐心陪伴
+  u.pitch = 1.2;   // 略高，活泼亲切
+  u.volume = 1;
+  const v = _pickVoice();
+  if (v) u.voice = v;
+  window.speechSynthesis.cancel();
+  window.speechSynthesis.speak(u);
+}
+// 静音（录音/播报冲突时调用）
+function stopSpeak() { if ('speechSynthesis' in window) window.speechSynthesis.cancel(); }
+
+
 const root = document.getElementById('root');
 const state = { child: null, convId: null, round: 0, maxRounds: 3, recognizing: false, ended: false };
 
@@ -197,6 +229,7 @@ function renderPicker() {
   });
   picker.append(grid);
   root.append(picker);
+  speak('今天轮到谁值日呀？点一点你的名字吧');
 }
 
 function startChat(child) {
@@ -213,6 +246,7 @@ function showOpening() {
   ov.append(el('div', { style: 'font-size:20px;color:#666' }, '我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～'));
   ov.append(el('button', { class: 'btn start', onclick: startConversation }, '开始说话'));
   root.append(ov);
+  speak(`你好呀，${state.child.nickname || state.child.name}！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事`);
 }
 
 function startConversation() {
@@ -263,6 +297,7 @@ function startConversation() {
     if (headerDuck) headerDuck.src = '/assets/duck-front-128.png';
   }
   function startRecVisuals() {
+    stopSpeak();  // 录音开始先静音，避免 TTS 干扰识别
     state.recognizing = true;
     pttWrap.classList.add('recording');
     hint.textContent = '正在听……';
@@ -281,12 +316,6 @@ function startConversation() {
     msgs.append(b);
     msgs.scrollTop = msgs.scrollHeight;
     return b;
-  }
-
-  function speak(text) {
-    if (!('speechSynthesis' in window)) return;
-    const u = new SpeechSynthesisUtterance(text); u.lang = 'zh-CN'; u.rate = 1.0; u.pitch = 1.15;
-    speechSynthesis.cancel(); speechSynthesis.speak(u);
   }
 
   async function sendText(text) {
@@ -311,12 +340,13 @@ function startConversation() {
   function showEnding() {
     root.innerHTML = '';
     const ov = el('div', { class: 'overlay' });
-ov.append(duckIcon(160, '/assets/duck-encouraging.png'));
-  ov.append(el('div', { class: 'title' }, '太棒啦！'));
+    ov.append(duckIcon(160, '/assets/duck-encouraging.png'));
+    ov.append(el('div', { class: 'title' }, '太棒啦！'));
     ov.append(el('div', { style: 'font-size:20px;color:#666' }, '今天的故事，鸭鸭日记本都记好啦～'));
     ov.append(el('button', { class: 'btn', onclick: renderPicker }, '换下一位小朋友'));
     root.append(ov);
     confetti();
+    speak('太棒啦！今天的故事，鸭鸭日记本都记好啦，明天再来找我玩吧');
   }
 }
 
