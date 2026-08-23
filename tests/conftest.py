@@ -25,6 +25,22 @@ from app.backend.main import _seed_dimensions, app  # noqa: E402
 from app.backend.settings import DEFAULT_APP_DB_PATH  # noqa: E402
 
 
+class _NonStartingAnalysisWorker:
+    """Test lifespan seam: deterministic tests must claim jobs themselves."""
+
+    def start(self) -> None:
+        pass
+
+    def stop(self, timeout_seconds: float = 5.0) -> None:
+        pass
+
+    def status(self) -> str:
+        return "not_started"
+
+
+app.state.analysis_worker_factory = _NonStartingAnalysisWorker
+
+
 def _sha256(path: Path) -> str | None:
     return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
 

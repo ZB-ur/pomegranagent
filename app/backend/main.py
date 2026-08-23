@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import ai_engine, auth, models, schemas
+from .analysis_worker import AnalysisWorker
 from .api_errors import install_api_error_handling
 from .auth import require_teacher_session
 from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
@@ -43,7 +44,19 @@ async def lifespan(app: FastAPI):
     _seed_dimensions()
     if DB_MODE == "app":
         _seed_demo_data()
-    yield
+    factory = getattr(app.state, "analysis_worker_factory", None)
+    worker = (
+        factory()
+        if callable(factory)
+        else AnalysisWorker(session_factory=SessionLocal, analyzer=ai_engine)
+    )
+    worker.start()
+    app.state.analysis_worker_status_provider = worker.status
+    try:
+        yield
+    finally:
+        worker.stop(timeout_seconds=5.0)
+        app.state.analysis_worker_status_provider = lambda: "not_started"
 
 
 app = FastAPI(title="鸭鸭日记本", version="1.0.0", lifespan=lifespan)

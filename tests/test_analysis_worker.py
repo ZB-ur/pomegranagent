@@ -1,0 +1,885 @@
+"""Durable analysis job leasing, projection, recovery, and retry contracts."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+from threading import Event
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+
+from app.backend import models
+from app.backend.analysis_worker import AnalysisWorker
+from app.backend.database import SessionLocal
+from app.backend.main import app
+from app.backend.services import analysis
+
+
+NOW = datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc)
+
+
+def _ended_conversation_with_job(
+    db_session,
+    *,
+    available_at=NOW,
+    messages: list[tuple[str, str]] | None = None,
+):
+    child = models.Child(name="小雨", nickname="雨雨", active=True)
+    db_session.add(child)
+    db_session.flush()
+    conversation = models.Conversation(
+        child_id=child.id,
+        date="2026-08-23",
+        status="ended",
+        ended_at=NOW,
+        frozen_last_message_id=None,
+    )
+    db_session.add(conversation)
+    db_session.flush()
+    message_rows = []
+    for role, text in messages or [("child", "我给小黄添了菜叶")]:
+        message = models.Message(
+            conversation_id=conversation.id,
+            role=role,
+            text=text,
+        )
+        db_session.add(message)
+        db_session.flush()
+        message_rows.append(message)
+    conversation.frozen_last_message_id = message_rows[-1].id
+    job = models.AnalysisJob(
+        conversation_id=conversation.id,
+        frozen_last_message_id=message_rows[-1].id,
+        status="pending",
+        available_at=available_at,
+        created_at=NOW,
+        updated_at=NOW,
+    )
+    db_session.add(job)
+    db_session.commit()
+    return conversation, job
+
+
+class FakeAnalysisEngine:
+    """In-process provider double: no network or application database access."""
+
+    def __init__(self, *, extraction, assessment, on_call=None):
+        self.extraction = extraction
+        self.assessment = assessment
+        self.on_call = on_call
+        self.extract_calls: list[str] = []
+        self.assessment_calls: list[tuple[str, list[dict]]] = []
+
+    def extract_info(self, transcript: str) -> dict:
+        self.extract_calls.append(transcript)
+        if self.on_call is not None:
+            self.on_call("extract")
+        if isinstance(self.extraction, Exception):
+            raise self.extraction
+        return self.extraction
+
+    def assess_conversation(self, transcript: str, dimensions: list[dict]) -> dict:
+        self.assessment_calls.append((transcript, dimensions))
+        if self.on_call is not None:
+            self.on_call("assess")
+        if isinstance(self.assessment, Exception):
+            raise self.assessment
+        return self.assessment
+
+
+class TrackingSessionFactory:
+    """Proves provider calls happen only after the read session is closed."""
+
+    def __init__(self):
+        self.open_sessions = 0
+
+    def __call__(self):
+        session = SessionLocal()
+        original_close = session.close
+        closed = False
+        self.open_sessions += 1
+
+        def close():
+            nonlocal closed
+            if not closed:
+                closed = True
+                self.open_sessions -= 1
+            original_close()
+
+        session.close = close
+        return session
+
+
+def _analysis_output():
+    return {
+        "feeding_logs": [
+            {"category": "喂食", "content": " 给小黄添了菜叶 ", "duck_name": "小黄"},
+            {"category": "观察", "content": "小黄吃完了", "duck_name": None},
+        ],
+        "emotion": {"emotion": "开心", "intensity": 4, "note": "愿意继续分享"},
+        "insight": "会主动观察小鸭的食量。",
+    }
+
+
+def _assessment_output():
+    return {
+        "scores": [
+            {"dimension_key": "language", "score": 4, "reason": "说清了菜叶。"},
+            {"dimension_key": "empathy", "score": 5, "reason": "关心小黄。"},
+            {"dimension_key": "diligence", "score": 3, "reason": "主动添菜叶。"},
+        ],
+        "overall": 99,
+    }
+
+
+def _projection_counts(db_session, conversation_id: int) -> dict[str, int]:
+    assessment_ids = select(models.Assessment.id).where(
+        models.Assessment.conversation_id == conversation_id
+    )
+    return {
+        "feeding": db_session.scalar(
+            select(func.count(models.FeedingLog.id)).where(
+                models.FeedingLog.conversation_id == conversation_id
+            )
+        ),
+        "emotion": db_session.scalar(
+            select(func.count(models.EmotionLog.id)).where(
+                models.EmotionLog.conversation_id == conversation_id
+            )
+        ),
+        "insight": db_session.scalar(
+            select(func.count(models.InsightNote.id)).where(
+                models.InsightNote.conversation_id == conversation_id
+            )
+        ),
+        "assessment": db_session.scalar(
+            select(func.count(models.Assessment.id)).where(
+                models.Assessment.conversation_id == conversation_id
+            )
+        ),
+        "scores": db_session.scalar(
+            select(func.count(models.AssessmentScore.id)).where(
+                models.AssessmentScore.assessment_id.in_(assessment_ids)
+            )
+        ),
+    }
+
+
+def test_claims_due_jobs_oldest_first_with_one_attempt_and_a_lease(db_session):
+    """Catches choosing a newer job or claiming a job without durable ownership."""
+    _, first = _ended_conversation_with_job(
+        db_session,
+        available_at=NOW - timedelta(seconds=2),
+    )
+    _, second = _ended_conversation_with_job(
+        db_session,
+        available_at=NOW - timedelta(seconds=1),
+    )
+
+    claimed = analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    )
+
+    assert claimed == first.id
+    db_session.expire_all()
+    first_saved = db_session.get(models.AnalysisJob, first.id)
+    second_saved = db_session.get(models.AnalysisJob, second.id)
+    assert first_saved is not None
+    assert first_saved.status == "processing"
+    assert first_saved.attempt_count == 1
+    assert first_saved.lease_owner == "worker-a"
+    assert first_saved.lease_expires_at == (NOW + timedelta(seconds=30)).replace(tzinfo=None)
+    assert second_saved is not None
+    assert second_saved.status == "pending"
+
+
+def test_restart_recovers_only_expired_processing_jobs_and_preserves_attempts(db_session):
+    """Catches startup recovery stealing a live lease or resetting retry history."""
+    _, expired = _ended_conversation_with_job(db_session)
+    _, live = _ended_conversation_with_job(db_session)
+    expired.status = "processing"
+    expired.attempt_count = 2
+    expired.lease_owner = "former-worker"
+    expired.lease_expires_at = NOW - timedelta(seconds=1)
+    live.status = "processing"
+    live.attempt_count = 1
+    live.lease_owner = "live-worker"
+    live.lease_expires_at = NOW + timedelta(seconds=30)
+    db_session.commit()
+
+    recovered = analysis.recover_expired_jobs(db_session, now=NOW)
+
+    assert recovered == 1
+    db_session.expire_all()
+    expired_saved = db_session.get(models.AnalysisJob, expired.id)
+    live_saved = db_session.get(models.AnalysisJob, live.id)
+    assert expired_saved is not None
+    assert expired_saved.status == "pending"
+    assert expired_saved.attempt_count == 2
+    assert expired_saved.lease_owner is None
+    assert expired_saved.lease_expires_at is None
+    assert expired_saved.available_at == NOW.replace(tzinfo=None)
+    assert live_saved is not None
+    assert live_saved.status == "processing"
+    assert live_saved.lease_owner == "live-worker"
+
+
+def test_claim_compare_and_set_loser_does_not_increment_the_live_attempt(db_session):
+    """Catches a second claimant overwriting the first durable lease."""
+    _, job = _ended_conversation_with_job(db_session)
+
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    ) == job.id
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-b",
+        now=NOW,
+        lease_seconds=30,
+    ) is None
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.attempt_count == 1
+    assert saved.lease_owner == "worker-a"
+
+
+def test_process_builds_the_frozen_input_outside_a_database_session_and_projects_once(
+    db_session,
+):
+    """Catches provider work inside a transaction or a partial generated review."""
+    conversation, job = _ended_conversation_with_job(
+        db_session,
+        messages=[
+            ("child", "我给小黄添了菜叶"),
+            ("diary", "它吃完了吗？"),
+            ("child", "它吃完了"),
+        ],
+    )
+    duck = models.Duck(name="小黄", active=True)
+    db_session.add(duck)
+    db_session.commit()
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    ) == job.id
+    factory = TrackingSessionFactory()
+    analyzer = FakeAnalysisEngine(
+        extraction=_analysis_output(),
+        assessment=_assessment_output(),
+        on_call=lambda _method: assert_no_open_analysis_session(factory),
+    )
+
+    analysis.process_analysis_job(
+        factory,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=analyzer,
+        clock=lambda: NOW,
+    )
+
+    assert analyzer.extract_calls == [
+        "child: 我给小黄添了菜叶\ndiary: 它吃完了吗？\nchild: 它吃完了"
+    ]
+    assert analyzer.assessment_calls == [
+        (
+            analyzer.extract_calls[0],
+            [
+                {
+                    "key": "language",
+                    "name": "语言表达能力",
+                    "description": "能清晰、连贯地表达自己的观察与感受",
+                },
+                {
+                    "key": "empathy",
+                    "name": "同理心",
+                    "description": "能体会并关心小鸭与同伴的感受",
+                },
+                {
+                    "key": "diligence",
+                    "name": "勤劳启蒙",
+                    "description": "积极参与饲养劳动并承担责任",
+                },
+            ],
+        )
+    ]
+    db_session.expire_all()
+    assert _projection_counts(db_session, conversation.id) == {
+        "feeding": 2,
+        "emotion": 1,
+        "insight": 1,
+        "assessment": 1,
+        "scores": 3,
+    }
+    saved_job = db_session.get(models.AnalysisJob, job.id)
+    saved_conversation = db_session.get(models.Conversation, conversation.id)
+    assessment = db_session.scalar(
+        select(models.Assessment).where(models.Assessment.conversation_id == conversation.id)
+    )
+    feeding = db_session.scalars(
+        select(models.FeedingLog)
+        .where(models.FeedingLog.conversation_id == conversation.id)
+        .order_by(models.FeedingLog.id)
+    ).all()
+    assert saved_job is not None
+    assert saved_job.status == "succeeded"
+    assert saved_job.lease_owner is None
+    assert saved_job.lease_expires_at is None
+    assert saved_conversation is not None
+    assert saved_conversation.revision == 1
+    assert assessment is not None
+    assert assessment.status == "pending"
+    assert assessment.overall == 4.0
+    assert feeding[0].content == "给小黄添了菜叶"
+    assert feeding[0].duck_id == duck.id
+
+
+def assert_no_open_analysis_session(factory: TrackingSessionFactory) -> None:
+    assert factory.open_sessions == 0
+
+
+@pytest.mark.parametrize(
+    "assessment",
+    [
+        RuntimeError("provider details must not leave the process"),
+        {"scores": [{"dimension_key": "language", "score": 6, "reason": "bad"}]},
+    ],
+)
+def test_assessment_failure_or_malformed_output_writes_no_partial_projection(
+    db_session,
+    assessment,
+):
+    """Catches persisting extraction rows before all untrusted output is valid."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    ) == job.id
+
+    analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=FakeAnalysisEngine(extraction=_analysis_output(), assessment=assessment),
+        clock=lambda: NOW,
+    )
+
+    db_session.expire_all()
+    assert _projection_counts(db_session, conversation.id) == {
+        "feeding": 0,
+        "emotion": 0,
+        "insight": 0,
+        "assessment": 0,
+        "scores": 0,
+    }
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "pending"
+    assert saved.available_at == (NOW + timedelta(seconds=1)).replace(tzinfo=None)
+    assert saved.last_error_code == "ANALYSIS_UPSTREAM_FAILED"
+    assert saved.last_error_message == "分析服务暂时不可用"
+    assert saved.lease_owner is None
+    assert saved.lease_expires_at is None
+
+
+def test_rejects_a_frozen_message_id_from_another_conversation_without_calling_ai(
+    db_session,
+):
+    """Catches trusting the job's foreign key instead of proving transcript ownership."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    other_conversation, _ = _ended_conversation_with_job(db_session)
+    foreign_message = db_session.scalar(
+        select(models.Message)
+        .where(models.Message.conversation_id == other_conversation.id)
+    )
+    assert foreign_message is not None
+    conversation.frozen_last_message_id = foreign_message.id
+    job.frozen_last_message_id = foreign_message.id
+    db_session.commit()
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    ) == job.id
+    analyzer = FakeAnalysisEngine(extraction=_analysis_output(), assessment=_assessment_output())
+
+    analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=analyzer,
+        clock=lambda: NOW,
+    )
+
+    assert analyzer.extract_calls == []
+    assert analyzer.assessment_calls == []
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "pending"
+    assert _projection_counts(db_session, conversation.id) == {
+        "feeding": 0,
+        "emotion": 0,
+        "insight": 0,
+        "assessment": 0,
+        "scores": 0,
+    }
+
+
+@pytest.mark.parametrize(
+    ("attempt_count", "expected_status", "delay_seconds"),
+    [
+        (1, "pending", 1),
+        (2, "pending", 5),
+        (3, "failed", 0),
+    ],
+)
+def test_failure_uses_bounded_backoff_then_a_sanitized_terminal_state(
+    db_session,
+    attempt_count,
+    expected_status,
+    delay_seconds,
+):
+    """Catches retry timing that either hammers the provider or never terminates."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+    job.status = "processing"
+    job.attempt_count = attempt_count
+    job.max_attempts = 3
+    job.lease_owner = "worker-a"
+    job.lease_expires_at = NOW + timedelta(seconds=30)
+    db_session.commit()
+
+    analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=FakeAnalysisEngine(
+            extraction=RuntimeError("provider secret URL must never persist"),
+            assessment=_assessment_output(),
+        ),
+        clock=lambda: NOW,
+    )
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == expected_status
+    assert saved.available_at == (NOW + timedelta(seconds=delay_seconds)).replace(tzinfo=None)
+    assert saved.last_error_code == "ANALYSIS_UPSTREAM_FAILED"
+    assert saved.last_error_message == "分析服务暂时不可用"
+    assert saved.lease_owner is None
+    assert saved.lease_expires_at is None
+    assert saved.finished_at == (NOW.replace(tzinfo=None) if attempt_count == 3 else None)
+
+
+def test_lease_loss_preserves_existing_projection_and_stale_worker_cannot_fail_it(
+    db_session,
+):
+    """Catches an old worker deleting results or resetting a lease taken by another worker."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    db_session.add(
+        models.FeedingLog(
+            conversation_id=conversation.id,
+            child_id=conversation.child_id,
+            category="观察",
+            content="保留的教师结果",
+        )
+    )
+    db_session.commit()
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    ) == job.id
+
+    taken_over = False
+
+    def take_over(_method: str) -> None:
+        nonlocal taken_over
+        if taken_over:
+            return
+        taken_over = True
+        other = SessionLocal()
+        try:
+            current = other.get(models.AnalysisJob, job.id)
+            assert current is not None
+            current.lease_owner = "worker-b"
+            current.lease_expires_at = NOW + timedelta(seconds=30)
+            other.commit()
+        finally:
+            other.close()
+
+    analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=FakeAnalysisEngine(
+            extraction=_analysis_output(),
+            assessment=RuntimeError("stale provider failure"),
+            on_call=take_over,
+        ),
+        clock=lambda: NOW,
+    )
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    logs = db_session.scalars(
+        select(models.FeedingLog).where(models.FeedingLog.conversation_id == conversation.id)
+    ).all()
+    assert saved is not None
+    assert saved.status == "processing"
+    assert saved.lease_owner == "worker-b"
+    assert saved.last_error_code is None
+    assert [log.content for log in logs] == ["保留的教师结果"]
+
+
+def test_lease_loss_before_projection_writes_nothing_even_after_valid_ai_results(
+    db_session,
+):
+    """Catches a stale worker replacing results after its lease was taken over."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    db_session.add(
+        models.InsightNote(
+            conversation_id=conversation.id,
+            child_id=conversation.child_id,
+            content="保留的心得",
+        )
+    )
+    db_session.commit()
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    ) == job.id
+
+    taken_over = False
+
+    def take_over(_method: str) -> None:
+        nonlocal taken_over
+        if taken_over:
+            return
+        taken_over = True
+        other = SessionLocal()
+        try:
+            current = other.get(models.AnalysisJob, job.id)
+            assert current is not None
+            current.lease_owner = "worker-b"
+            current.lease_expires_at = NOW + timedelta(seconds=30)
+            other.commit()
+        finally:
+            other.close()
+
+    analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=FakeAnalysisEngine(
+            extraction=_analysis_output(),
+            assessment=_assessment_output(),
+            on_call=take_over,
+        ),
+        clock=lambda: NOW,
+    )
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    insight = db_session.scalar(
+        select(models.InsightNote).where(models.InsightNote.conversation_id == conversation.id)
+    )
+    assert saved is not None
+    assert saved.status == "processing"
+    assert saved.lease_owner == "worker-b"
+    assert insight is not None
+    assert insight.content == "保留的心得"
+    assert _projection_counts(db_session, conversation.id)["assessment"] == 0
+
+
+def test_a_succeeded_job_is_a_no_op_and_never_replaces_its_projection(db_session):
+    """Catches a duplicate worker run deleting retained successful analysis."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    ) == job.id
+    analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=FakeAnalysisEngine(extraction=_analysis_output(), assessment=_assessment_output()),
+        clock=lambda: NOW,
+    )
+    before = _projection_counts(db_session, conversation.id)
+    duplicate = FakeAnalysisEngine(
+        extraction=RuntimeError("a succeeded job must not call providers"),
+        assessment=_assessment_output(),
+    )
+
+    analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=duplicate,
+        clock=lambda: NOW,
+    )
+
+    db_session.expire_all()
+    assert duplicate.extract_calls == []
+    assert _projection_counts(db_session, conversation.id) == before
+
+
+def test_teacher_retry_requires_session_and_reuses_the_failed_job(client, db_session):
+    """Catches an unauthenticated retry or a retry that silently creates another job."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    job.status = "failed"
+    job.attempt_count = 3
+    job.lease_owner = "old-worker"
+    job.lease_expires_at = NOW
+    job.last_error_code = "ANALYSIS_UPSTREAM_FAILED"
+    job.last_error_message = "分析服务暂时不可用"
+    job.started_at = NOW
+    job.finished_at = NOW
+    db_session.commit()
+
+    unauthenticated = client.post(f"/api/conversations/{conversation.id}/analysis/retry")
+    assert unauthenticated.status_code == 401
+    assert unauthenticated.json()["error"]["code"] == "TEACHER_AUTH_REQUIRED"
+
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+    retried = client.post(f"/api/conversations/{conversation.id}/analysis/retry")
+
+    assert retried.status_code == 200
+    assert retried.json() == {
+        "conversation_id": conversation.id,
+        "analysis_job_id": job.id,
+        "analysis_status": "pending",
+        "attempt_count": 0,
+        "retry_accepted": True,
+        "replayed": False,
+    }
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "pending"
+    assert saved.attempt_count == 0
+    assert saved.lease_owner is None
+    assert saved.lease_expires_at is None
+    assert saved.last_error_code is None
+    assert saved.last_error_message is None
+    assert saved.started_at is None
+    assert saved.finished_at is None
+    assert db_session.scalar(
+        select(func.count(models.AnalysisJob.id)).where(
+            models.AnalysisJob.conversation_id == conversation.id
+        )
+    ) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "attempt_count", "http_status", "code"),
+    [
+        ("pending", 2, 200, None),
+        ("processing", 1, 409, "ANALYSIS_IN_PROGRESS"),
+        ("succeeded", 1, 409, "ANALYSIS_ALREADY_SUCCEEDED"),
+    ],
+)
+def test_teacher_retry_has_frozen_pending_and_terminal_state_contracts(
+    client,
+    db_session,
+    status,
+    attempt_count,
+    http_status,
+    code,
+):
+    """Catches retry accepting a live/succeeded job or changing a pending attempt."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    job.status = status
+    job.attempt_count = attempt_count
+    if status == "processing":
+        job.lease_owner = "worker-a"
+        job.lease_expires_at = NOW + timedelta(seconds=30)
+    db_session.commit()
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+
+    response = client.post(f"/api/conversations/{conversation.id}/analysis/retry")
+
+    assert response.status_code == http_status
+    if code is None:
+        assert response.json() == {
+            "conversation_id": conversation.id,
+            "analysis_job_id": job.id,
+            "analysis_status": "pending",
+            "attempt_count": 2,
+            "retry_accepted": False,
+            "replayed": True,
+        }
+    else:
+        assert response.json()["error"]["code"] == code
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == status
+    assert saved.attempt_count == attempt_count
+
+
+def test_teacher_retry_reports_the_frozen_not_found_contract(client):
+    """Catches retry turning an absent conversation/job into a new pending job."""
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+
+    response = client.post("/api/conversations/99999/analysis/retry")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "CONVERSATION_NOT_FOUND"
+
+
+def test_teacher_retry_treats_a_conversation_without_its_required_job_as_not_found(
+    client,
+    db_session,
+):
+    """Catches retry inventing a job for a malformed ended conversation."""
+    child = models.Child(name="小雨", active=True)
+    db_session.add(child)
+    db_session.flush()
+    conversation = models.Conversation(child_id=child.id, date="2026-08-23", status="ended")
+    db_session.add(conversation)
+    db_session.commit()
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+
+    response = client.post(f"/api/conversations/{conversation.id}/analysis/retry")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "CONVERSATION_NOT_FOUND"
+    assert db_session.scalar(
+        select(func.count(models.AnalysisJob.id)).where(
+            models.AnalysisJob.conversation_id == conversation.id
+        )
+    ) == 0
+
+
+def test_worker_start_recovers_once_rejects_double_start_and_stops_cleanly(
+    db_session,
+    monkeypatch,
+):
+    """Catches an unbounded worker lifecycle or recovery skipped on process restart."""
+    import app.backend.analysis_worker as worker_module
+
+    _conversation, job = _ended_conversation_with_job(db_session)
+    job.status = "processing"
+    job.attempt_count = 2
+    job.lease_owner = "former-worker"
+    job.lease_expires_at = NOW - timedelta(seconds=1)
+    db_session.commit()
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=FakeAnalysisEngine(extraction=_analysis_output(), assessment=_assessment_output()),
+        clock=lambda: NOW,
+        poll_interval_seconds=60,
+    )
+    entered_recovery = Event()
+    allow_exit = Event()
+    original_recover = worker_module.recover_expired_jobs
+
+    def recover_then_pause(db, *, now):
+        result = original_recover(db, now=now)
+        entered_recovery.set()
+        assert allow_exit.wait(1)
+        return result
+
+    monkeypatch.setattr(worker_module, "recover_expired_jobs", recover_then_pause)
+
+    worker.start()
+    assert entered_recovery.wait(1)
+    with pytest.raises(RuntimeError, match="already running"):
+        worker.start()
+    allow_exit.set()
+    worker.stop()
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "pending"
+    assert saved.attempt_count == 2
+    assert saved.lease_owner is None
+    assert worker.status() == "stopped"
+
+
+def test_worker_run_once_uses_the_injected_engine_and_durable_claim(db_session):
+    """Catches a worker bypassing the test engine or leaving a claimed job unprocessed."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    analyzer = FakeAnalysisEngine(extraction=_analysis_output(), assessment=_assessment_output())
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=analyzer,
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "succeeded"
+    assert analyzer.extract_calls
+    assert _projection_counts(db_session, conversation.id)["assessment"] == 1
+
+
+def test_lifespan_uses_the_injected_single_worker_for_health_and_teardown(monkeypatch):
+    """Catches TestClient lifespan constructing a second uncontrolled worker."""
+    instances = []
+
+    class LifecycleWorker:
+        def __init__(self):
+            self.started = 0
+            self.stopped = 0
+
+        def start(self):
+            self.started += 1
+
+        def stop(self, timeout_seconds=5.0):
+            assert timeout_seconds == 5.0
+            self.stopped += 1
+
+        def status(self):
+            return "idle"
+
+    def factory():
+        worker = LifecycleWorker()
+        instances.append(worker)
+        return worker
+
+    monkeypatch.setattr(app.state, "analysis_worker_factory", factory, raising=False)
+
+    with TestClient(app) as test_client:
+        assert len(instances) == 1
+        assert instances[0].started == 1
+        assert test_client.get("/api/health").json()["analysis_worker_status"] == "idle"
+
+    assert instances[0].stopped == 1
+    assert app.state.analysis_worker_status_provider() == "not_started"
+
+
+def test_default_testclient_lifespan_never_starts_a_real_worker(client, db_session):
+    """Catches test lifespan stealing a deterministic pending analysis job."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+
+    assert client.get("/api/health").json()["analysis_worker_status"] == "not_started"
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "pending"

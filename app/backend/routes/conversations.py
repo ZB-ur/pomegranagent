@@ -11,7 +11,9 @@ from sqlalchemy.orm import Session
 
 from .. import ai_engine, models, schemas
 from ..api_errors import APIError
+from ..auth import require_teacher_session
 from ..database import get_db
+from ..services.analysis import retry_analysis
 from ..services.chat import (
     FIXED_MAX_ROUNDS_REPLY,
     build_chat_context,
@@ -94,6 +96,22 @@ def complete(
         conversation_id=conversation_id,
         expected_last_message_id=payload.expected_last_message_id,
         now=now,
+    )
+
+
+@router.post(
+    "/api/conversations/{conversation_id}/analysis/retry",
+    response_model=schemas.AnalysisRetryResponse,
+)
+def retry_conversation_analysis(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+) -> schemas.AnalysisRetryResponse:
+    return retry_analysis(
+        db,
+        conversation_id,
+        now=datetime.now(timezone.utc),
     )
 
 
