@@ -17,6 +17,7 @@ from .api_errors import install_api_error_handling
 from .auth import require_teacher_session
 from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
 from .http_boundary import install_same_origin_boundary
+from .routes.conversations import router as conversations_router
 from .versioning import VERSION_FILE, load_runtime_version
 
 RUNTIME_VERSION = load_runtime_version()
@@ -51,6 +52,7 @@ app.state.analysis_worker_status_provider = lambda: "not_started"
 install_api_error_handling(app)
 install_same_origin_boundary(app)
 app.include_router(auth.router)
+app.include_router(conversations_router)
 
 
 @app.get("/api/health", response_model=schemas.HealthResponse)
@@ -358,103 +360,6 @@ def update_dimension(
             setattr(dim, k, payload[k])
     db.commit()
     return {"ok": True}
-
-
-# ---------------- 对话（核心） ----------------
-@app.post("/api/chat", response_model=schemas.ChatReply)
-def chat(payload: schemas.ChatRequest, db: Session = Depends(get_db)):
-    t0 = time.time()
-    child = db.get(models.Child, payload.child_id)
-    if not child:
-        raise HTTPException(404, "幼儿不存在")
-    logger.info("chat 请求: child_id=%s text=%r", payload.child_id, (payload.text or "")[:50])
-
-    # 新建或继续会话
-    if payload.conversation_id:
-        conv = db.get(models.Conversation, payload.conversation_id)
-        if not conv:
-            raise HTTPException(404, "会话不存在")
-    else:
-        conv = models.Conversation(child_id=child.id, date=date.today().isoformat(), status="active")
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
-
-    child_text = (payload.text or "").strip()
-    if not child_text:
-        raise HTTPException(400, "语音识别结果为空")
-
-    # 保存幼儿消息
-    db.add(models.Message(conversation_id=conv.id, role="child", text=child_text))
-    db.flush()
-
-    # 查询该会话全部消息（含刚保存的幼儿消息）
-    all_msgs = db.scalars(
-        select(models.Message).where(models.Message.conversation_id == conv.id).order_by(models.Message.id)
-    ).all()
-
-    # 构造历史（映射为 user/assistant）
-    history = [{"role": "user" if m.role == "child" else "assistant", "text": m.text} for m in all_msgs]
-
-    # 近期摘要：最近 6 条消息文本
-    recent = " / ".join(m.text for m in all_msgs[-6:])
-
-    # 小鸭档案（注入 status + archive summary，支持回答历史情况）
-    ducks = db.scalars(select(models.Duck)).all()
-    parts = []
-    for d in ducks:
-        arch = db.scalar(select(models.DuckArchive).where(models.DuckArchive.duck_id == d.id))
-        summary = arch.summary if arch and arch.summary else None
-        parts.append(f"{d.name}：{d.status or '暂无状态'}" + (f"；档案：{summary}" if summary else ""))
-    ducks_info = "；".join(parts)
-
-    # 轮次（一问一答算 1 轮 = 幼儿发言次数，含当前这条）
-    round_num = sum(1 for m in all_msgs if m.role == "child")
-
-    max_rounds = payload.max_rounds
-
-    # 达到最大轮次：强制收尾
-    if round_num >= max_rounds:
-        reply = "谢谢你今天的分享，鸭鸭日记本都记好啦！我们下次再见～"
-        db.add(models.Message(conversation_id=conv.id, role="diary", text=reply))
-        conv.status = "ended"
-        conv.end_reason = "max_rounds"
-        conv.ended_at = datetime.utcnow()
-        db.commit()
-        return schemas.ChatReply(
-            conversation_id=conv.id, reply=reply, ended=True,
-            end_reason="max_rounds", round=round_num,
-        )
-
-    # 调用 LLM
-    try:
-        result = ai_engine.chat_reply(
-            child={"name": child.name, "nickname": child.nickname},
-            recent_summary=recent,
-            ducks_info=ducks_info,
-            history=history,
-            round_num=round_num,
-            max_rounds=max_rounds,
-        )
-        logger.info("chat LLM 完成: 耗时=%.2fs reply=%r", time.time() - t0, result.get("reply", "")[:50])
-    except Exception as e:
-        logger.error("chat LLM 失败: %s", e)
-        result = {"reply": "嗯嗯，我在认真听呢，然后呢？", "ended": False, "end_reason": None}
-
-    reply = result.get("reply", "嗯嗯，我在认真听呢。")
-    ended = bool(result.get("ended", False))
-
-    db.add(models.Message(conversation_id=conv.id, role="diary", text=reply))
-    if ended:
-        conv.status = "ended"
-        conv.end_reason = "complete"
-        conv.ended_at = datetime.utcnow()
-    db.commit()
-
-    return schemas.ChatReply(
-        conversation_id=conv.id, reply=reply, ended=ended,
-        end_reason="complete" if ended else None, round=round_num,
-    )
 
 
 # ---------------- 会话 ---------------- 
