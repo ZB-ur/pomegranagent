@@ -45,7 +45,6 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="鸭鸭日记本", version="1.0.0", lifespan=lifespan)
-install_api_error_handling(app)
 app.state.analysis_worker_status_provider = lambda: "not_started"
 
 app.add_middleware(
@@ -54,6 +53,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+install_api_error_handling(app)
 
 
 @app.get("/api/health", response_model=schemas.HealthResponse)
