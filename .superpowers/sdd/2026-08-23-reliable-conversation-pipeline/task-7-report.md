@@ -243,4 +243,5 @@ The Task 1–7 regression gate was rerun after the evidence correction:
 147 passed
 ```
 
-Correction commit pending: `test: strengthen deactivation release evidence`.
+Task 7 implementation commit: `68a4143 feat: replace hard deletes with deactivation`.
+Evidence correction commit: `824087b test: strengthen deactivation release evidence`.
