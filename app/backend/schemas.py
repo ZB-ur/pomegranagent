@@ -2,7 +2,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class VersionResponse(BaseModel):
@@ -26,6 +26,15 @@ class ErrorDetail(BaseModel):
 
 class ErrorResponse(BaseModel):
     error: ErrorDetail
+
+
+class TeacherPinRequest(BaseModel):
+    pin: str = Field(pattern=r"^[0-9]{4,6}$")
+
+
+class TeacherAuthStatus(BaseModel):
+    configured: bool
+    authenticated: bool
 
 
 # ---------- 幼儿 ----------

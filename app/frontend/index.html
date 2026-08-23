@@ -149,6 +149,7 @@
 </div>
 
 <script src="/shared/api.js"></script>
+<script src="/shared/auth.js"></script>
 <script>
 const DUCK_SVG = `<svg viewBox="0 0 100 100" width="100%" height="100%">
   <ellipse cx="50" cy="58" rx="34" ry="30" fill="#ffb800"/>
@@ -305,20 +306,19 @@ function renderPicker() {
   const picker = el('div', { id: 'picker' });
   picker.append(el('h2', null, '今天轮到谁值日呀？'));
   const grid = el('div', { class: 'grid' });
-  // 优先显示当天值日生，无排班则降级展示全部幼儿
+  // 仅显示当天值日生；名单由教师端维护，幼儿端不读取教师管理数据。
   DuckAPI.request('/api/roster/today').then(today => {
-    if (today && today.length) {
-      return today;
+    if (!today || !today.length) {
+      grid.append(el('p', { class: 'muted' }, '今天还未排班，请老师帮忙'));
+      return;
     }
-    return DuckAPI.request('/api/children');
-  }).then(children => {
-    children.forEach(c => {
+    today.forEach(c => {
       grid.append(el('div', { class: 'child-card', onclick: () => startChat(c) },
         el('span', { class: 'emoji' }, c.avatar || '🐤'),
         document.createTextNode(c.nickname || c.name)));
     });
     // 预合成当天值日生的开场语（含各自小名），点谁秒播
-    children.forEach(c => preloadTTS(openingTextFor(c)));
+    today.forEach(c => preloadTTS(openingTextFor(c)));
   });
   picker.append(grid);
   root.append(picker);

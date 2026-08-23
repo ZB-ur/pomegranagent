@@ -10,6 +10,11 @@ sys.path.insert(0, str(ROOT))
 from app.backend import ai_engine  # noqa: E402
 
 
+def unlock_teacher(client):
+    response = client.post("/api/auth/setup", json={"pin": "1234"})
+    assert response.status_code == 200
+
+
 def _mock_chat_reply(**kwargs):
     return {"reply": "真棒！还有呢？", "ended": False, "end_reason": None}
 
@@ -33,6 +38,7 @@ def _mock_assess(transcript, dimensions):
 
 
 def test_dimensions_seeded(client):
+    unlock_teacher(client)
     response = client.get("/api/dimensions")
     assert response.status_code == 200
     data = response.json()
@@ -41,6 +47,7 @@ def test_dimensions_seeded(client):
 
 
 def test_child_crud(client):
+    unlock_teacher(client)
     response = client.post("/api/children", json={"name": "王小明", "nickname": "小明"})
     assert response.status_code == 200
     child_id = response.json()["id"]
@@ -48,6 +55,7 @@ def test_child_crud(client):
 
 
 def test_duck_crud(client):
+    unlock_teacher(client)
     r = client.post("/api/ducks", json={"name": "小黄", "status": "活泼健康"})
     assert r.status_code == 200
     did = r.json()["id"]
@@ -56,6 +64,7 @@ def test_duck_crud(client):
 
 
 def test_roster_auto(monkeypatch, client):
+    unlock_teacher(client)
     for i in range(6):
         client.post("/api/children", json={"name": f"幼儿{i}"})
     r = client.post("/api/roster/auto", json={"start_date": "2026-08-17", "days": 5, "cycle": "第1周"})
@@ -67,6 +76,7 @@ def test_roster_auto(monkeypatch, client):
 
 
 def test_chat_flow(monkeypatch, client):
+    unlock_teacher(client)
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     cid = client.post("/api/children", json={"name": "王小明", "nickname": "小明"}).json()["id"]
 
@@ -89,6 +99,7 @@ def test_chat_flow(monkeypatch, client):
 
 
 def test_chat_max_rounds(monkeypatch, client):
+    unlock_teacher(client)
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     cid = client.post("/api/children", json={"name": "李小红"}).json()["id"]
     conv_id = None
@@ -103,6 +114,7 @@ def test_chat_max_rounds(monkeypatch, client):
 
 
 def test_finalize_and_assessment(monkeypatch, client):
+    unlock_teacher(client)
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     monkeypatch.setattr(ai_engine, "extract_info", _mock_extract)
     monkeypatch.setattr(ai_engine, "assess_conversation", _mock_assess)
@@ -149,6 +161,7 @@ def test_teacher_served(client):
 
 # ---------------- 错误路径 ----------------
 def test_404_not_found(client):
+    unlock_teacher(client)
     assert client.get("/api/children/99999").status_code == 404
     assert client.get("/api/ducks/99999").status_code == 404
     assert client.get("/api/conversations/99999").status_code == 404
@@ -157,6 +170,7 @@ def test_404_not_found(client):
 
 
 def test_chat_400_empty_text(monkeypatch, client):
+    unlock_teacher(client)
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     cid = client.post("/api/children", json={"name": "错误测试"}).json()["id"]
     # 空文本应返回 400
@@ -172,6 +186,7 @@ def test_tts_400_empty(client):
 
 
 def test_finalize_insight_persisted(monkeypatch, client):
+    unlock_teacher(client)
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     monkeypatch.setattr(ai_engine, "extract_info", _mock_extract)
     monkeypatch.setattr(ai_engine, "assess_conversation", _mock_assess)

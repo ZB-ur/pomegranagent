@@ -18,11 +18,18 @@ def assert_error(response, *, status: int, code: str):
     assert error["request_id"] == response.headers["x-request-id"]
 
 
+def unlock_teacher(client):
+    response = client.post("/api/auth/setup", json={"pin": "1234"})
+    assert response.status_code == 200
+
+
 def test_http_exception_uses_standard_envelope(client):
+    unlock_teacher(client)
     assert_error(client.get("/api/conversations/99999"), status=404, code="NOT_FOUND")
 
 
 def test_validation_error_has_stable_field_paths(client):
+    unlock_teacher(client)
     response = client.post("/api/children", json={"name": 7})
 
     assert_error(response, status=422, code="VALIDATION_ERROR")

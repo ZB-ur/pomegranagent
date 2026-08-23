@@ -12,8 +12,9 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import ai_engine, models, schemas
+from . import ai_engine, auth, models, schemas
 from .api_errors import install_api_error_handling
+from .auth import require_teacher_session
 from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
 from .http_boundary import install_same_origin_boundary
 from .versioning import VERSION_FILE, load_runtime_version
@@ -49,6 +50,7 @@ app.state.analysis_worker_status_provider = lambda: "not_started"
 
 install_api_error_handling(app)
 install_same_origin_boundary(app)
+app.include_router(auth.router)
 
 
 @app.get("/api/health", response_model=schemas.HealthResponse)
@@ -134,12 +136,19 @@ def _seed_demo_data(session_factory=SessionLocal, seed_date: date | None = None)
 
 # ---------------- 幼儿 ----------------
 @app.get("/api/children", response_model=list[schemas.ChildOut])
-def list_children(db: Session = Depends(get_db)):
+def list_children(
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     return db.scalars(select(models.Child).order_by(models.Child.id)).all()
 
 
 @app.post("/api/children", response_model=schemas.ChildOut)
-def create_child(payload: schemas.ChildCreate, db: Session = Depends(get_db)):
+def create_child(
+    payload: schemas.ChildCreate,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     child = models.Child(**payload.model_dump())
     db.add(child)
     db.commit()
@@ -148,7 +157,12 @@ def create_child(payload: schemas.ChildCreate, db: Session = Depends(get_db)):
 
 
 @app.put("/api/children/{child_id}", response_model=schemas.ChildOut)
-def update_child(child_id: int, payload: schemas.ChildCreate, db: Session = Depends(get_db)):
+def update_child(
+    child_id: int,
+    payload: schemas.ChildCreate,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     child = db.get(models.Child, child_id)
     if not child:
         raise HTTPException(404, "幼儿不存在")
@@ -160,7 +174,11 @@ def update_child(child_id: int, payload: schemas.ChildCreate, db: Session = Depe
 
 
 @app.delete("/api/children/{child_id}")
-def delete_child(child_id: int, db: Session = Depends(get_db)):
+def delete_child(
+    child_id: int,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     child = db.get(models.Child, child_id)
     if not child:
         raise HTTPException(404, "幼儿不存在")
@@ -171,12 +189,19 @@ def delete_child(child_id: int, db: Session = Depends(get_db)):
 
 # ---------------- 小鸭 ----------------
 @app.get("/api/ducks", response_model=list[schemas.DuckOut])
-def list_ducks(db: Session = Depends(get_db)):
+def list_ducks(
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     return db.scalars(select(models.Duck).order_by(models.Duck.id)).all()
 
 
 @app.post("/api/ducks", response_model=schemas.DuckOut)
-def create_duck(payload: schemas.DuckCreate, db: Session = Depends(get_db)):
+def create_duck(
+    payload: schemas.DuckCreate,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     duck = models.Duck(**payload.model_dump())
     db.add(duck)
     db.commit()
@@ -185,7 +210,12 @@ def create_duck(payload: schemas.DuckCreate, db: Session = Depends(get_db)):
 
 
 @app.put("/api/ducks/{duck_id}", response_model=schemas.DuckOut)
-def update_duck(duck_id: int, payload: schemas.DuckCreate, db: Session = Depends(get_db)):
+def update_duck(
+    duck_id: int,
+    payload: schemas.DuckCreate,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     duck = db.get(models.Duck, duck_id)
     if not duck:
         raise HTTPException(404, "小鸭不存在")
@@ -197,7 +227,11 @@ def update_duck(duck_id: int, payload: schemas.DuckCreate, db: Session = Depends
 
 
 @app.delete("/api/ducks/{duck_id}")
-def delete_duck(duck_id: int, db: Session = Depends(get_db)):
+def delete_duck(
+    duck_id: int,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     duck = db.get(models.Duck, duck_id)
     if not duck:
         raise HTTPException(404, "小鸭不存在")
@@ -208,7 +242,11 @@ def delete_duck(duck_id: int, db: Session = Depends(get_db)):
 
 # ---------------- 排班 ----------------
 @app.get("/api/roster")
-def list_roster(cycle: str | None = None, db: Session = Depends(get_db)):
+def list_roster(
+    cycle: str | None = None,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     q = select(models.DutyRoster).order_by(models.DutyRoster.date)
     if cycle:
         q = q.where(models.DutyRoster.cycle == cycle)
@@ -235,7 +273,11 @@ def today_roster(db: Session = Depends(get_db)):
 
 
 @app.post("/api/roster")
-def set_roster(payload: schemas.RosterIn, db: Session = Depends(get_db)):
+def set_roster(
+    payload: schemas.RosterIn,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     # 删除该日期旧排班，写入新排班
     for old in db.scalars(select(models.DutyRoster).where(models.DutyRoster.date == payload.date)).all():
         db.delete(old)
@@ -246,7 +288,11 @@ def set_roster(payload: schemas.RosterIn, db: Session = Depends(get_db)):
 
 
 @app.post("/api/roster/auto")
-def auto_roster(payload: dict, db: Session = Depends(get_db)):
+def auto_roster(
+    payload: dict,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     """自动轮值：从 start_date 起，每个工作日 2 名幼儿按名单顺序轮转。"""
     child_ids = [c.id for c in db.scalars(select(models.Child).where(models.Child.active == True).order_by(models.Child.id)).all()]
     start = date.fromisoformat(payload["start_date"])
@@ -270,7 +316,10 @@ def auto_roster(payload: dict, db: Session = Depends(get_db)):
 
 # ---------------- 能力维度 ----------------
 @app.get("/api/dimensions")
-def list_dimensions(db: Session = Depends(get_db)):
+def list_dimensions(
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     rows = db.scalars(select(models.AssessmentDimension).order_by(models.AssessmentDimension.id)).all()
     return [
         {"id": r.id, "key": r.key, "name": r.name, "enabled": r.enabled, "weight": r.weight, "description": r.description}
@@ -279,7 +328,11 @@ def list_dimensions(db: Session = Depends(get_db)):
 
 
 @app.post("/api/dimensions")
-def create_dimension(payload: dict, db: Session = Depends(get_db)):
+def create_dimension(
+    payload: dict,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     dim = models.AssessmentDimension(
         key=payload["key"], name=payload["name"],
         description=payload.get("description"), enabled=payload.get("enabled", True),
@@ -291,7 +344,12 @@ def create_dimension(payload: dict, db: Session = Depends(get_db)):
 
 
 @app.put("/api/dimensions/{dim_id}")
-def update_dimension(dim_id: int, payload: dict, db: Session = Depends(get_db)):
+def update_dimension(
+    dim_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     dim = db.get(models.AssessmentDimension, dim_id)
     if not dim:
         raise HTTPException(404, "维度不存在")
@@ -401,7 +459,11 @@ def chat(payload: schemas.ChatRequest, db: Session = Depends(get_db)):
 
 # ---------------- 会话 ---------------- 
 @app.get("/api/conversations")
-def list_conversations(child_id: int | None = None, db: Session = Depends(get_db)):
+def list_conversations(
+    child_id: int | None = None,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     q = select(models.Conversation).order_by(models.Conversation.id.desc())
     if child_id:
         q = q.where(models.Conversation.child_id == child_id)
@@ -417,7 +479,11 @@ def list_conversations(child_id: int | None = None, db: Session = Depends(get_db
 
 
 @app.get("/api/conversations/{conv_id}")
-def get_conversation(conv_id: int, db: Session = Depends(get_db)):
+def get_conversation(
+    conv_id: int,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     conv = db.get(models.Conversation, conv_id)
     if not conv:
         raise HTTPException(404, "会话不存在")
@@ -517,7 +583,11 @@ def finalize(conv_id: int, db: Session = Depends(get_db)):
 
 # ---------------- 评估审阅 ----------------
 @app.get("/api/assessments")
-def list_assessments(status: str | None = None, db: Session = Depends(get_db)):
+def list_assessments(
+    status: str | None = None,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     q = select(models.Assessment).order_by(models.Assessment.id.desc())
     if status:
         q = q.where(models.Assessment.status == status)
@@ -525,7 +595,12 @@ def list_assessments(status: str | None = None, db: Session = Depends(get_db)):
 
 
 @app.post("/api/assessments/{assessment_id}/confirm")
-def confirm_assessment(assessment_id: int, payload: schemas.AssessmentConfirm, db: Session = Depends(get_db)):
+def confirm_assessment(
+    assessment_id: int,
+    payload: schemas.AssessmentConfirm,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     assessment = db.get(models.Assessment, assessment_id)
     if not assessment:
         raise HTTPException(404, "评估不存在")
@@ -551,7 +626,12 @@ def confirm_assessment(assessment_id: int, payload: schemas.AssessmentConfirm, d
 
 # ---------------- 流水/情绪修正 ----------------
 @app.patch("/api/conversations/{conv_id}/logs")
-def patch_logs(conv_id: int, payload: dict, db: Session = Depends(get_db)):
+def patch_logs(
+    conv_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     if "feeding_logs" in payload:
         for item in payload["feeding_logs"]:
             row = db.get(models.FeedingLog, item.get("id"))
@@ -574,13 +654,21 @@ def patch_logs(conv_id: int, payload: dict, db: Session = Depends(get_db)):
 
 # ---------------- 小鸭档案 ----------------
 @app.get("/api/ducks/{duck_id}/archive")
-def get_archive(duck_id: int, db: Session = Depends(get_db)):
+def get_archive(
+    duck_id: int,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     row = db.scalar(select(models.DuckArchive).where(models.DuckArchive.duck_id == duck_id))
     return {"duck_id": duck_id, "summary": row.summary if row else None}
 
 
 @app.post("/api/ducks/{duck_id}/summarize")
-def summarize(duck_id: int, db: Session = Depends(get_db)):
+def summarize(
+    duck_id: int,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     duck = db.get(models.Duck, duck_id)
     if not duck:
         raise HTTPException(404, "小鸭不存在")
@@ -599,7 +687,12 @@ def summarize(duck_id: int, db: Session = Depends(get_db)):
 
 
 @app.put("/api/ducks/{duck_id}/archive")
-def update_archive(duck_id: int, payload: dict, db: Session = Depends(get_db)):
+def update_archive(
+    duck_id: int,
+    payload: dict,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     row = db.scalar(select(models.DuckArchive).where(models.DuckArchive.duck_id == duck_id))
     if row:
         row.summary = payload.get("summary")
@@ -655,7 +748,11 @@ async def tts(text: str):
 
 # ---------------- 成长曲线分析 ----------------
 @app.get("/api/analysis/growth")
-def growth_analysis(child_id: int, db: Session = Depends(get_db)):
+def growth_analysis(
+    child_id: int,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     """按时间返回该幼儿各维度的评估分数序列（成长曲线）。"""
     assessments = db.scalars(
         select(models.Assessment).where(
@@ -678,7 +775,10 @@ def growth_analysis(child_id: int, db: Session = Depends(get_db)):
 
 
 @app.get("/api/analysis/overview")
-def overview(db: Session = Depends(get_db)):
+def overview(
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+):
     children = db.scalars(select(models.Child).order_by(models.Child.id)).all()
     result = []
     for c in children:

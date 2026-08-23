@@ -28,11 +28,14 @@ function loadDuckAPI(fetchImpl) {
   return { api: window.DuckAPI, document };
 }
 
-function loadTeacherWithPendingReady() {
+function loadTeacherWithPendingGates() {
   const listeners = {};
   const requests = [];
+  let statusCalls = 0;
   let resolveReady;
+  let resolveStatus;
   const readyPromise = new Promise(resolve => { resolveReady = resolve; });
+  const statusPromise = new Promise(resolve => { resolveStatus = resolve; });
   const button = {
     dataset: { v: 'overview' },
     disabled: false,
@@ -53,10 +56,13 @@ function loadTeacherWithPendingReady() {
     appendChild() {},
     addEventListener() {},
     setAttribute() {},
+    focus() {},
   });
   const main = genericElement();
+  const aside = genericElement();
   const document = {
     getElementById: id => (id === 'nav' ? nav : main),
+    querySelector: selector => (selector === 'aside' ? aside : null),
     querySelectorAll: () => [button],
     createElement: genericElement,
   };
@@ -73,6 +79,12 @@ function loadTeacherWithPendingReady() {
         return new Promise(() => {});
       },
     },
+    DuckAuth: {
+      status: () => {
+        statusCalls += 1;
+        return statusPromise;
+      },
+    },
     URLSearchParams,
     Object,
     Array,
@@ -82,7 +94,10 @@ function loadTeacherWithPendingReady() {
     Number,
     console,
   });
-  return { button, listeners, nav, location, requests, resolveReady };
+  return {
+    button, listeners, nav, location, requests, resolveReady, resolveStatus,
+    get statusCalls() { return statusCalls; },
+  };
 }
 
 test('a repeated sequenceKey cancels the older request without a network error', async () => {
@@ -124,8 +139,8 @@ test('version mismatch enters maintenance before any business request', async ()
   assert.equal(seen.length, 2);
 });
 
-test('teacher navigation and hash routes cannot start business requests before runtime readiness', async () => {
-  const teacher = loadTeacherWithPendingReady();
+test('teacher navigation and hash routes cannot start business requests before runtime and authentication readiness', async () => {
+  const teacher = loadTeacherWithPendingGates();
   teacher.location.hash = '#children';
   teacher.listeners.hashchange();
   teacher.listeners['nav:click']({ target: teacher.button });
@@ -137,6 +152,13 @@ test('teacher navigation and hash routes cannot start business requests before r
   teacher.resolveReady();
   await Promise.resolve();
   await Promise.resolve();
+  assert.equal(teacher.statusCalls, 1);
+  assert.deepEqual(teacher.requests, []);
+  assert.equal(teacher.button.disabled, true);
+  assert.equal(teacher.nav.attributes['aria-busy'], 'true');
+
+  teacher.resolveStatus({ configured: true, authenticated: true });
+  await new Promise(resolve => setImmediate(resolve));
   assert.deepEqual(teacher.requests, ['/api/children']);
   assert.equal(teacher.button.disabled, false);
   assert.equal(teacher.nav.attributes['aria-busy'], undefined);

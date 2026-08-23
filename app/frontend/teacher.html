@@ -77,11 +77,15 @@
 </div>
 
 <script src="/shared/api.js"></script>
+<script src="/shared/auth.js"></script>
 <script>
 const main = document.getElementById('main');
 const nav = document.getElementById('nav');
 const views = {};
 let runtimeReady = false;
+let teacherAuthenticated = false;
+let lockButton = null;
+let lockFeedback = null;
 nav.setAttribute('aria-busy', 'true');
 nav.querySelectorAll('button').forEach(button => { button.disabled = true; });
 
@@ -99,15 +103,139 @@ function h(tag, attrs, ...children) {
 }
 function api(path, options) { return DuckAPI.request(path, options); }
 
+function updateTeacherNavigation() {
+  const enabled = runtimeReady && teacherAuthenticated;
+  if (!enabled) {
+    nav.setAttribute('aria-busy', 'true');
+    nav.querySelectorAll('button').forEach(button => { button.disabled = true; });
+    return;
+  }
+  nav.removeAttribute('aria-busy');
+  nav.querySelectorAll('button').forEach(button => { button.disabled = false; });
+}
+
+function renderTeacherLocked(message) {
+  main.replaceChildren();
+  const card = h('section', { class: 'card', role: 'status' });
+  card.append(h('h2', null, '教师端已锁定'), h('p', { class: 'muted' }, message));
+  main.append(card);
+}
+
+function setLockFeedback(message) {
+  if (!lockFeedback) {
+    lockFeedback = h('p', {
+      id: 'teacher-lock-feedback',
+      role: 'alert',
+      'aria-live': 'assertive',
+      style: 'padding:12px 22px;color:#fecaca;font-size:13px',
+    });
+    document.querySelector('aside').append(lockFeedback);
+  }
+  lockFeedback.textContent = message;
+}
+
+function ensureLockButton() {
+  if (lockButton) return;
+  lockButton = h('button', { class: 'btn gray', type: 'button', style: 'margin:18px 22px' }, '立即锁定');
+  lockButton.addEventListener('click', lockTeacherPage);
+  document.querySelector('aside').append(lockButton);
+}
+
+async function unlockTeacherPage() {
+  const auth = await DuckAuth.status();
+  if (auth.authenticated) {
+    teacherAuthenticated = true;
+    updateTeacherNavigation();
+    ensureLockButton();
+    lockButton.disabled = false;
+    return;
+  }
+
+  teacherAuthenticated = false;
+  updateTeacherNavigation();
+  return new Promise((resolve) => {
+    main.replaceChildren();
+    const form = h('form', { class: 'card' });
+    const inputId = 'teacher-pin';
+    const label = h('label', { for: inputId }, auth.configured ? '教师 PIN' : '设置教师 PIN');
+    const input = h('input', {
+      id: inputId,
+      type: 'password',
+      inputmode: 'numeric',
+      pattern: '[0-9]{4,6}',
+      minlength: '4',
+      maxlength: '6',
+      autocomplete: 'off',
+      required: 'required',
+    });
+    const feedback = h('p', { role: 'alert', 'aria-live': 'assertive' });
+    const submit = h('button', { class: 'btn', type: 'submit' }, auth.configured ? '解锁' : '设置并解锁');
+    form.append(
+      h('h2', null, auth.configured ? '教师端已锁定' : '首次设置教师 PIN'),
+      label,
+      input,
+      submit,
+      feedback,
+    );
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      submit.disabled = true;
+      feedback.textContent = '';
+      try {
+        if (auth.configured) await DuckAuth.unlock(input.value);
+        else await DuckAuth.setup(input.value);
+        teacherAuthenticated = true;
+        updateTeacherNavigation();
+        ensureLockButton();
+        lockButton.disabled = false;
+        resolve();
+      } catch (error) {
+        feedback.textContent = error.message;
+        submit.disabled = false;
+        input.focus();
+      }
+    });
+    main.append(form);
+    input.focus();
+  });
+}
+
+function clearTeacherViews() {
+  Object.values(views).forEach((view) => view.remove());
+  for (const key of Object.keys(views)) delete views[key];
+}
+
+function restoreTeacherRoute() {
+  routeFromHash();
+  if (!location.hash) show('overview');
+}
+
+async function lockTeacherPage() {
+  lockButton.disabled = true;
+  setLockFeedback('');
+  try {
+    await DuckAuth.lock();
+    teacherAuthenticated = false;
+    updateTeacherNavigation();
+    clearTeacherViews();
+    renderTeacherLocked('教师端已锁定，重新输入 PIN 后可继续。');
+    unlockTeacherPage().then(restoreTeacherRoute).catch((error) => renderTeacherLocked(error.message));
+  } catch (error) {
+    lockButton.disabled = false;
+    setLockFeedback(error.message);
+  }
+}
+
 // 导航
 nav.addEventListener('click', e => {
+  if (!runtimeReady || !teacherAuthenticated) return;
   const b = e.target.closest('button'); if (!b) return;
   document.querySelectorAll('#nav button').forEach(x => x.classList.remove('active'));
   b.classList.add('active');
   show(b.dataset.v);
 });
 function show(name) {
-  if (!runtimeReady) return;
+  if (!runtimeReady || !teacherAuthenticated) return;
   Object.values(views).forEach(v => v.classList.remove('active'));
   if (!views[name]) {
     views[name] = buildView(name);
@@ -462,10 +590,10 @@ function routeFromHash() {
 window.addEventListener('hashchange', routeFromHash);
 DuckAPI.ready().then(() => {
   runtimeReady = true;
-  nav.removeAttribute('aria-busy');
-  nav.querySelectorAll('button').forEach(button => { button.disabled = false; });
-  routeFromHash();
-  if (!location.hash) show('overview');
+  updateTeacherNavigation();
+  return unlockTeacherPage();
+}).then(() => {
+  restoreTeacherRoute();
 }).catch(() => {});
 </script>
 </body>
