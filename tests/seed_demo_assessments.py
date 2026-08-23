@@ -13,7 +13,12 @@ sys.path.insert(0, str(ROOT))
 from sqlalchemy import select
 
 from app.backend import models
-from app.backend.database import SessionLocal, engine
+from app.backend.database import DATABASE_PATH, DB_MODE, SessionLocal
+
+if DB_MODE != "app":
+    raise SystemExit("demo assessment seeding requires APP_DB_MODE=app")
+print(f"demo assessment target: {DATABASE_PATH}")
+
 from app.backend.main import _seed_demo_data
 
 # 先确保种子数据存在

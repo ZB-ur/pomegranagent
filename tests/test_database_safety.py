@@ -1,3 +1,6 @@
+import hashlib
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -36,10 +39,6 @@ def test_test_mode_accepts_a_pytest_temp_path(tmp_path: Path):
 
 
 def test_importing_database_does_not_create_tables(tmp_path: Path):
-    import os
-    import subprocess
-    import sys
-
     db_path = tmp_path / "import-only.db"
     env = os.environ | {"APP_DB_MODE": "test", "APP_DB_PATH": str(db_path)}
     result = subprocess.run(
@@ -52,3 +51,24 @@ def test_importing_database_does_not_create_tables(tmp_path: Path):
     )
     assert result.returncode == 0, result.stderr
     assert not db_path.exists()
+
+
+def _sha256(path: Path) -> str | None:
+    return hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None
+
+
+def test_pytest_subprocess_does_not_change_application_db(tmp_path: Path):
+    application_db = tmp_path / "protected-app.db"
+    application_db.write_bytes(b"application-database-sentinel")
+    before = _sha256(application_db)
+    env = os.environ | {"APP_DB_PATH": str(application_db), "APP_DB_MODE": "app"}
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_api.py::test_dimensions_seeded", "-q"],
+        cwd=Path(__file__).resolve().parents[1],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _sha256(application_db) == before

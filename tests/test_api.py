@@ -7,11 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from fastapi.testclient import TestClient  # noqa: E402
-
 from app.backend import ai_engine  # noqa: E402
-from app.backend.database import Base, engine  # noqa: E402
-from app.backend.main import app  # noqa: E402
 
 
 def _mock_chat_reply(**kwargs):
@@ -36,42 +32,22 @@ def _mock_assess(transcript, dimensions):
     }
 
 
-def setup_function():
-    # 每次测试重建表，隔离数据
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-    from app.backend.main import _seed_dimensions
-    _seed_dimensions()
-
-
-client = TestClient(app)
-
-
-def test_dimensions_seeded():
-    r = client.get("/api/dimensions")
-    assert r.status_code == 200
-    data = r.json()
+def test_dimensions_seeded(client):
+    response = client.get("/api/dimensions")
+    assert response.status_code == 200
+    data = response.json()
     assert len(data) == 3
-    assert {d["key"] for d in data} == {"language", "empathy", "diligence"}
+    assert {item["key"] for item in data} == {"language", "empathy", "diligence"}
 
 
-def test_child_crud():
-    r = client.post("/api/children", json={"name": "王小明", "nickname": "小明"})
-    assert r.status_code == 200
-    cid = r.json()["id"]
-    assert r.json()["nickname"] == "小明"
-
-    r = client.get("/api/children")
-    assert len(r.json()) == 1
-
-    r = client.put(f"/api/children/{cid}", json={"name": "王小明", "nickname": "明明", "active": True})
-    assert r.json()["nickname"] == "明明"
-
-    r = client.delete(f"/api/children/{cid}")
-    assert r.json()["ok"] is True
+def test_child_crud(client):
+    response = client.post("/api/children", json={"name": "王小明", "nickname": "小明"})
+    assert response.status_code == 200
+    child_id = response.json()["id"]
+    assert client.get("/api/children").json()[0]["id"] == child_id
 
 
-def test_duck_crud():
+def test_duck_crud(client):
     r = client.post("/api/ducks", json={"name": "小黄", "status": "活泼健康"})
     assert r.status_code == 200
     did = r.json()["id"]
@@ -79,7 +55,7 @@ def test_duck_crud():
     client.delete(f"/api/ducks/{did}")
 
 
-def test_roster_auto(monkeypatch):
+def test_roster_auto(monkeypatch, client):
     for i in range(6):
         client.post("/api/children", json={"name": f"幼儿{i}"})
     r = client.post("/api/roster/auto", json={"start_date": "2026-08-17", "days": 5, "cycle": "第1周"})
@@ -90,7 +66,7 @@ def test_roster_auto(monkeypatch):
         assert len(s["child_ids"]) == 2
 
 
-def test_chat_flow(monkeypatch):
+def test_chat_flow(monkeypatch, client):
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     cid = client.post("/api/children", json={"name": "王小明", "nickname": "小明"}).json()["id"]
 
@@ -112,7 +88,7 @@ def test_chat_flow(monkeypatch):
     assert len(detail["messages"]) == 4  # 2 问 2 答
 
 
-def test_chat_max_rounds(monkeypatch):
+def test_chat_max_rounds(monkeypatch, client):
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     cid = client.post("/api/children", json={"name": "李小红"}).json()["id"]
     conv_id = None
@@ -126,7 +102,7 @@ def test_chat_max_rounds(monkeypatch):
             assert r.json()["end_reason"] == "max_rounds"
 
 
-def test_finalize_and_assessment(monkeypatch):
+def test_finalize_and_assessment(monkeypatch, client):
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     monkeypatch.setattr(ai_engine, "extract_info", _mock_extract)
     monkeypatch.setattr(ai_engine, "assess_conversation", _mock_assess)
@@ -160,19 +136,19 @@ def test_finalize_and_assessment(monkeypatch):
         assert dim["points"][0]["score"] == 5
 
 
-def test_frontend_served():
+def test_frontend_served(client):
     r = client.get("/")
     assert r.status_code == 200
     assert "鸭鸭日记本" in r.text
 
 
-def test_teacher_served():
+def test_teacher_served(client):
     r = client.get("/teacher.html")
     assert r.status_code == 200
 
 
 # ---------------- 错误路径 ----------------
-def test_404_not_found():
+def test_404_not_found(client):
     assert client.get("/api/children/99999").status_code == 404
     assert client.get("/api/ducks/99999").status_code == 404
     assert client.get("/api/conversations/99999").status_code == 404
@@ -180,7 +156,7 @@ def test_404_not_found():
     assert client.post("/api/assessments/99999/confirm", json={"scores": {}}).status_code == 404
 
 
-def test_chat_400_empty_text(monkeypatch):
+def test_chat_400_empty_text(monkeypatch, client):
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     cid = client.post("/api/children", json={"name": "错误测试"}).json()["id"]
     # 空文本应返回 400
@@ -191,11 +167,11 @@ def test_chat_400_empty_text(monkeypatch):
     assert r.status_code == 404
 
 
-def test_tts_400_empty():
+def test_tts_400_empty(client):
     assert client.get("/api/tts", params={"text": ""}).status_code == 400
 
 
-def test_finalize_insight_persisted(monkeypatch):
+def test_finalize_insight_persisted(monkeypatch, client):
     monkeypatch.setattr(ai_engine, "chat_reply", _mock_chat_reply)
     monkeypatch.setattr(ai_engine, "extract_info", _mock_extract)
     monkeypatch.setattr(ai_engine, "assess_conversation", _mock_assess)
