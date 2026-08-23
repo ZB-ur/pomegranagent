@@ -211,6 +211,25 @@ def _conversation_for_new_claim(
         if current.pending_end_reason is not None:
             raise _api_error(409, "CONVERSATION_COMPLETION_REQUIRED")
         raise _api_error(409, "ACTIVE_CONVERSATION_EXISTS")
+
+    # End the stale observation transaction before the first write.  This
+    # conditional no-op is the shared SQLite serialization point with child
+    # deactivation: either this claimant holds the active child while it
+    # creates its conversation/request, or deactivation has already made the
+    # child unavailable and no partial first-turn records are written.
+    db.rollback()
+    active_child_lock = db.execute(
+        update(models.Child)
+        .where(
+            models.Child.id == payload.child_id,
+            models.Child.active.is_(True),
+        )
+        .values(active=models.Child.active)
+    )
+    if active_child_lock.rowcount != 1:
+        db.rollback()
+        _active_child_or_error(db, payload.child_id)
+        raise _api_error(404, "CHILD_NOT_FOUND")
     conversation = models.Conversation(
         child_id=payload.child_id,
         date=now.date().isoformat(),

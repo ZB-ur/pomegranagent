@@ -19,6 +19,7 @@ from .auth import require_teacher_session
 from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
 from .http_boundary import install_same_origin_boundary
 from .routes.conversations import router as conversations_router
+from .routes.resources import router as resources_router
 from .routes.roster import router as roster_router
 from .versioning import VERSION_FILE, load_runtime_version
 
@@ -67,6 +68,7 @@ install_api_error_handling(app)
 install_same_origin_boundary(app)
 app.include_router(auth.router)
 app.include_router(conversations_router)
+app.include_router(resources_router)
 app.include_router(roster_router)
 
 
@@ -149,112 +151,6 @@ def _seed_demo_data(session_factory=SessionLocal, seed_date: date | None = None)
         db.commit()
     finally:
         db.close()
-
-
-# ---------------- 幼儿 ----------------
-@app.get("/api/children", response_model=list[schemas.ChildOut])
-def list_children(
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    return db.scalars(select(models.Child).order_by(models.Child.id)).all()
-
-
-@app.post("/api/children", response_model=schemas.ChildOut)
-def create_child(
-    payload: schemas.ChildCreate,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    child = models.Child(**payload.model_dump())
-    db.add(child)
-    db.commit()
-    db.refresh(child)
-    return child
-
-
-@app.put("/api/children/{child_id}", response_model=schemas.ChildOut)
-def update_child(
-    child_id: int,
-    payload: schemas.ChildCreate,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    child = db.get(models.Child, child_id)
-    if not child:
-        raise HTTPException(404, "幼儿不存在")
-    for k, v in payload.model_dump().items():
-        setattr(child, k, v)
-    db.commit()
-    db.refresh(child)
-    return child
-
-
-@app.delete("/api/children/{child_id}")
-def delete_child(
-    child_id: int,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    child = db.get(models.Child, child_id)
-    if not child:
-        raise HTTPException(404, "幼儿不存在")
-    db.delete(child)
-    db.commit()
-    return {"ok": True}
-
-
-# ---------------- 小鸭 ----------------
-@app.get("/api/ducks", response_model=list[schemas.DuckOut])
-def list_ducks(
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    return db.scalars(select(models.Duck).order_by(models.Duck.id)).all()
-
-
-@app.post("/api/ducks", response_model=schemas.DuckOut)
-def create_duck(
-    payload: schemas.DuckCreate,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    duck = models.Duck(**payload.model_dump())
-    db.add(duck)
-    db.commit()
-    db.refresh(duck)
-    return duck
-
-
-@app.put("/api/ducks/{duck_id}", response_model=schemas.DuckOut)
-def update_duck(
-    duck_id: int,
-    payload: schemas.DuckCreate,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    duck = db.get(models.Duck, duck_id)
-    if not duck:
-        raise HTTPException(404, "小鸭不存在")
-    for k, v in payload.model_dump().items():
-        setattr(duck, k, v)
-    db.commit()
-    db.refresh(duck)
-    return duck
-
-
-@app.delete("/api/ducks/{duck_id}")
-def delete_duck(
-    duck_id: int,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    duck = db.get(models.Duck, duck_id)
-    if not duck:
-        raise HTTPException(404, "小鸭不存在")
-    db.delete(duck)
-    db.commit()
-    return {"ok": True}
 
 
 # ---------------- 能力维度 ----------------
