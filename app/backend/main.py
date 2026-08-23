@@ -1,4 +1,5 @@
 """鸭鸭日记本 FastAPI 后端应用入口。"""
+from contextlib import asynccontextmanager
 import hashlib
 import logging
 import time
@@ -12,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import ai_engine, models, schemas
-from .database import Base, SessionLocal, engine, get_db
+from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
 
 # 日志：同时输出到 logs/app.log 与控制台，便于排查
 LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
@@ -27,7 +28,18 @@ logging.basicConfig(
 )
 logger = logging.getLogger("duck_diary")
 
-app = FastAPI(title="鸭鸭日记本", version="1.0.0")
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("runtime database: db_mode=%s path=%s", DB_MODE, DATABASE_PATH)
+    Base.metadata.create_all(bind=engine)
+    _seed_dimensions()
+    if DB_MODE == "app":
+        _seed_demo_data()
+    yield
+
+
+app = FastAPI(title="鸭鸭日记本", version="1.0.0", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -656,9 +668,3 @@ def overview(db: Session = Depends(get_db)):
 FRONTEND_DIR = __import__("pathlib").Path(__file__).resolve().parent.parent / "frontend"
 if FRONTEND_DIR.exists():
     app.mount("/", StaticFiles(directory=str(FRONTEND_DIR), html=True), name="frontend")
-
-
-# 模块加载即初始化数据库与默认维度（兼容 TestClient 与 uvicorn）
-Base.metadata.create_all(bind=engine)
-_seed_dimensions()
-_seed_demo_data()

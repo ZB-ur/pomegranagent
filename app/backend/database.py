@@ -1,14 +1,14 @@
 """数据库连接与会话（SQLite + SQLAlchemy 2.0）。"""
-from pathlib import Path
-
 from sqlalchemy import create_engine
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
 
-# 数据库文件放在项目 data/ 目录下
-DATA_DIR = Path(__file__).resolve().parent.parent.parent / "data"
-DATA_DIR.mkdir(exist_ok=True)
+from .settings import RuntimeSettings
 
-SQLALCHEMY_DATABASE_URL = f"sqlite:///{DATA_DIR / 'duck_diary.db'}"
+SETTINGS = RuntimeSettings.from_env()
+DATABASE_PATH = SETTINGS.db_path
+DB_MODE = SETTINGS.db_mode
+DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+SQLALCHEMY_DATABASE_URL = f"sqlite:///{DATABASE_PATH}"
 
 engine = create_engine(
     SQLALCHEMY_DATABASE_URL,
