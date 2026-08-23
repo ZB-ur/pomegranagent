@@ -57,15 +57,19 @@ def _stored_replay(
     operation: str,
     payload_hash: str,
     response_type: type[_Response],
+    record: models.RosterRequest | None = None,
 ) -> _Response:
-    record = db.scalar(
-        select(models.RosterRequest)
-        .where(models.RosterRequest.request_id == request_id)
-        .execution_options(populate_existing=True)
-    )
     if record is None:
+        record = db.scalar(
+            select(models.RosterRequest)
+            .where(models.RosterRequest.request_id == request_id)
+            .execution_options(populate_existing=True)
+        )
+    if record is None:
+        db.rollback()
         raise APIError(500, "INTERNAL_ERROR", "服务暂时不可用，请稍后重试", retryable=True)
     if record.operation != operation or record.payload_hash != payload_hash:
+        db.rollback()
         raise _error(409, "IDEMPOTENCY_CONFLICT")
     if record.status == "succeeded":
         if not record.response_json:
@@ -97,14 +101,23 @@ def _claim_request(
     db.add(record)
     try:
         db.flush()
-    except IntegrityError:
+    except IntegrityError as error:
         db.rollback()
+        record = db.scalar(
+            select(models.RosterRequest)
+            .where(models.RosterRequest.request_id == request_id)
+            .execution_options(populate_existing=True)
+        )
+        if record is None:
+            db.rollback()
+            raise error
         return None, _stored_replay(
             db,
             request_id=request_id,
             operation=operation,
             payload_hash=payload_hash,
             response_type=response_type,
+            record=record,
         )
     return record, None
 

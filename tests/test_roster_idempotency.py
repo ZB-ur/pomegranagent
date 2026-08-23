@@ -4,7 +4,7 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 import hashlib
 import json
-from threading import Barrier, Thread
+from threading import Barrier, Lock, Thread
 from uuid import uuid4
 
 import pytest
@@ -493,6 +493,208 @@ def test_unrelated_integrity_error_is_not_mislabeled_as_a_roster_date_conflict(
     with SessionLocal() as fresh:
         assert fresh.scalars(select(models.DutyRoster)).all() == []
         assert fresh.get(models.RosterRequest, str(payload.request_id)) is None
+
+
+def test_unrelated_first_claim_integrity_error_is_reraised_without_a_ledger(
+    db_session,
+    monkeypatch,
+):
+    """Catches a claim collision handler that disguises an unrelated first flush failure as replay."""
+    _child(db_session, name="甲")
+    _child(db_session, name="乙")
+    payload = schemas.AutoRosterRequest.model_validate(_auto_body(days=1))
+    expected = IntegrityError(
+        "INSERT INTO unrelated_claim",
+        {},
+        Exception("unrelated first claim constraint"),
+    )
+
+    def fail_first_claim_flush(*args, **kwargs):
+        raise expected
+
+    monkeypatch.setattr(db_session, "flush", fail_first_claim_flush)
+
+    with pytest.raises(IntegrityError) as raised:
+        roster_service.generate_roster(db_session, payload, now=NOW)
+
+    assert raised.value is expected
+    with SessionLocal() as fresh:
+        assert fresh.get(models.RosterRequest, str(payload.request_id)) is None
+        assert fresh.scalars(select(models.DutyRoster)).all() == []
+
+
+def test_concurrent_daily_same_uuid_returns_one_snapshot_and_one_replay(db_session):
+    """Catches concurrent daily retries that produce multiple commits instead of a stable replay."""
+    first = _child(db_session, name="甲")
+    second = _child(db_session, name="乙")
+    payload = schemas.DailyRosterRequest.model_validate(
+        _daily_body(
+            child_ids=[second.id, first.id],
+            request_id="293b175d-4fc1-4fe8-83de-7f445bd5e6ed",
+        )
+    )
+    start = Barrier(2)
+    lock = Lock()
+    results: list[schemas.DailyRosterResponse] = []
+    failures: list[BaseException] = []
+
+    def write_daily() -> None:
+        session = SessionLocal()
+        try:
+            start.wait(timeout=2)
+            response = roster_service.set_daily_roster(
+                session,
+                payload,
+                roster_date=date(2026, 8, 24),
+                now=NOW,
+            )
+            with lock:
+                results.append(response)
+        except BaseException as error:
+            with lock:
+                failures.append(error)
+        finally:
+            session.close()
+
+    threads = [Thread(target=write_daily), Thread(target=write_daily)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert failures == []
+    assert sorted(response.replayed for response in results) == [False, True]
+    assert {
+        json.dumps(response.model_dump(mode="json", exclude={"replayed"}), sort_keys=True)
+        for response in results
+    } == {
+        json.dumps(
+            {
+                "request_id": str(payload.request_id),
+                "date": "2026-08-24",
+                "cycle": "2026-W34",
+                "child_ids": [first.id, second.id],
+            },
+            sort_keys=True,
+        )
+    }
+    with SessionLocal() as fresh:
+        record = fresh.get(models.RosterRequest, str(payload.request_id))
+        assert record is not None
+        assert record.status == "succeeded"
+        assert schemas.DailyRosterResponse.model_validate_json(record.response_json).model_dump(mode="json") == {
+            "request_id": str(payload.request_id),
+            "date": "2026-08-24",
+            "cycle": "2026-W34",
+            "child_ids": [first.id, second.id],
+            "replayed": False,
+        }
+        assert fresh.scalar(select(func.count(models.RosterRequest.request_id))) == 1
+        assert fresh.scalar(select(func.count(models.DutyRoster.id))) == 2
+
+
+def test_concurrent_auto_distinct_uuids_leave_one_schedule_and_one_date_conflict(db_session):
+    """Catches colliding auto writers that strand a ledger or partially write a losing schedule."""
+    first = _child(db_session, name="甲")
+    second = _child(db_session, name="乙")
+    payloads = [
+        schemas.AutoRosterRequest.model_validate(
+            _auto_body(request_id=request_id, days=1)
+        )
+        for request_id in (
+            "1d4a2815-1798-490e-bbd2-2a0a94e66ec6",
+            "bdf2651a-1992-4578-995e-7231fd11a24e",
+        )
+    ]
+    start = Barrier(2)
+    lock = Lock()
+    successes: list[schemas.AutoRosterResponse] = []
+    conflicts: list[APIError] = []
+    failures: list[BaseException] = []
+
+    def generate(payload: schemas.AutoRosterRequest) -> None:
+        session = SessionLocal()
+        try:
+            start.wait(timeout=2)
+            response = roster_service.generate_roster(session, payload, now=NOW)
+            with lock:
+                successes.append(response)
+        except APIError as error:
+            with lock:
+                conflicts.append(error)
+        except BaseException as error:
+            with lock:
+                failures.append(error)
+        finally:
+            session.close()
+
+    threads = [Thread(target=generate, args=(payload,)) for payload in payloads]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert failures == []
+    assert len(successes) == 1
+    assert successes[0].replayed is False
+    assert [error.code for error in conflicts] == ["ROSTER_DATE_CONFLICT"]
+    with SessionLocal() as fresh:
+        assert [
+            (row.date, row.child_id)
+            for row in fresh.scalars(
+                select(models.DutyRoster).order_by(models.DutyRoster.id)
+            )
+        ] == [
+            ("2026-08-24", first.id),
+            ("2026-08-24", second.id),
+        ]
+        records = fresh.scalars(select(models.RosterRequest).order_by(models.RosterRequest.request_id)).all()
+        assert len(records) == 1
+        assert records[0].status == "succeeded"
+        assert records[0].request_id in {str(payload.request_id) for payload in payloads}
+
+
+def test_daily_final_flush_failure_rolls_back_replacement_and_ledger_from_a_fresh_session(
+    db_session,
+    monkeypatch,
+):
+    """Catches a daily final flush failure that leaves either replaced rows or a response snapshot durable."""
+    first = _child(db_session, name="甲")
+    second = _child(db_session, name="乙")
+    old = _child(db_session, name="旧")
+    _roster(db_session, roster_date="2026-08-24", child_id=old.id, cycle="old")
+    request_id = str(uuid4())
+    payload = schemas.DailyRosterRequest.model_validate(
+        _daily_body(child_ids=[first.id, second.id], request_id=request_id)
+    )
+    original_flush = db_session.flush
+    flush_count = 0
+
+    def fail_daily_final_flush(*args, **kwargs):
+        nonlocal flush_count
+        flush_count += 1
+        if flush_count == 2:
+            raise RuntimeError("forced daily final flush failure")
+        return original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(db_session, "flush", fail_daily_final_flush)
+
+    with pytest.raises(RuntimeError, match="forced daily final flush failure"):
+        roster_service.set_daily_roster(
+            db_session,
+            payload,
+            roster_date=date(2026, 8, 24),
+            now=NOW,
+        )
+
+    with SessionLocal() as fresh:
+        assert [
+            (row.date, row.cycle, row.child_id)
+            for row in fresh.scalars(select(models.DutyRoster).order_by(models.DutyRoster.id))
+        ] == [("2026-08-24", "old", old.id)]
+        assert fresh.get(models.RosterRequest, request_id) is None
 
 
 def test_processing_roster_request_is_retryable_and_never_mutates_rows(client, db_session):
