@@ -19,6 +19,7 @@ from ..services.chat import (
     commit_chat_success,
     record_chat_failure,
 )
+from ..services.completion import complete_conversation
 
 
 logger = logging.getLogger("duck_diary.chat")
@@ -76,6 +77,24 @@ def get_active_conversation(
     db: Session = Depends(get_db),
 ) -> schemas.ActiveConversationResponse:
     return _context_response(db, child_id)
+
+
+@router.post(
+    "/api/conversations/{conversation_id}/complete",
+    response_model=schemas.ConversationCompleteResponse,
+)
+def complete(
+    conversation_id: int,
+    payload: schemas.ConversationCompleteRequest,
+    db: Session = Depends(get_db),
+) -> schemas.ConversationCompleteResponse:
+    now = datetime.utcnow()
+    return complete_conversation(
+        db,
+        conversation_id=conversation_id,
+        expected_last_message_id=payload.expected_last_message_id,
+        now=now,
+    )
 
 
 def _validated_ai_reply(result: object) -> tuple[str, bool, str | None]:
