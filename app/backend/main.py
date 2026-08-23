@@ -19,6 +19,7 @@ from .auth import require_teacher_session
 from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
 from .http_boundary import install_same_origin_boundary
 from .routes.conversations import router as conversations_router
+from .routes.roster import router as roster_router
 from .versioning import VERSION_FILE, load_runtime_version
 
 RUNTIME_VERSION = load_runtime_version()
@@ -66,6 +67,7 @@ install_api_error_handling(app)
 install_same_origin_boundary(app)
 app.include_router(auth.router)
 app.include_router(conversations_router)
+app.include_router(roster_router)
 
 
 @app.get("/api/health", response_model=schemas.HealthResponse)
@@ -253,80 +255,6 @@ def delete_duck(
     db.delete(duck)
     db.commit()
     return {"ok": True}
-
-
-# ---------------- 排班 ----------------
-@app.get("/api/roster")
-def list_roster(
-    cycle: str | None = None,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    q = select(models.DutyRoster).order_by(models.DutyRoster.date)
-    if cycle:
-        q = q.where(models.DutyRoster.cycle == cycle)
-    rows = db.scalars(q).all()
-    return [
-        {"id": r.id, "cycle": r.cycle, "date": r.date, "child_id": r.child_id}
-        for r in rows
-    ]
-
-
-@app.get("/api/roster/today")
-def today_roster(db: Session = Depends(get_db)):
-    """今日值日生（含幼儿信息）。无排班返回空列表，前端降级展示全部幼儿。"""
-    today = date.today().isoformat()
-    rows = db.scalars(
-        select(models.DutyRoster).where(models.DutyRoster.date == today).order_by(models.DutyRoster.id)
-    ).all()
-    children = []
-    for r in rows:
-        c = db.get(models.Child, r.child_id)
-        if c:
-            children.append({"id": c.id, "name": c.name, "nickname": c.nickname, "avatar": c.avatar})
-    return children
-
-
-@app.post("/api/roster")
-def set_roster(
-    payload: schemas.RosterIn,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    # 删除该日期旧排班，写入新排班
-    for old in db.scalars(select(models.DutyRoster).where(models.DutyRoster.date == payload.date)).all():
-        db.delete(old)
-    for cid in payload.child_ids:
-        db.add(models.DutyRoster(cycle=payload.cycle, date=payload.date, child_id=cid))
-    db.commit()
-    return {"ok": True, "date": payload.date, "child_ids": payload.child_ids}
-
-
-@app.post("/api/roster/auto")
-def auto_roster(
-    payload: dict,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    """自动轮值：从 start_date 起，每个工作日 2 名幼儿按名单顺序轮转。"""
-    child_ids = [c.id for c in db.scalars(select(models.Child).where(models.Child.active == True).order_by(models.Child.id)).all()]
-    start = date.fromisoformat(payload["start_date"])
-    days = int(payload.get("days", 10))
-    cycle = payload.get("cycle", "auto")
-    created = []
-    idx = 0
-    d = start
-    for _ in range(days):
-        while d.weekday() >= 5:  # 跳过周末
-            d += timedelta(days=1)
-        pair = [child_ids[(idx + j) % len(child_ids)] for j in range(2)]
-        for cid in pair:
-            db.add(models.DutyRoster(cycle=cycle, date=d.isoformat(), child_id=cid))
-        created.append({"date": d.isoformat(), "child_ids": pair})
-        idx += 2
-        d += timedelta(days=1)
-    db.commit()
-    return {"ok": True, "schedule": created}
 
 
 # ---------------- 能力维度 ----------------
