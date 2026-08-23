@@ -47,3 +47,39 @@ The final verification also runs `node --check` on the module and test, plus
 
 - Message: `feat(child): add explicit interaction state machine`
 - Files: `app/frontend/child/machine.mjs`, `tests/frontend/child/machine.test.mjs`, `.superpowers/sdd/2026-08-23-child-interaction-recovery/task-1-report.md`
+
+## Independent-review remediation
+
+The independent review of `37cc270` found valid state-boundary gaps. Before
+changing production code, the expanded focused suite ran RED with `27` tests:
+`16` passed and `11` failed. The expected failures proved all of the following
+missing behaviors: `revision: 0` acceptance; established-conversation ID
+matching; both `ended`/`end_reason` consistency directions; replay conflict
+rejection; saving/completed message-history and final-message boundaries;
+positive completion message count validation; rejection of an incomplete
+recovered completed snapshot; and an own `event.type` requirement.
+
+The minimal remediation makes `revision` nullable/non-negative, rejects a
+submit result that changes an established conversation, validates both end
+semantics, and requires an own event type. It also validates the same persisted
+conversation boundary in `saving_conversation` and `completed`: positive
+conversation/last-message IDs, at least one message, and a final message whose
+ID equals `lastMessageId`. Completion `message_count` is positive and must
+still equal the local message length.
+
+Replay acknowledgement dedupe now admits an already-known ID only when every
+existing occurrence has the same role and text as the incoming child/diary
+message. The ordered child-then-diary pass remains intact and result IDs remain
+distinct. A second focused RED run (`28` total; `27` passed, `1` failed) proved
+that a last-entry-only lookup could conceal an older conflicting duplicate; the
+final scan fixes that case.
+
+GREEN evidence after the remediation:
+
+```text
+node --unhandled-rejections=strict --test tests/frontend/child/machine.test.mjs
+# 28 passed, 0 failed
+```
+
+Final verification reruns this exact strict suite twice, checks both ES modules
+with `node --check`, and runs `git diff --check` before the follow-up commit.

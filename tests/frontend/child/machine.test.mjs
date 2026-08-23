@@ -78,6 +78,20 @@ function savingSnapshot(overrides = {}) {
   });
 }
 
+function completedSnapshot(overrides = {}) {
+  return createInitialSnapshot({
+    value: 'completed',
+    child: child(),
+    conversationId: 9,
+    lastMessageId: 42,
+    messages: [
+      { id: 41, role: 'child', text: '我喂了小鸭' },
+      { id: 42, role: 'diary', text: '真棒！' },
+    ],
+    ...overrides,
+  });
+}
+
 test('exports exactly the approved child states and immutable initial snapshots', () => {
   assert.deepEqual(Object.keys(machine).sort(), [
     'STATES', 'assertSnapshot', 'controlsFor', 'createInitialSnapshot', 'transition',
@@ -97,6 +111,10 @@ test('exports exactly the approved child states and immutable initial snapshots'
   assert.notEqual(first.roster, second.roster);
   assert.notEqual(first.messages, second.messages);
   assert.equal(assertSnapshot(first), first);
+});
+
+test('snapshot revision accepts the active-conversation initial revision zero', () => {
+  assert.equal(createInitialSnapshot({ revision: 0 }).revision, 0);
 });
 
 test('one event path reaches saved completion through every required state', () => {
@@ -145,14 +163,17 @@ test('every explicitly legal transition accepts its documented source', () => {
     [submittingSnapshot(), { type: 'SUBMIT_FAILED', error: error() }, 'submission_failed'],
     [createInitialSnapshot({ value: 'submission_failed', child: child(), draft: draft(), error: error() }), { type: 'RETRY_SUBMIT' }, 'submitting'],
     [createInitialSnapshot({ value: 'speaking', shouldComplete: false }), { type: 'TTS_SETTLED' }, 'ready'],
-    [createInitialSnapshot({ value: 'speaking', shouldComplete: true, conversationId: 9, lastMessageId: 42 }), { type: 'TTS_SETTLED' }, 'saving_conversation'],
+    [createInitialSnapshot({
+      value: 'speaking', shouldComplete: true, conversationId: 9, lastMessageId: 42,
+      messages: [{ id: 42, role: 'diary', text: '真棒！' }],
+    }), { type: 'TTS_SETTLED' }, 'saving_conversation'],
     [savingSnapshot(), { type: 'COMPLETE_SUCCEEDED', result: completeResult() }, 'completed'],
     [savingSnapshot(), { type: 'COMPLETE_FAILED', error: error() }, 'recovery'],
     [savingSnapshot(), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [createInitialSnapshot({ value: 'recovery' }), { type: 'RECOVERY_RESOLVED', snapshot: recoverySnapshot }, 'ready'],
     [createInitialSnapshot({ value: 'recovery' }), { type: 'TEACHER_UNLOCKED' }, 'recovery'],
     [createInitialSnapshot({ value: 'recovery' }), { type: 'RESET' }, 'welcome'],
-    [createInitialSnapshot({ value: 'completed' }), { type: 'RESET' }, 'welcome'],
+    [completedSnapshot(), { type: 'RESET' }, 'welcome'],
   ];
 
   for (const [snapshot, event, expected] of cases) {
@@ -167,7 +188,7 @@ test('rejects representative illegal state and event pairs', () => {
     [createInitialSnapshot(), { type: 'ROSTER_LOADED', children: [] }],
     [createInitialSnapshot({ value: 'ready' }), { type: 'SPEECH_FINAL', draft: draft() }],
     [createInitialSnapshot({ value: 'submission_failed', child: child(), draft: draft(), error: error({ retryable: false }) }), { type: 'RETRY_SUBMIT' }],
-    [createInitialSnapshot({ value: 'completed' }), { type: 'TEACHER_UNLOCKED' }],
+    [completedSnapshot(), { type: 'TEACHER_UNLOCKED' }],
     [createInitialSnapshot({ value: 'recovery' }), { type: 'BEGIN_RECOVERY' }],
   ]) {
     assert.throws(() => transition(snapshot, event), /Illegal transition/);
@@ -232,20 +253,61 @@ test('successful submission requires a matching draft request and distinct posit
   }), /positive/);
 });
 
+test('successful submission cannot switch an established conversation', () => {
+  assert.throws(() => transition(submittingSnapshot({ conversationId: 8 }), {
+    type: 'SUBMIT_SUCCEEDED', result: chatResult({ conversation_id: 9 }),
+  }), /conversation/);
+});
+
+test('successful submission rejects an unfinished result with an end reason', () => {
+  assert.throws(() => transition(submittingSnapshot(), {
+    type: 'SUBMIT_SUCCEEDED', result: chatResult({ ended: false, end_reason: 'complete' }),
+  }), /ended=false/);
+});
+
+test('successful submission rejects a finished result without an end reason', () => {
+  assert.throws(() => transition(submittingSnapshot(), {
+    type: 'SUBMIT_SUCCEEDED', result: chatResult({ ended: true, end_reason: null }),
+  }), /ended=true/);
+});
+
 test('acknowledgements dedupe sequentially in child then diary order', () => {
   const snapshot = submittingSnapshot({
     messages: [
       { id: 5, role: 'diary', text: '旧消息' },
-      { id: 41, role: 'child', text: '已确认的孩子消息' },
+      { id: 41, role: 'child', text: '我喂了小鸭' },
     ],
   });
   const next = transition(snapshot, { type: 'SUBMIT_SUCCEEDED', result: chatResult() });
 
   assert.deepEqual(next.messages, [
     { id: 5, role: 'diary', text: '旧消息' },
-    { id: 41, role: 'child', text: '已确认的孩子消息' },
+    { id: 41, role: 'child', text: '我喂了小鸭' },
     { id: 42, role: 'diary', text: '真棒！' },
   ]);
+});
+
+test('acknowledgement replay dedupe rejects an existing child or diary ID with different content', () => {
+  for (const message of [
+    { id: 41, role: 'diary', text: '我喂了小鸭' },
+    { id: 42, role: 'diary', text: '不同的日记回复' },
+  ]) {
+    assert.throws(() => transition(submittingSnapshot({ messages: [message] }), {
+      type: 'SUBMIT_SUCCEEDED', result: chatResult(),
+    }), /acknowledged message ID conflicts/);
+  }
+});
+
+test('acknowledgement replay rejects every conflicting duplicate already in message history', () => {
+  const snapshot = submittingSnapshot({
+    messages: [
+      { id: 41, role: 'child', text: '较早的冲突文本' },
+      { id: 41, role: 'child', text: '我喂了小鸭' },
+    ],
+  });
+  assert.throws(() => transition(snapshot, {
+    type: 'SUBMIT_SUCCEEDED', result: chatResult(),
+  }), /acknowledged message ID conflicts/);
 });
 
 test('completion enters completed only after saved conversation and all local boundaries match', () => {
@@ -259,6 +321,31 @@ test('completion enters completed only after saved conversation and all local bo
     assert.throws(() => transition(snapshot, { type: 'COMPLETE_SUCCEEDED', result }), /completion/);
   }
   assert.equal(transition(snapshot, { type: 'COMPLETE_SUCCEEDED', result: completeResult() }).value, 'completed');
+});
+
+test('saving conversation rejects an empty message history', () => {
+  assert.throws(() => createInitialSnapshot({
+    value: 'saving_conversation', conversationId: 9, lastMessageId: 42, messages: [],
+  }), /at least one message/);
+});
+
+test('saving conversation requires lastMessageId to match its final message', () => {
+  assert.throws(() => createInitialSnapshot({
+    value: 'saving_conversation', conversationId: 9, lastMessageId: 42,
+    messages: [{ id: 41, role: 'child', text: '我喂了小鸭' }],
+  }), /lastMessageId/);
+});
+
+test('completed snapshot keeps the same persisted conversation boundary', () => {
+  assert.throws(() => createInitialSnapshot({
+    value: 'completed', conversationId: 9, lastMessageId: 42, messages: [],
+  }), /at least one message/);
+});
+
+test('completion result rejects a nonpositive message_count before comparing the boundary', () => {
+  assert.throws(() => transition(savingSnapshot(), {
+    type: 'COMPLETE_SUCCEEDED', result: completeResult({ message_count: 0 }),
+  }), /message_count.*positive/);
 });
 
 test('stopRequested is temporary and cannot leak into a fresh listening cycle', () => {
@@ -297,6 +384,22 @@ test('recovery resolution validates then copies and freezes the supplied snapsho
   assert.throws(() => transition(createInitialSnapshot({ value: 'recovery' }), {
     type: 'RECOVERY_RESOLVED', snapshot: { value: 'unknown' },
   }), /snapshot|Unknown child state/);
+});
+
+test('recovery resolution rejects a completed snapshot without persisted message boundaries', () => {
+  const incompleteCompleted = {
+    value: 'completed', roster: [], child: null, conversationId: 9, revision: null,
+    lastMessageId: 42, messages: [], draft: null, reply: null, shouldComplete: false,
+    stopRequested: false, error: null, teacherUnlocked: false,
+  };
+  assert.throws(() => transition(createInitialSnapshot({ value: 'recovery' }), {
+    type: 'RECOVERY_RESOLVED', snapshot: incompleteCompleted,
+  }), /at least one message/);
+});
+
+test('transition rejects an event type inherited from its prototype', () => {
+  const inheritedStart = Object.create({ type: 'START' });
+  assert.throws(() => transition(createInitialSnapshot(), inheritedStart), TypeError);
 });
 
 test('event-owned nested data cannot mutate a reducer-owned snapshot', () => {
@@ -358,7 +461,12 @@ test('controls derive the one child lock for every state without a mutable busy 
       value,
       teacherUnlocked: true,
       ...(value === 'submitting' ? { draft: draft(), child: child() } : {}),
-      ...(value === 'saving_conversation' ? { conversationId: 9, lastMessageId: 42 } : {}),
+      ...(value === 'saving_conversation' ? {
+        conversationId: 9, lastMessageId: 42, messages: [{ id: 42, role: 'diary', text: '真棒！' }],
+      } : {}),
+      ...(value === 'completed' ? {
+        conversationId: 9, lastMessageId: 42, messages: [{ id: 42, role: 'diary', text: '真棒！' }],
+      } : {}),
       ...(value === 'submission_failed' ? { error: error(), draft: draft(), child: child() } : {}),
     });
     const controls = controlsFor(snapshot);
@@ -374,7 +482,7 @@ test('controls derive the one child lock for every state without a mutable busy 
   }));
   assert.equal(lockedFailure.textDisabled, true);
   assert.equal(lockedFailure.retryDisabled, false);
-  const terminal = controlsFor(createInitialSnapshot({ value: 'completed', teacherUnlocked: true }));
+  const terminal = controlsFor(completedSnapshot({ teacherUnlocked: true }));
   assert.equal(terminal.recordDisabled, true);
   assert.equal(terminal.textDisabled, true);
   assert.equal(terminal.retryDisabled, true);

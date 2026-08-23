@@ -63,8 +63,8 @@ export function createInitialSnapshot(overrides = {}) {
 export function transition(snapshot, event) {
   assertSnapshot(snapshot);
   requireRecord(event, 'event');
-  if (typeof event.type !== 'string' || event.type.length === 0) {
-    throw new TypeError('event.type must be a non-empty string');
+  if (!Object.hasOwn(event, 'type') || typeof event.type !== 'string' || event.type.length === 0) {
+    throw new TypeError('event must have an own non-empty type');
   }
 
   switch (`${snapshot.value}:${event.type}`) {
@@ -192,6 +192,9 @@ function acceptSubmission(snapshot, rawResult) {
   if (result.request_id !== snapshot.draft.request_id) {
     throw new TypeError('response request_id must match draft request_id');
   }
+  if (snapshot.conversationId !== null && result.conversation_id !== snapshot.conversationId) {
+    throw new TypeError('response conversation_id must match the established conversation');
+  }
 
   return replace(snapshot, {
     value: 'speaking',
@@ -263,12 +266,13 @@ function appendAcknowledgedMessages(messages, childText, result) {
     { id: result.child_message_id, role: 'child', text: childText },
     { id: result.diary_message_id, role: 'diary', text: result.reply },
   ];
-  const seen = new Set(messages.map(message => message.id));
   const next = messages.map(normalizeMessage);
   for (const message of acknowledged) {
-    if (!seen.has(message.id)) {
-      seen.add(message.id);
+    const existing = next.filter(candidate => candidate.id === message.id);
+    if (existing.length === 0) {
       next.push(message);
+    } else if (existing.some(candidate => candidate.role !== message.role || candidate.text !== message.text)) {
+      throw new TypeError('acknowledged message ID conflicts with existing role or text');
     }
   }
   return next;
@@ -297,7 +301,7 @@ function normalizeSnapshot(snapshot) {
     roster: normalizeChildren(snapshot.roster),
     child: snapshot.child === null ? null : normalizeChild(snapshot.child),
     conversationId: nullablePositiveInteger(snapshot.conversationId, 'conversationId'),
-    revision: nullablePositiveInteger(snapshot.revision, 'revision'),
+    revision: nullableNonNegativeInteger(snapshot.revision, 'revision'),
     lastMessageId: nullablePositiveInteger(snapshot.lastMessageId, 'lastMessageId'),
     messages: normalizeMessages(snapshot.messages),
     draft: snapshot.draft === null ? null : normalizeDraft(snapshot.draft),
@@ -329,7 +333,7 @@ function validateSnapshot(snapshot) {
     normalizeChild(snapshot.child);
   }
   nullablePositiveInteger(snapshot.conversationId, 'conversationId');
-  nullablePositiveInteger(snapshot.revision, 'revision');
+  nullableNonNegativeInteger(snapshot.revision, 'revision');
   nullablePositiveInteger(snapshot.lastMessageId, 'lastMessageId');
   normalizeMessages(snapshot.messages);
   if (snapshot.draft !== null) {
@@ -345,9 +349,13 @@ function validateSnapshot(snapshot) {
   if (snapshot.value === 'submitting' && snapshot.draft === null) {
     throw new TypeError('submitting requires a persisted draft and request_id');
   }
-  if (snapshot.value === 'saving_conversation'
-    && (snapshot.conversationId === null || snapshot.lastMessageId === null)) {
-    throw new TypeError('saving_conversation requires conversationId and lastMessageId');
+  if (snapshot.value === 'saving_conversation' || snapshot.value === 'completed') {
+    if (snapshot.conversationId === null || snapshot.lastMessageId === null || snapshot.messages.length === 0) {
+      throw new TypeError(`${snapshot.value} requires conversationId, lastMessageId, and at least one message`);
+    }
+    if (snapshot.messages.at(-1).id !== snapshot.lastMessageId) {
+      throw new TypeError(`${snapshot.value} requires lastMessageId to match the final message`);
+    }
   }
 }
 
@@ -428,6 +436,13 @@ function normalizeChatResult(rawResult) {
     && rawResult.end_reason !== null) {
     throw new TypeError('end_reason must be max_rounds, complete, or null');
   }
+  const ended = boolean(rawResult.ended, 'ended');
+  if (!ended && rawResult.end_reason !== null) {
+    throw new TypeError('ended=false requires end_reason=null');
+  }
+  if (ended && rawResult.end_reason === null) {
+    throw new TypeError('ended=true requires an end_reason');
+  }
   return {
     request_id: nonEmptyString(rawResult.request_id, 'request_id'),
     conversation_id: positiveInteger(rawResult.conversation_id, 'conversation_id'),
@@ -435,7 +450,7 @@ function normalizeChatResult(rawResult) {
     diary_message_id: diaryMessageId,
     reply: nullableString(rawResult.reply, 'reply'),
     round: positiveInteger(rawResult.round, 'round'),
-    ended: boolean(rawResult.ended, 'ended'),
+    ended,
     end_reason: rawResult.end_reason,
     replayed: boolean(rawResult.replayed, 'replayed'),
   };
@@ -458,7 +473,7 @@ function normalizeCompletionResult(rawResult) {
     conversation_saved: true,
     status: 'completed',
     completed_at: timestamp(rawResult.completed_at, 'completed_at'),
-    message_count: nonNegativeInteger(rawResult.message_count, 'message_count'),
+    message_count: positiveInteger(rawResult.message_count, 'message_count'),
     last_message_id: positiveInteger(rawResult.last_message_id, 'last_message_id'),
     analysis_job_id: positiveInteger(rawResult.analysis_job_id, 'analysis_job_id'),
     analysis_status: rawResult.analysis_status,
@@ -481,6 +496,10 @@ function positiveInteger(value, name) {
 
 function nullablePositiveInteger(value, name) {
   return value === null ? null : positiveInteger(value, name);
+}
+
+function nullableNonNegativeInteger(value, name) {
+  return value === null ? null : nonNegativeInteger(value, name);
 }
 
 function nonNegativeInteger(value, name) {
