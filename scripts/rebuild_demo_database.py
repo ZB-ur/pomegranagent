@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import shutil
 import sys
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Callable
 
@@ -14,6 +15,9 @@ from typing import Callable
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+DEMO_SEED_DATE = date(2026, 8, 24)
+UNREACHABLE_ERRNOS = {errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH}
 
 
 @dataclass(frozen=True)
@@ -27,8 +31,11 @@ def local_service_is_running() -> bool:
     try:
         urllib.request.urlopen("http://127.0.0.1:8000/api/health", timeout=1).close()
         return True
-    except (urllib.error.URLError, TimeoutError):
-        return False
+    except urllib.error.URLError as error:
+        reason = error.reason
+        return not (isinstance(reason, OSError) and reason.errno in UNREACHABLE_ERRNOS)
+    except TimeoutError:
+        return True
 
 
 def rebuild_demo_database(
@@ -66,16 +73,18 @@ def rebuild_demo_database(
     local_sessions = sessionmaker(autocommit=False, autoflush=False, bind=local_engine)
     Base.metadata.create_all(bind=local_engine)
     _seed_dimensions(local_sessions)
-    _seed_demo_data(local_sessions)
+    _seed_demo_data(local_sessions, seed_date=DEMO_SEED_DATE)
     local_engine.dispose()
     return RebuildResult(db_path, archived_database, target_dir)
 
 
 def parse_args() -> argparse.Namespace:
+    from app.backend.settings import RuntimeSettings
+
     parser = argparse.ArgumentParser(
         description="Archive the current demo data and rebuild it with deterministic sample records."
     )
-    parser.add_argument("--database", type=Path, default=Path("data/duck_diary.db"))
+    parser.add_argument("--database", type=Path, default=RuntimeSettings.from_env().db_path)
     parser.add_argument("--archive-dir", type=Path, default=Path("data/archive"))
     parser.add_argument("--confirm-rebuild", action="store_true", required=True)
     return parser.parse_args()
