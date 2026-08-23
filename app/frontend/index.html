@@ -148,8 +148,8 @@
   <div id="root"></div>
 </div>
 
+<script src="/shared/api.js"></script>
 <script>
-const API = '';
 const DUCK_SVG = `<svg viewBox="0 0 100 100" width="100%" height="100%">
   <ellipse cx="50" cy="58" rx="34" ry="30" fill="#ffb800"/>
   <circle cx="42" cy="46" r="26" fill="#ffc53d"/>
@@ -206,9 +206,7 @@ function _speakEdgeTTS(text) {
     if (_ttsAvailable === false) { resolve(false); return; }
     let blob;
     try {
-      const resp = await fetch(API + '/api/tts?text=' + encodeURIComponent(text));
-      if (!resp.ok) { _ttsAvailable = false; resolve(false); return; }
-      blob = await resp.blob();
+      blob = await DuckAPI.request('/api/tts?text=' + encodeURIComponent(text), { responseType: 'blob', timeoutMs: 5000 });
     } catch (e) {
       _ttsAvailable = false;  // 网络/服务不可用，后续直接降级
       resolve(false);
@@ -280,7 +278,7 @@ function stopSpeak() {
 // 预合成：提前触发后端 TTS 合成并缓存，之后播报秒回（结果丢弃，缓存生效）
 function preloadTTS(text) {
   if (!text) return;
-  fetch(API + '/api/tts?text=' + encodeURIComponent(text)).catch(() => {});
+  DuckAPI.request('/api/tts?text=' + encodeURIComponent(text), { responseType: 'blob', timeoutMs: 5000 }).catch(() => {});
 }
 
 
@@ -308,11 +306,11 @@ function renderPicker() {
   picker.append(el('h2', null, '今天轮到谁值日呀？'));
   const grid = el('div', { class: 'grid' });
   // 优先显示当天值日生，无排班则降级展示全部幼儿
-  fetch(API + '/api/roster/today').then(r => r.json()).then(today => {
+  DuckAPI.request('/api/roster/today').then(today => {
     if (today && today.length) {
       return today;
     }
-    return fetch(API + '/api/children').then(r => r.json());
+    return DuckAPI.request('/api/children');
   }).then(children => {
     children.forEach(c => {
       grid.append(el('div', { class: 'child-card', onclick: () => startChat(c) },
@@ -443,11 +441,10 @@ function startConversation() {
     addBubble('child', text);
     setBusy(true);  // 锁死 PTT，等待 LLM 回复
     try {
-      const resp = await fetch(API + '/api/chat', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ child_id: state.child.id, text, conversation_id: state.convId, max_rounds: state.maxRounds }),
+      const data = await DuckAPI.request('/api/chat', {
+        method: 'POST',
+        body: { child_id: state.child.id, text, conversation_id: state.convId, max_rounds: state.maxRounds },
       });
-      const data = await resp.json();
       state.convId = data.conversation_id; state.round = data.round;
       addBubble('diary', data.reply);
       if (data.ended) {
@@ -466,7 +463,7 @@ function startConversation() {
 
   async function endSession() {
     state.ended = true;
-    try { await fetch(API + `/api/conversations/${state.convId}/finalize`, { method: 'POST' }); } catch (e) {}
+    try { await DuckAPI.request(`/api/conversations/${state.convId}/finalize`, { method: 'POST' }); } catch (e) {}
     showEnding();
   }
 
@@ -499,7 +496,7 @@ function confetti() {
   }
 }
 
-showWelcome();
+DuckAPI.ready().then(showWelcome).catch(() => {});
 </script>
 </body>
 </html>

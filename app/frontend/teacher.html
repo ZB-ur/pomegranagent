@@ -76,8 +76,8 @@
   <main id="main"></main>
 </div>
 
+<script src="/shared/api.js"></script>
 <script>
-const API = '';
 const main = document.getElementById('main');
 const views = {};
 
@@ -93,7 +93,7 @@ function h(tag, attrs, ...children) {
   for (const c of children) n.append(c);
   return n;
 }
-function api(path, opts) { return fetch(API + path, opts).then(r => r.json()); }
+function api(path, options) { return DuckAPI.request(path, options); }
 
 // 导航
 document.getElementById('nav').addEventListener('click', e => {
@@ -148,7 +148,7 @@ function children(v) {
   const nameIn = h('input', { placeholder: '全名' });
   const nickIn = h('input', { placeholder: '小名（选填）' });
   form.append(nameIn, nickIn, h('button', { class: 'btn', onclick: () => {
-    api('/api/children', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: nameIn.value, nickname: nickIn.value }) }).then(() => { nameIn.value = nickIn.value = ''; reload(); });
+    api('/api/children', { method: 'POST', body: { name: nameIn.value, nickname: nickIn.value } }).then(() => { nameIn.value = nickIn.value = ''; reload(); });
   } }, '添加幼儿'));
   v.append(form);
   const tbl = h('table');
@@ -178,7 +178,7 @@ function ducks(v) {
   const nameIn = h('input', { placeholder: '小鸭名字' });
   const statusIn = h('input', { placeholder: '状态（如：活泼健康）' });
   form.append(nameIn, statusIn, h('button', { class: 'btn', onclick: () => {
-    api('/api/ducks', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ name: nameIn.value, status: statusIn.value }) }).then(() => { nameIn.value = statusIn.value = ''; reload(); });
+    api('/api/ducks', { method: 'POST', body: { name: nameIn.value, status: statusIn.value } }).then(() => { nameIn.value = statusIn.value = ''; reload(); });
   } }, '添加小鸭'));
   v.append(form);
   const tbl = h('table');
@@ -211,7 +211,7 @@ function roster(v) {
   const cycleIn = h('input', { placeholder: '周期（如 第1周）', value: '第1周' });
   autoCard.append(h('div', { class: 'row' }, h('b', null, '自动轮值：'), '开始日期', startIn, '天数', daysIn, '周期', cycleIn,
     h('button', { class: 'btn', onclick: () => {
-      api('/api/roster/auto', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ start_date: startIn.value, days: +daysIn.value, cycle: cycleIn.value }) }).then(() => reload());
+      api('/api/roster/auto', { method: 'POST', body: { start_date: startIn.value, days: +daysIn.value, cycle: cycleIn.value } }).then(() => reload());
     } }, '生成排班')));
   v.append(autoCard);
 
@@ -222,7 +222,7 @@ function roster(v) {
   const chosen = [];
   manualCard.append(h('div', { class: 'row' }, '手动指定：日期', dateIn, '周期', cycle2, h('button', { class: 'btn green', onclick: () => {
     if (chosen.length !== 2) return alert('请选择 2 名幼儿');
-    api('/api/roster', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ cycle: cycle2.value, date: dateIn.value, child_ids: chosen }) }).then(() => reload());
+    api('/api/roster', { method: 'POST', body: { cycle: cycle2.value, date: dateIn.value, child_ids: chosen } }).then(() => reload());
   } }, '保存当日排班')));
   manualCard.append(h('div', { class: 'muted' }, '点击幼儿卡片选择 2 名值日幼儿：'));
   manualCard.append(selBox);
@@ -343,12 +343,12 @@ function review(v) {
             feeding_logs: d.feeding_logs.map((f, i) => ({ id: f.id, category: logsBox.children[i].children[0].value, content: logsBox.children[i].children[1].value })),
             emotion: { emotion: emoIn.value, intensity: +intIn.value },
           };
-          api('/api/conversations/' + convId + '/logs', { method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify(body) }).then(() => alert('已保存修正'));
+          api('/api/conversations/' + convId + '/logs', { method: 'PATCH', body }).then(() => alert('已保存修正'));
         }
         function confirmAssessment(convId, d) {
           const scores = {};
           Object.keys(scoreState).forEach(k => scores[k] = { score: scoreState[k] });
-          api('/api/assessments/' + d.assessment.id + '/confirm', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({ scores }) }).then(() => { alert('评估已确认'); openDetail(convId); });
+          api('/api/assessments/' + d.assessment.id + '/confirm', { method: 'POST', body: { scores } }).then(() => { alert('评估已确认'); openDetail(convId); });
         }
       }
       detail.append(card);
@@ -455,8 +455,10 @@ function routeFromHash() {
   if (v && ['overview','children','ducks','roster','review','growth','search'].includes(v)) show(v);
 }
 window.addEventListener('hashchange', routeFromHash);
-routeFromHash();
-if (!location.hash) show('overview');
+DuckAPI.ready().then(() => {
+  routeFromHash();
+  if (!location.hash) show('overview');
+}).catch(() => {});
 </script>
 </body>
 </html>
