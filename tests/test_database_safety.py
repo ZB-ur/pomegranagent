@@ -1,6 +1,11 @@
+import sys
 from pathlib import Path
 
 import pytest
+
+# Ensure the project package is importable when pytest prepends tests/ to sys.path.
+ROOT = Path(__file__).resolve().parent.parent
+sys.path.insert(0, str(ROOT))
 
 from app.backend.settings import (
     DATA_DIR,
