@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import ai_engine, models, schemas
+from .api_errors import install_api_error_handling
 from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
 from .versioning import VERSION_FILE, load_runtime_version
 
@@ -44,6 +45,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="鸭鸭日记本", version="1.0.0", lifespan=lifespan)
+install_api_error_handling(app)
 app.state.analysis_worker_status_provider = lambda: "not_started"
 
 app.add_middleware(

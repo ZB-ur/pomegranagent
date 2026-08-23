@@ -16,6 +16,18 @@ class HealthResponse(VersionResponse):
     analysis_worker_status: str
 
 
+class ErrorDetail(BaseModel):
+    code: str
+    message: str
+    field_errors: dict[str, list[str]]
+    retryable: bool
+    request_id: str
+
+
+class ErrorResponse(BaseModel):
+    error: ErrorDetail
+
+
 # ---------- 幼儿 ----------
 class ChildBase(BaseModel):
     name: str
