@@ -22,3 +22,16 @@ def test_shared_client_exports_frozen_contract():
     source = (ROOT / "app" / "frontend" / "shared" / "api.js").read_text(encoding="utf-8")
     for name in ("request", "bootstrapVersionGate", "ready", "APIError"):
         assert name in source
+
+
+def test_teacher_navigation_is_blocked_until_runtime_ready():
+    html = (ROOT / "app" / "frontend" / "teacher.html").read_text(encoding="utf-8")
+    assert '<nav class="nav" id="nav" aria-busy="true">' in html
+    assert html.count(" disabled>") == 7
+    assert "let runtimeReady = false;" in html
+    assert "if (!runtimeReady) return;" in html
+    assert "nav.setAttribute('aria-busy', 'true');" in html
+    assert "nav.querySelectorAll('button').forEach(button => { button.disabled = true; });" in html
+    assert "runtimeReady = true;" in html
+    assert "nav.removeAttribute('aria-busy');" in html
+    assert "nav.querySelectorAll('button').forEach(button => { button.disabled = false; });" in html

@@ -4,6 +4,8 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('../../../app/frontend/shared/api.js', import.meta.url), 'utf8');
+const teacherHtml = readFileSync(new URL('../../../app/frontend/teacher.html', import.meta.url), 'utf8');
+const teacherSource = teacherHtml.match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1];
 const jsonResponse = value => ({
   ok: true, status: 200,
   headers: new Headers({ 'content-type': 'application/json' }),
@@ -24,6 +26,63 @@ function loadDuckAPI(fetchImpl) {
     document, console,
   });
   return { api: window.DuckAPI, document };
+}
+
+function loadTeacherWithPendingReady() {
+  const listeners = {};
+  const requests = [];
+  let resolveReady;
+  const readyPromise = new Promise(resolve => { resolveReady = resolve; });
+  const button = {
+    dataset: { v: 'overview' },
+    disabled: false,
+    classList: { add() {}, remove() {} },
+    closest: () => button,
+  };
+  const nav = {
+    attributes: {},
+    addEventListener(type, listener) { listeners[`nav:${type}`] = listener; },
+    querySelectorAll: () => [button],
+    setAttribute(name, value) { this.attributes[name] = value; },
+    removeAttribute(name) { delete this.attributes[name]; },
+  };
+  const genericElement = () => ({
+    style: {},
+    classList: { add() {}, remove() {}, toggle() {} },
+    append() {},
+    appendChild() {},
+    addEventListener() {},
+    setAttribute() {},
+  });
+  const main = genericElement();
+  const document = {
+    getElementById: id => (id === 'nav' ? nav : main),
+    querySelectorAll: () => [button],
+    createElement: genericElement,
+  };
+  const window = {
+    addEventListener(type, listener) { listeners[type] = listener; },
+  };
+  const location = { hash: '' };
+  vm.runInNewContext(teacherSource, {
+    window, document, location,
+    DuckAPI: {
+      ready: () => readyPromise,
+      request: path => {
+        requests.push(path);
+        return new Promise(() => {});
+      },
+    },
+    URLSearchParams,
+    Object,
+    Array,
+    Set,
+    Math,
+    String,
+    Number,
+    console,
+  });
+  return { button, listeners, nav, location, requests, resolveReady };
 }
 
 test('a repeated sequenceKey cancels the older request without a network error', async () => {
@@ -63,4 +122,22 @@ test('version mismatch enters maintenance before any business request', async ()
   await assert.rejects(api.ready(), error => error.code === 'VERSION_MISMATCH');
   assert.equal(document.documentElement.dataset.appState, 'maintenance');
   assert.equal(seen.length, 2);
+});
+
+test('teacher navigation and hash routes cannot start business requests before runtime readiness', async () => {
+  const teacher = loadTeacherWithPendingReady();
+  teacher.location.hash = '#children';
+  teacher.listeners.hashchange();
+  teacher.listeners['nav:click']({ target: teacher.button });
+  await Promise.resolve();
+  assert.deepEqual(teacher.requests, []);
+  assert.equal(teacher.button.disabled, true);
+  assert.equal(teacher.nav.attributes['aria-busy'], 'true');
+
+  teacher.resolveReady();
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.deepEqual(teacher.requests, ['/api/children']);
+  assert.equal(teacher.button.disabled, false);
+  assert.equal(teacher.nav.attributes['aria-busy'], undefined);
 });
