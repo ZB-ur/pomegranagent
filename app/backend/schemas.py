@@ -150,20 +150,26 @@ class MutableRequestModel(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
 
-class RosterTodayChild(BaseModel):
+class StrictResponseModel(BaseModel):
+    """Base for frozen public response shapes; unknown output is a contract bug."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
+class RosterTodayChild(StrictResponseModel):
     id: PositiveInt
     name: str
     nickname: str | None = None
     avatar: str | None = None
 
 
-class ConversationMessage(BaseModel):
+class ConversationMessage(StrictResponseModel):
     id: PositiveInt
     role: Literal["child", "diary"]
     text: str
 
 
-class ActiveConversation(BaseModel):
+class ActiveConversation(StrictResponseModel):
     id: PositiveInt
     child_id: PositiveInt
     status: Literal["active"]
@@ -173,11 +179,11 @@ class ActiveConversation(BaseModel):
     messages: list[ConversationMessage]
 
 
-class ActiveConversationResponse(BaseModel):
+class ActiveConversationResponse(StrictResponseModel):
     conversation: ActiveConversation | None
 
 
-class ChatResponse(BaseModel):
+class ChatResponse(StrictResponseModel):
     request_id: UUID
     conversation_id: PositiveInt
     child_message_id: PositiveInt
@@ -193,7 +199,7 @@ class ConversationCompleteRequest(MutableRequestModel):
     expected_last_message_id: PositiveInt
 
 
-class ConversationCompleteResponse(BaseModel):
+class ConversationCompleteResponse(StrictResponseModel):
     conversation_id: PositiveInt
     conversation_saved: bool
     status: Literal["completed"]
@@ -205,14 +211,14 @@ class ConversationCompleteResponse(BaseModel):
     replayed: bool
 
 
-class ChildIdentity(BaseModel):
+class ChildIdentity(StrictResponseModel):
     id: PositiveInt
     name: str
     nickname: str | None = None
     avatar: str | None = None
 
 
-class ConversationQueueItem(BaseModel):
+class ConversationQueueItem(StrictResponseModel):
     id: PositiveInt
     child: ChildIdentity
     date: date
@@ -227,12 +233,12 @@ class ConversationQueueItem(BaseModel):
     revision: int = Field(ge=0)
 
 
-class AnalysisError(BaseModel):
+class AnalysisError(StrictResponseModel):
     code: Literal["ANALYSIS_UPSTREAM_FAILED"]
     message: Literal["分析服务暂时不可用"]
 
 
-class ConversationAnalysis(BaseModel):
+class ConversationAnalysis(StrictResponseModel):
     job_id: PositiveInt
     status: AnalysisJobStatus
     attempt_count: int = Field(ge=0)
@@ -241,27 +247,27 @@ class ConversationAnalysis(BaseModel):
     updated_at: datetime
 
 
-class ReviewFeedingLog(BaseModel):
+class ReviewFeedingLog(StrictResponseModel):
     id: PositiveInt
     category: FeedingCategory
     content: str
     duck_id: PositiveInt | None = None
 
 
-class ReviewEmotion(BaseModel):
+class ReviewEmotion(StrictResponseModel):
     emotion: str
     intensity: int = Field(ge=1, le=5)
     note: str | None = None
 
 
-class ReviewScore(BaseModel):
+class ReviewScore(StrictResponseModel):
     dimension_id: PositiveInt
     dimension_name: str
     score: int = Field(ge=1, le=5)
     reason: str
 
 
-class ReviewDocument(BaseModel):
+class ReviewDocument(StrictResponseModel):
     feeding_logs: list[ReviewFeedingLog]
     emotion: ReviewEmotion
     insight: str
@@ -269,7 +275,7 @@ class ReviewDocument(BaseModel):
     overall: float
 
 
-class ConversationDetail(BaseModel):
+class ConversationDetail(StrictResponseModel):
     id: PositiveInt
     child: ChildIdentity
     date: date
@@ -342,8 +348,19 @@ class ReviewRequest(MutableRequestModel):
             return value.strip()
         return value
 
+    @field_validator("scores")
+    @classmethod
+    def require_unique_score_dimensions(
+        cls,
+        value: list[ReviewScoreRequest],
+    ) -> list[ReviewScoreRequest]:
+        dimension_ids = [score.dimension_id for score in value]
+        if len(dimension_ids) != len(set(dimension_ids)):
+            raise ValueError("scores must contain unique dimension_id values")
+        return value
 
-class ReviewResponse(BaseModel):
+
+class ReviewResponse(StrictResponseModel):
     saved: bool
     conversation_id: PositiveInt
     review_status: Literal["draft", "confirmed"]
@@ -352,7 +369,7 @@ class ReviewResponse(BaseModel):
     review: ReviewDocument
 
 
-class AnalysisRetryResponse(BaseModel):
+class AnalysisRetryResponse(StrictResponseModel):
     conversation_id: PositiveInt
     analysis_job_id: PositiveInt
     analysis_status: Literal["pending"]
@@ -381,7 +398,7 @@ class DailyRosterRequest(MutableRequestModel):
         return value
 
 
-class DailyRosterResponse(BaseModel):
+class DailyRosterResponse(StrictResponseModel):
     request_id: UUID
     date: date
     cycle: str
@@ -404,18 +421,18 @@ class AutoRosterRequest(MutableRequestModel):
         return value
 
 
-class AutoRosterScheduleItem(BaseModel):
+class AutoRosterScheduleItem(StrictResponseModel):
     date: date
     child_ids: list[PositiveInt]
 
 
-class AutoRosterResponse(BaseModel):
+class AutoRosterResponse(StrictResponseModel):
     request_id: UUID
     schedule: list[AutoRosterScheduleItem]
     replayed: bool
 
 
-class DeactivationResponse(BaseModel):
+class DeactivationResponse(StrictResponseModel):
     id: PositiveInt
     kind: Literal["child", "duck"]
     name: str
@@ -432,7 +449,7 @@ class TeacherChildOut(ChildIdentity):
     has_active_conversation: bool
 
 
-class TeacherDuckOut(BaseModel):
+class TeacherDuckOut(StrictResponseModel):
     id: PositiveInt
     name: str
     avatar: str | None = None

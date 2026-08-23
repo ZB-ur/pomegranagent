@@ -6,7 +6,7 @@ from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import inspect, select
 from sqlalchemy.exc import IntegrityError
 
 from app.backend import models, schemas
@@ -70,6 +70,33 @@ def test_chat_request_id_is_the_primary_key_and_session_recovers_after_conflict(
     db_session.rollback()
 
     assert db_session.scalar(select(models.ChatRequestRecord.request_id)) == request_id
+
+
+def test_roster_request_id_is_the_primary_key_and_session_recovers_after_conflict(
+    db_session,
+):
+    request_id = str(uuid4())
+    db_session.add(
+        models.RosterRequest(
+            request_id=request_id,
+            operation="daily",
+            payload_hash="a" * 64,
+        )
+    )
+    db_session.commit()
+
+    db_session.add(
+        models.RosterRequest(
+            request_id=request_id,
+            operation="daily",
+            payload_hash="b" * 64,
+        )
+    )
+    with pytest.raises(IntegrityError):
+        db_session.flush()
+    db_session.rollback()
+
+    assert db_session.scalar(select(models.RosterRequest.request_id)) == request_id
 
 
 def test_only_one_active_conversation_is_allowed_per_child(db_session):
@@ -290,6 +317,88 @@ def test_review_request_normalizes_editable_text_but_leaves_blank_draft_reason_f
     assert payload.insight == "会主动观察小鸭的食量。"
     assert payload.scores[0].reason == ""
     assert payload.action == "save_draft"
+
+
+@pytest.mark.parametrize("action", ["save_draft", "confirm"])
+def test_review_request_rejects_duplicate_score_dimensions_for_every_action(action):
+    with pytest.raises(ValidationError):
+        schemas.ReviewRequest.model_validate(
+            {
+                "revision": 2,
+                "feeding_logs": [],
+                "emotion": {"emotion": "开心", "intensity": 4, "note": None},
+                "insight": "会主动观察小鸭的食量。",
+                "scores": [
+                    {"dimension_id": 1, "score": 4, "reason": "表达清晰。"},
+                    {"dimension_id": 1, "score": 5, "reason": "主动分享。"},
+                ],
+                "action": action,
+            }
+        )
+
+
+def test_pipeline_response_dtos_forbid_top_level_and_nested_extra_fields():
+    with pytest.raises(ValidationError):
+        schemas.ChatResponse.model_validate(
+            {
+                "request_id": str(uuid4()),
+                "conversation_id": 42,
+                "child_message_id": 105,
+                "diary_message_id": 106,
+                "reply": "小黄一定很开心。",
+                "round": 3,
+                "ended": True,
+                "end_reason": "max_rounds",
+                "replayed": False,
+                "unexpected": True,
+            }
+        )
+
+    with pytest.raises(ValidationError):
+        schemas.ActiveConversationResponse.model_validate(
+            {
+                "conversation": {
+                    "id": 42,
+                    "child_id": 7,
+                    "status": "active",
+                    "revision": 0,
+                    "round": 1,
+                    "last_message_id": 101,
+                    "messages": [
+                        {
+                            "id": 101,
+                            "role": "child",
+                            "text": "我喂了小黄",
+                            "unexpected": True,
+                        }
+                    ],
+                }
+            }
+        )
+
+
+def test_required_reliability_schema_names_are_visible_on_the_test_engine(db_session):
+    inspector = inspect(db_session.get_bind())
+    active_index = next(
+        index
+        for index in inspector.get_indexes("conversations")
+        if index["name"] == "uq_conversations_child_active"
+    )
+
+    assert active_index["unique"] == 1
+    assert str(active_index["dialect_options"]["sqlite_where"]) == "status = 'active'"
+
+    expected_constraints = {
+        "duty_rosters": "uq_roster_date_child",
+        "analysis_jobs": "uq_analysis_job_conversation",
+        "emotion_logs": "uq_emotion_conversation",
+        "insight_notes": "uq_insight_conversation",
+        "assessments": "uq_assessment_conversation",
+        "assessment_scores": "uq_assessment_dimension",
+    }
+    for table, name in expected_constraints.items():
+        names = {constraint["name"] for constraint in inspector.get_unique_constraints(table)}
+        assert name in names
 
 
 def test_failed_analysis_error_is_limited_to_the_sanitized_frozen_error():
