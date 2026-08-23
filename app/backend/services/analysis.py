@@ -584,21 +584,38 @@ def retry_analysis(
     if conversation is None or job is None:
         db.rollback()
         raise APIError(404, "CONVERSATION_NOT_FOUND", "会话不存在")
-    if job.status == "pending":
+    job_id = job.id
+
+    # End the observation transaction before taking the short write lock.  The
+    # id-only update serializes retry classification with worker transitions.
+    db.rollback()
+    locked = db.execute(
+        update(models.AnalysisJob)
+        .where(models.AnalysisJob.id == job_id)
+        .values(updated_at=models.AnalysisJob.updated_at)
+    )
+    if locked.rowcount != 1:
+        db.rollback()
+        raise APIError(404, "CONVERSATION_NOT_FOUND", "会话不存在")
+    current = db.get(models.AnalysisJob, job_id, populate_existing=True)
+    if current is None:
+        db.rollback()
+        raise APIError(404, "CONVERSATION_NOT_FOUND", "会话不存在")
+    if current.status == "pending":
         response = schemas.AnalysisRetryResponse(
             conversation_id=conversation_id,
-            analysis_job_id=job.id,
+            analysis_job_id=job_id,
             analysis_status="pending",
-            attempt_count=job.attempt_count,
+            attempt_count=current.attempt_count,
             retry_accepted=False,
             replayed=True,
         )
         db.rollback()
         return response
-    if job.status == "processing":
+    if current.status == "processing":
         db.rollback()
         raise APIError(409, "ANALYSIS_IN_PROGRESS", "分析任务正在处理中")
-    if job.status == "succeeded":
+    if current.status == "succeeded":
         db.rollback()
         raise APIError(409, "ANALYSIS_ALREADY_SUCCEEDED", "分析任务已经完成")
 
@@ -606,7 +623,7 @@ def retry_analysis(
     reset = db.execute(
         update(models.AnalysisJob)
         .where(
-            models.AnalysisJob.id == job.id,
+            models.AnalysisJob.id == job_id,
             models.AnalysisJob.status == "failed",
         )
         .values(
@@ -626,40 +643,11 @@ def retry_analysis(
         db.commit()
         return schemas.AnalysisRetryResponse(
             conversation_id=conversation_id,
-            analysis_job_id=job.id,
+            analysis_job_id=job_id,
             analysis_status="pending",
             attempt_count=0,
             retry_accepted=True,
             replayed=False,
         )
-
-    # Another retry or a worker won between our read and attempted reset.
-    # Drop both stale ORM values and the failed CAS before classifying durable state.
-    db.rollback()
-    current = db.scalar(
-        select(models.AnalysisJob)
-        .where(models.AnalysisJob.conversation_id == conversation_id)
-        .execution_options(populate_existing=True)
-    )
-    if current is None:
-        db.rollback()
-        raise APIError(404, "CONVERSATION_NOT_FOUND", "会话不存在")
-    if current.status == "pending":
-        response = schemas.AnalysisRetryResponse(
-            conversation_id=conversation_id,
-            analysis_job_id=current.id,
-            analysis_status="pending",
-            attempt_count=current.attempt_count,
-            retry_accepted=False,
-            replayed=True,
-        )
-        db.rollback()
-        return response
-    if current.status == "processing":
-        db.rollback()
-        raise APIError(409, "ANALYSIS_IN_PROGRESS", "分析任务正在处理中")
-    if current.status == "succeeded":
-        db.rollback()
-        raise APIError(409, "ANALYSIS_ALREADY_SUCCEEDED", "分析任务已经完成")
     db.rollback()
     raise APIError(409, "ANALYSIS_IN_PROGRESS", "分析任务正在处理中")

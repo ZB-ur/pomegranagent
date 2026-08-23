@@ -1103,6 +1103,75 @@ def test_two_concurrent_retries_have_one_accept_and_one_pending_replay(db_sessio
     assert saved.attempt_count == 0
 
 
+def test_retry_serializes_a_terminal_failure_that_happens_after_its_initial_read(
+    db_session,
+):
+    """Catches retry misclassifying a new terminal failure as analysis-in-progress."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    job.status = "failed"
+    job.attempt_count = 1
+    job.max_attempts = 1
+    db_session.commit()
+    retrying_session = SessionLocal()
+    original_rollback = retrying_session.rollback
+    advanced_to_failed = Event()
+    initial_read_released = False
+
+    def reset_then_terminally_fail() -> None:
+        reset_session = SessionLocal()
+        try:
+            accepted = analysis.retry_analysis(reset_session, conversation.id, now=NOW)
+            assert accepted.retry_accepted is True
+        finally:
+            reset_session.close()
+        claim_session = SessionLocal()
+        try:
+            claimed = analysis.claim_next_analysis_job(
+                claim_session,
+                worker_id="worker-b",
+                now=NOW,
+                lease_seconds=30,
+            )
+            assert claimed == job.id
+        finally:
+            claim_session.close()
+        analysis.process_analysis_job(
+            SessionLocal,
+            job_id=job.id,
+            worker_id="worker-b",
+            analyzer=FakeAnalysisEngine(
+                extraction=RuntimeError("terminal failure after reset"),
+                assessment=_assessment_output(),
+            ),
+            clock=lambda: NOW,
+        )
+        advanced_to_failed.set()
+
+    def rollback_after_initial_read() -> None:
+        nonlocal initial_read_released
+        original_rollback()
+        if not initial_read_released:
+            initial_read_released = True
+            reset_then_terminally_fail()
+
+    retrying_session.rollback = rollback_after_initial_read
+    try:
+        response = analysis.retry_analysis(retrying_session, conversation.id, now=NOW)
+
+        assert advanced_to_failed.is_set()
+        assert response.retry_accepted is True
+        assert response.replayed is False
+        assert response.analysis_job_id == job.id
+        assert not retrying_session.in_transaction()
+        db_session.expire_all()
+        saved = db_session.get(models.AnalysisJob, job.id)
+        assert saved is not None
+        assert saved.status == "pending"
+        assert saved.attempt_count == 0
+    finally:
+        retrying_session.close()
+
+
 def test_worker_start_recovers_once_rejects_double_start_and_stops_cleanly(
     db_session,
     monkeypatch,
