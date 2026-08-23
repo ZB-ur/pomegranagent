@@ -51,6 +51,21 @@ run.bat                   # 双击，或 uvicorn app.backend.main:app --port 800
 
 > 首次启动自动插入示例数据（5 幼儿 / 3 小鸭 / 排班），便于开箱演示。
 
+### 重新创建示例数据
+
+需要清理演示数据时，先停止服务。第一条命令必须报告 connection refused，确认本机服务已停止后再继续。脚本会打印新数据库路径和带时间戳的归档目录。
+
+```bash
+# 1. Stop run.sh/run.bat first. This must fail to connect.
+curl --fail http://127.0.0.1:8000/api/health
+
+# 2. Archive the old demo database/log and create a clean deterministic demo database.
+python scripts/rebuild_demo_database.py --confirm-rebuild
+
+# 3. Start the loopback-only service.
+./run.sh
+```
+
 ## 目录结构
 
 ```

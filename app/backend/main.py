@@ -49,25 +49,25 @@ app.add_middleware(
 )
 
 
-def _seed_dimensions() -> None:
+def _seed_dimensions(session_factory=SessionLocal) -> None:
     defaults = [
         ("language", "语言表达能力", "能清晰、连贯地表达自己的观察与感受"),
         ("empathy", "同理心", "能体会并关心小鸭与同伴的感受"),
         ("diligence", "勤劳启蒙", "积极参与饲养劳动并承担责任"),
     ]
-    db = SessionLocal()
+    db = session_factory()
     try:
-        for key, name, desc in defaults:
+        for key, name, description in defaults:
             if not db.scalar(select(models.AssessmentDimension).where(models.AssessmentDimension.key == key)):
-                db.add(models.AssessmentDimension(key=key, name=name, description=desc))
+                db.add(models.AssessmentDimension(key=key, name=name, description=description))
         db.commit()
     finally:
         db.close()
 
 
-def _seed_demo_data() -> None:
+def _seed_demo_data(session_factory=SessionLocal, seed_date: date | None = None) -> None:
     """首次启动且数据库空时，插入示例幼儿/小鸭/排班，便于开箱演示。"""
-    db = SessionLocal()
+    db = session_factory()
     try:
         if db.scalar(select(models.Child)) or db.scalar(select(models.Duck)):
             return  # 已有数据则不重复插入
@@ -83,25 +83,31 @@ def _seed_demo_data() -> None:
             ("小白", "性格温和，喜欢吃菜叶"),
             ("小橙", "好奇心强，喜欢探索"),
         ]
-        for name, nick in children:
-            db.add(models.Child(name=name, nickname=nick, active=True))
+        for name, nickname in children:
+            db.add(models.Child(name=name, nickname=nickname, active=True))
         for name, status in ducks:
             db.add(models.Duck(name=name, status=status))
         db.commit()
 
-        # 本周示例排班（每日 2 名幼儿）
-        today = date.today()
-        ids = [c.id for c in db.scalars(select(models.Child).order_by(models.Child.id)).all()]
+        today = seed_date or date.today()
+        child_ids = [
+            child.id
+            for child in db.scalars(select(models.Child).order_by(models.Child.id)).all()
+        ]
         cycle = f"示例-{today.isocalendar().week}周"
-        d = today
-        idx = 0
-        for _ in range(7):
-            while d.weekday() >= 5:
-                d += timedelta(days=1)
-            for j in range(2):
-                db.add(models.DutyRoster(cycle=cycle, date=d.isoformat(), child_id=ids[(idx + j) % len(ids)]))
-            idx += 2
-            d += timedelta(days=1)
+        roster_date = today
+        index = 0
+        for _day in range(7):
+            while roster_date.weekday() >= 5:
+                roster_date += timedelta(days=1)
+            for offset in range(2):
+                db.add(models.DutyRoster(
+                    cycle=cycle,
+                    date=roster_date.isoformat(),
+                    child_id=child_ids[(index + offset) % len(child_ids)],
+                ))
+            index += 2
+            roster_date += timedelta(days=1)
         db.commit()
     finally:
         db.close()
