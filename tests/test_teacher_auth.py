@@ -1,5 +1,7 @@
 """Teacher PIN session boundary integration tests."""
 
+from sqlalchemy import select
+
 from app.backend import models
 
 
@@ -38,6 +40,53 @@ def test_setup_is_one_time_and_wrong_pin_does_not_unlock(client):
     correct = client.post("/api/auth/unlock", json={"pin": "1234"})
     assert correct.status_code == 200
     assert correct.json() == {"configured": True, "authenticated": True}
+
+
+def test_setup_race_returns_conflict_and_keeps_database_sessions_usable(
+    client,
+    db_session,
+    monkeypatch,
+):
+    from app.backend import auth
+    from app.backend.database import SessionLocal
+
+    original_commit = auth.Session.commit
+    inserted_competing_credential = False
+
+    def commit_with_competing_credential(session):
+        nonlocal inserted_competing_credential
+        if not inserted_competing_credential and any(
+            isinstance(row, models.TeacherCredential) for row in session.new
+        ):
+            inserted_competing_credential = True
+            competing_session = SessionLocal()
+            try:
+                competing_session.add(
+                    models.TeacherCredential(
+                        id=1,
+                        pin_salt="00" * 16,
+                        pin_hash="competing-pin-hash",
+                    )
+                )
+                original_commit(competing_session)
+            finally:
+                competing_session.close()
+        return original_commit(session)
+
+    monkeypatch.setattr(auth.Session, "commit", commit_with_competing_credential)
+
+    response = client.post("/api/auth/setup", json={"pin": "1234"})
+
+    assert response.status_code == 409
+    assert response.json()["error"]["code"] == "PIN_ALREADY_CONFIGURED"
+    assert db_session.scalar(select(models.TeacherCredential.pin_hash)) == "competing-pin-hash"
+    assert client.get("/api/auth/status").json() == {
+        "configured": True,
+        "authenticated": False,
+    }
+    wrong_pin = client.post("/api/auth/unlock", json={"pin": "1234"})
+    assert wrong_pin.status_code == 401
+    assert wrong_pin.json()["error"]["code"] == "PIN_INVALID"
 
 
 def test_lock_revokes_server_session_and_rejects_a_stale_cookie(client):

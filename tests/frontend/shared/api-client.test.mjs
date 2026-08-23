@@ -33,9 +33,11 @@ function loadTeacherWithPendingGates() {
   const requests = [];
   let statusCalls = 0;
   let resolveReady;
+  let rejectReady;
   let resolveStatus;
-  const readyPromise = new Promise(resolve => { resolveReady = resolve; });
-  const statusPromise = new Promise(resolve => { resolveStatus = resolve; });
+  let rejectStatus;
+  const readyPromise = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+  const statusPromise = new Promise((resolve, reject) => { resolveStatus = resolve; rejectStatus = reject; });
   const button = {
     dataset: { v: 'overview' },
     disabled: false,
@@ -50,18 +52,21 @@ function loadTeacherWithPendingGates() {
     removeAttribute(name) { delete this.attributes[name]; },
   };
   const genericElement = () => ({
+    children: [],
     style: {},
     classList: { add() {}, remove() {}, toggle() {} },
-    append() {},
-    appendChild() {},
+    append(...children) { this.children.push(...children); },
+    appendChild(child) { this.children.push(child); },
+    replaceChildren(...children) { this.children = children; },
     addEventListener() {},
     setAttribute() {},
     focus() {},
   });
   const main = genericElement();
   const aside = genericElement();
+  let runtimeMaintenance = null;
   const document = {
-    getElementById: id => (id === 'nav' ? nav : main),
+    getElementById: id => ({ nav, main, 'runtime-maintenance': runtimeMaintenance }[id] || null),
     querySelector: selector => (selector === 'aside' ? aside : null),
     querySelectorAll: () => [button],
     createElement: genericElement,
@@ -95,8 +100,9 @@ function loadTeacherWithPendingGates() {
     console,
   });
   return {
-    button, listeners, nav, location, requests, resolveReady, resolveStatus,
+    button, listeners, nav, main, location, requests, rejectReady, resolveReady, rejectStatus, resolveStatus,
     get statusCalls() { return statusCalls; },
+    showRuntimeMaintenance() { runtimeMaintenance = genericElement(); },
   };
 }
 
@@ -162,4 +168,30 @@ test('teacher navigation and hash routes cannot start business requests before r
   assert.deepEqual(teacher.requests, ['/api/children']);
   assert.equal(teacher.button.disabled, false);
   assert.equal(teacher.nav.attributes['aria-busy'], undefined);
+});
+
+test('a rejected teacher auth status renders its safe error instead of leaving the main panel blank', async () => {
+  const teacher = loadTeacherWithPendingGates();
+  teacher.resolveReady();
+  await Promise.resolve();
+  await Promise.resolve();
+
+  teacher.rejectStatus({ message: '教师认证服务不可用' });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(teacher.main.children.length, 1);
+  assert.equal(teacher.main.children[0].children[1].children[0], '教师认证服务不可用');
+  assert.equal(teacher.button.disabled, true);
+  assert.equal(teacher.nav.attributes['aria-busy'], 'true');
+});
+
+test('a failed runtime readiness check preserves the existing maintenance screen', async () => {
+  const teacher = loadTeacherWithPendingGates();
+  teacher.showRuntimeMaintenance();
+  teacher.rejectReady({ message: '应用正在更新' });
+  await new Promise(resolve => setImmediate(resolve));
+
+  assert.equal(teacher.main.children.length, 0);
+  assert.equal(teacher.button.disabled, true);
+  assert.equal(teacher.nav.attributes['aria-busy'], 'true');
 });

@@ -54,3 +54,55 @@ The warning output is limited to Starlette TestClient and SQLAlchemy `datetime.u
 ## Scope
 
 The commit contains only Task 8 implementation/tests, the permitted executable frontend regression, and the explicitly authorized two-case `tests/test_api_errors.py` integration update. Existing `.workbuddy`, specs, plans, and unrelated `.superpowers` files remain excluded.
+
+## Review follow-up: concurrent setup and teacher bootstrap failures
+
+### Delivered
+
+- Wrapped only the initial credential `db.commit()` in `setup()` with a SQLAlchemy `IntegrityError` handler. It rolls back the failed request session and returns the established `409 PIN_ALREADY_CONFIGURED` envelope. Session issuance remains outside that handler, so unrelated token/session errors still use their normal failure path.
+- Replaced the teacher bootstrap no-op catch with a handler that preserves the runtime-maintenance screen if shared `api.js` already rendered it. For auth-status/network failures it keeps navigation disabled and renders the safe API error message in the teacher locked card.
+- Added deterministic integration coverage that inserts the competing credential through a second real SQLAlchemy session immediately before the setup request commits. It proves the conflict envelope, persisted competing record, usable status query, and usable subsequent unlock request.
+- Added executable Node coverage for both rejected `DuckAuth.status()` (visible non-blank locked error) and rejected runtime readiness when maintenance is already present (maintenance remains untouched).
+
+### TDD evidence
+
+RED commands:
+
+```text
+./.venv/bin/pytest tests/test_teacher_auth.py -q
+1 failed, 8 passed, 18 warnings in 1.07s
+```
+
+The injected competing credential committed successfully in a separate real session; the setup request then raised the authentic SQLite/SQLAlchemy `IntegrityError` from its credential insert rather than producing a standard 409 response.
+
+```text
+node --test tests/frontend/shared/api-client.test.mjs
+5 passed, 1 failed
+```
+
+The rejected `DuckAuth.status()` regression found a blank main panel (`0 !== 1`) because the bootstrap catch discarded the error.
+
+The runtime-maintenance preservation branch was mutation-checked by temporarily removing its guard:
+
+```text
+node --test tests/frontend/shared/api-client.test.mjs
+5 passed, 1 failed
+```
+
+The test observed the forbidden replacement of the main panel (`1 !== 0`); restoring the guard returned the full Node suite to green.
+
+### Follow-up verification
+
+```text
+./.venv/bin/pytest tests/test_teacher_auth.py tests/test_frontend_foundation.py tests/test_api.py -q
+29 passed, 76 warnings in 1.61s
+
+node --test tests/frontend/shared/api-client.test.mjs
+6 passed, 0 failed
+
+./.venv/bin/pytest -q
+72 passed, 82 warnings in 3.39s
+
+git diff --check
+exit 0
+```

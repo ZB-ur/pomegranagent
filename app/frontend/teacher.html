@@ -210,6 +210,13 @@ function restoreTeacherRoute() {
   if (!location.hash) show('overview');
 }
 
+function handleTeacherBootstrapFailure(error) {
+  if (document.getElementById('runtime-maintenance')) return;
+  teacherAuthenticated = false;
+  updateTeacherNavigation();
+  renderTeacherLocked(error.message);
+}
+
 async function lockTeacherPage() {
   lockButton.disabled = true;
   setLockFeedback('');
@@ -594,7 +601,7 @@ DuckAPI.ready().then(() => {
   return unlockTeacherPage();
 }).then(() => {
   restoreTeacherRoute();
-}).catch(() => {});
+}).catch(handleTeacherBootstrapFailure);
 </script>
 </body>
 </html>

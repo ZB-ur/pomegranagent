@@ -7,6 +7,7 @@ import secrets
 
 from fastapi import APIRouter, Depends, Request, Response
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from . import models, schemas
@@ -84,14 +85,16 @@ def setup(
     if db.scalar(select(models.TeacherCredential.id)) is not None:
         raise APIError(409, "PIN_ALREADY_CONFIGURED", "教师 PIN 已设置")
     salt = secrets.token_bytes(16).hex()
-    db.add(
-        models.TeacherCredential(
-            id=1,
-            pin_salt=salt,
-            pin_hash=_pin_digest(payload.pin, salt),
-        )
-    )
-    db.commit()
+    db.add(models.TeacherCredential(
+        id=1,
+        pin_salt=salt,
+        pin_hash=_pin_digest(payload.pin, salt),
+    ))
+    try:
+        db.commit()
+    except IntegrityError:
+        db.rollback()
+        raise APIError(409, "PIN_ALREADY_CONFIGURED", "教师 PIN 已设置")
     _issue_session(response, db)
     return {"configured": True, "authenticated": True}
 
