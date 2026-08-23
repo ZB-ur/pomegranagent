@@ -1,7 +1,19 @@
 """Pydantic 请求/响应模型。"""
 from datetime import datetime
+from typing import Literal
 
 from pydantic import BaseModel, ConfigDict
+
+
+class VersionResponse(BaseModel):
+    release_id: str
+    api_version: str
+    schema_version: str
+
+
+class HealthResponse(VersionResponse):
+    db_mode: Literal["app", "test"]
+    analysis_worker_status: str
 
 
 # ---------- 幼儿 ----------

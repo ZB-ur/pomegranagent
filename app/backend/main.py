@@ -6,14 +6,18 @@ import time
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Response
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import ai_engine, models, schemas
 from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
+from .versioning import VERSION_FILE, load_runtime_version
+
+RUNTIME_VERSION = load_runtime_version()
 
 # 日志：同时输出到 logs/app.log 与控制台，便于排查
 LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
@@ -40,6 +44,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="鸭鸭日记本", version="1.0.0", lifespan=lifespan)
+app.state.analysis_worker_status_provider = lambda: "not_started"
 
 app.add_middleware(
     CORSMiddleware,
@@ -47,6 +52,23 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.get("/api/health", response_model=schemas.HealthResponse)
+def health(request: Request):
+    return {
+        "release_id": RUNTIME_VERSION.release_id,
+        "api_version": RUNTIME_VERSION.api_version,
+        "schema_version": RUNTIME_VERSION.schema_version,
+        "db_mode": DB_MODE,
+        "analysis_worker_status": request.app.state.analysis_worker_status_provider(),
+    }
+
+
+@app.get("/version.json", response_model=schemas.VersionResponse)
+def version_manifest():
+    current = load_runtime_version(VERSION_FILE)
+    return JSONResponse(current.__dict__, headers={"Cache-Control": "no-store"})
 
 
 def _seed_dimensions(session_factory=SessionLocal) -> None:
