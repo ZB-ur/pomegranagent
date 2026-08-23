@@ -1,9 +1,9 @@
 """Atomic conversation freeze and durable analysis-job creation."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -46,6 +46,13 @@ def _frozen_message_count(
     ) or 0
 
 
+def _utc_datetime(value: datetime) -> datetime:
+    """Expose SQLite's naive UTC timestamps as explicit UTC API values."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
 def _completion_response(
     db: Session,
     *,
@@ -59,7 +66,7 @@ def _completion_response(
         conversation_id=conversation.id,
         conversation_saved=True,
         status="completed",
-        completed_at=conversation.ended_at,
+        completed_at=_utc_datetime(conversation.ended_at),
         message_count=_frozen_message_count(
             db,
             conversation_id=conversation.id,
@@ -79,20 +86,28 @@ def _ended_replay_or_error(
     expected_last_message_id: int,
 ) -> schemas.ConversationCompleteResponse:
     if conversation.frozen_last_message_id != expected_last_message_id:
+        db.rollback()
         raise _api_error(409, "CONVERSATION_CHANGED")
     job = db.scalar(
         select(models.AnalysisJob).where(
             models.AnalysisJob.conversation_id == conversation.id
         )
     )
-    if job is None or job.frozen_last_message_id != conversation.frozen_last_message_id:
+    if (
+        job is None
+        or job.frozen_last_message_id != conversation.frozen_last_message_id
+        or conversation.ended_at is None
+    ):
+        db.rollback()
         raise _api_error(500, "INTERNAL_ERROR")
-    return _completion_response(
+    response = _completion_response(
         db,
         conversation=conversation,
         job=job,
         replayed=True,
     )
+    db.rollback()
+    return response
 
 
 def complete_conversation(
@@ -110,21 +125,58 @@ def complete_conversation(
     # This check deliberately precedes active-state validation so a lost HTTP
     # response can retry safely after the transcript has already been frozen.
     if conversation.status == "ended":
+        # End the initial read transaction before starting the replay read.
+        db.rollback()
+        current = db.get(models.Conversation, conversation_id)
+        assert current is not None
         return _ended_replay_or_error(
             db,
-            conversation=conversation,
+            conversation=current,
             expected_last_message_id=expected_last_message_id,
         )
     if conversation.status != "active":
         raise _api_error(409, "CONVERSATION_CHANGED")
 
-    last_message_id = _last_message_id(db, conversation.id)
-    if last_message_id is None:
-        raise _api_error(409, "CONVERSATION_EMPTY")
-    if last_message_id != expected_last_message_id:
-        raise _api_error(409, "CONVERSATION_CHANGED")
+    observed_revision = conversation.revision
+    # Do not upgrade the observation transaction into a writer.  A fresh
+    # conditional UPDATE is SQLite's serialization boundary with chat's first
+    # lease CAS write.
+    db.rollback()
 
     try:
+        lock = db.execute(
+            update(models.Conversation)
+            .where(
+                models.Conversation.id == conversation_id,
+                models.Conversation.status == "active",
+                models.Conversation.revision == observed_revision,
+            )
+            .values(revision=models.Conversation.revision)
+        )
+        if lock.rowcount != 1:
+            db.rollback()
+            current = db.get(models.Conversation, conversation_id)
+            if current is not None and current.status == "ended":
+                return _ended_replay_or_error(
+                    db,
+                    conversation=current,
+                    expected_last_message_id=expected_last_message_id,
+                )
+            raise _api_error(409, "CONVERSATION_CHANGED")
+
+        conversation = db.get(
+            models.Conversation,
+            conversation_id,
+            populate_existing=True,
+        )
+        if conversation is None or conversation.status != "active":
+            raise _api_error(409, "CONVERSATION_CHANGED")
+        last_message_id = _last_message_id(db, conversation.id)
+        if last_message_id is None:
+            raise _api_error(409, "CONVERSATION_EMPTY")
+        if last_message_id != expected_last_message_id:
+            raise _api_error(409, "CONVERSATION_CHANGED")
+
         conversation.status = "ended"
         conversation.end_reason = conversation.pending_end_reason or "manual"
         conversation.ended_at = now
@@ -148,20 +200,38 @@ def complete_conversation(
         )
         db.commit()
         return response
+    except APIError:
+        db.rollback()
+        raise
     except IntegrityError:
         # A concurrent finisher may have committed the unique job first.  Once
         # rolled back, reread its durable result and apply normal replay rules.
         db.rollback()
         current = db.get(models.Conversation, conversation_id)
-        if current is None:
-            raise _api_error(404, "CONVERSATION_NOT_FOUND")
-        if current.status == "ended":
-            return _ended_replay_or_error(
-                db,
-                conversation=current,
-                expected_last_message_id=expected_last_message_id,
+        if current is not None and current.status == "ended":
+            if current.frozen_last_message_id != expected_last_message_id:
+                db.rollback()
+                raise _api_error(409, "CONVERSATION_CHANGED")
+            job = db.scalar(
+                select(models.AnalysisJob).where(
+                    models.AnalysisJob.conversation_id == current.id
+                )
             )
-        raise _api_error(409, "CONVERSATION_CHANGED")
+            if (
+                job is not None
+                and job.frozen_last_message_id == expected_last_message_id
+                and current.ended_at is not None
+            ):
+                response = _completion_response(
+                    db,
+                    conversation=current,
+                    job=job,
+                    replayed=True,
+                )
+                db.rollback()
+                return response
+        db.rollback()
+        raise
     except Exception:
         db.rollback()
         raise

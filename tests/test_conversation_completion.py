@@ -1,14 +1,22 @@
 """Contract tests for atomic, replayable conversation completion."""
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timezone
+from threading import Event, Thread
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.sql.dml import Update
 
-from app.backend import models
+from app.backend import models, schemas
+from app.backend.api_errors import APIError
 from app.backend.database import SessionLocal
 from app.backend.routes import conversations as conversation_routes
+from app.backend.services import chat as chat_service
+from app.backend.services import completion as completion_service
+from app.backend.services.chat import claim_chat_request, commit_chat_success
 
 
 @pytest.fixture
@@ -78,13 +86,14 @@ def test_complete_freezes_messages_and_creates_one_pending_job(
         child_turns=2,
         pending_end_reason="complete",
     )
-    completed_at = datetime(2026, 8, 23, 8, 35, 10)
+    completed_at = datetime(2026, 8, 23, 8, 35, 10, tzinfo=timezone.utc)
 
     class Clock:
         calls = 0
 
         @classmethod
-        def utcnow(cls):
+        def now(cls, tz):
+            assert tz is timezone.utc
             cls.calls += 1
             return completed_at
 
@@ -100,7 +109,7 @@ def test_complete_freezes_messages_and_creates_one_pending_job(
         "conversation_id": conversation.id,
         "conversation_saved": True,
         "status": "completed",
-        "completed_at": completed_at.isoformat(),
+        "completed_at": "2026-08-23T08:35:10Z",
         "message_count": 4,
         "last_message_id": messages[-1].id,
         "analysis_job_id": 1,
@@ -118,7 +127,7 @@ def test_complete_freezes_messages_and_creates_one_pending_job(
     assert saved is not None
     assert saved.status == "ended"
     assert saved.end_reason == "complete"
-    assert saved.ended_at == completed_at
+    assert saved.ended_at == completed_at.replace(tzinfo=None)
     assert saved.frozen_last_message_id == messages[-1].id
     assert saved.revision == 1
     assert job is not None
@@ -130,16 +139,27 @@ def test_complete_replays_the_frozen_snapshot_without_a_second_job(
     client,
     db_session,
     conversation_with_messages,
+    monkeypatch,
 ):
     """Catches a lost response retry that increments revision or enqueues twice."""
     conversation, messages = conversation_with_messages()
     payload = {"expected_last_message_id": messages[-1].id}
+    completed_at = datetime(2026, 8, 23, 8, 35, 10, tzinfo=timezone.utc)
+
+    class Clock:
+        @classmethod
+        def now(cls, tz):
+            assert tz is timezone.utc
+            return completed_at
+
+    monkeypatch.setattr(conversation_routes, "datetime", Clock)
 
     first = client.post(f"/api/conversations/{conversation.id}/complete", json=payload)
     second = client.post(f"/api/conversations/{conversation.id}/complete", json=payload)
 
     assert first.status_code == 200
     assert second.status_code == 200
+    assert first.json()["completed_at"] == "2026-08-23T08:35:10Z"
     assert second.json() == {**first.json(), "replayed": True}
     db_session.expire_all()
     saved = db_session.get(models.Conversation, conversation.id)
@@ -296,6 +316,156 @@ def test_completion_unique_job_conflict_replays_the_committed_snapshot(
     db_session.expire_all()
     assert _job_count(db_session, conversation.id) == 1
     assert db_session.get(models.Conversation, conversation.id).revision == 1
+
+
+def test_completion_write_lock_serializes_a_final_chat_commit(
+    db_session,
+    conversation_with_messages,
+    monkeypatch,
+):
+    """Catches a chat pair appended after completion read but before it freezes."""
+    conversation, messages = conversation_with_messages()
+    expected_last_message_id = messages[-1].id
+    payload = schemas.ChatRequest.model_validate(
+        {
+            "request_id": str(uuid4()),
+            "child_id": conversation.child_id,
+            "conversation_id": conversation.id,
+            "text": "我还想补充最后一件事",
+            "max_rounds": 3,
+        }
+    )
+    clock = datetime(2026, 8, 23, 8, 38, 10)
+    claim = claim_chat_request(db_session, payload, now=clock)
+
+    completion_lock_acquired = Event()
+    chat_attempted_write = Event()
+    release_completion = Event()
+    results: dict[str, object] = {}
+    completion_session = SessionLocal()
+    original_execute = completion_session.execute
+    original_claim_update = chat_service._claim_update
+
+    def pause_after_completion_lock(statement, *args, **kwargs):
+        result = original_execute(statement, *args, **kwargs)
+        if isinstance(statement, Update):
+            completion_lock_acquired.set()
+            assert release_completion.wait(timeout=5)
+        return result
+
+    def signal_chat_write_attempt(*args, **kwargs):
+        chat_attempted_write.set()
+        return original_claim_update(*args, **kwargs)
+
+    monkeypatch.setattr(completion_session, "execute", pause_after_completion_lock)
+    monkeypatch.setattr(chat_service, "_claim_update", signal_chat_write_attempt)
+
+    def run_completion() -> None:
+        try:
+            results["completion"] = completion_service.complete_conversation(
+                completion_session,
+                conversation_id=conversation.id,
+                expected_last_message_id=expected_last_message_id,
+                now=clock,
+            )
+        except Exception as exc:  # pragma: no cover - asserted below
+            results["completion_error"] = exc
+
+    def run_chat() -> None:
+        with SessionLocal() as chat_session:
+            try:
+                results["chat"] = commit_chat_success(
+                    chat_session,
+                    claim=claim,
+                    payload=payload,
+                    reply="这句不能在冻结后写入。",
+                    ended=False,
+                    end_reason=None,
+                    now=clock,
+                )
+            except Exception as exc:  # pragma: no cover - asserted below
+                results["chat_error"] = exc
+
+    completion_thread = Thread(target=run_completion)
+    chat_thread = Thread(target=run_chat)
+    chat_started = False
+    completion_thread.start()
+    try:
+        assert completion_lock_acquired.wait(timeout=2), (
+            "completion must acquire its conditional write lock before reading messages"
+        )
+        chat_thread.start()
+        chat_started = True
+        assert chat_attempted_write.wait(timeout=2)
+        release_completion.set()
+        completion_thread.join(timeout=5)
+        chat_thread.join(timeout=5)
+        assert not completion_thread.is_alive()
+        assert not chat_thread.is_alive()
+    finally:
+        release_completion.set()
+        completion_thread.join(timeout=5)
+        if chat_started:
+            chat_thread.join(timeout=5)
+        completion_session.close()
+
+    assert "completion_error" not in results
+    assert results["completion"].replayed is False
+    assert "chat" not in results
+    assert isinstance(results.get("chat_error"), APIError)
+    assert results["chat_error"].code == "CONVERSATION_CHANGED"
+    with SessionLocal() as fresh_session:
+        saved = fresh_session.get(models.Conversation, conversation.id)
+        actual_last_message_id = fresh_session.scalar(
+            select(models.Message.id)
+            .where(models.Message.conversation_id == conversation.id)
+            .order_by(models.Message.id.desc())
+            .limit(1)
+        )
+        assert saved is not None
+        assert saved.status == "ended"
+        assert saved.frozen_last_message_id == actual_last_message_id
+        assert saved.frozen_last_message_id == expected_last_message_id
+        assert _job_count(fresh_session, conversation.id) == 1
+
+
+def test_completion_preserves_an_unrelated_integrity_error(
+    db_session,
+    conversation_with_messages,
+    monkeypatch,
+):
+    """Catches an unrelated database integrity failure rewritten as transcript drift."""
+    conversation, messages = conversation_with_messages()
+    original_error = IntegrityError(
+        "forced unrelated integrity failure",
+        {},
+        RuntimeError("unrelated constraint"),
+    )
+
+    def fail_flush(*args, **kwargs):
+        raise original_error
+
+    monkeypatch.setattr(db_session, "flush", fail_flush)
+
+    with pytest.raises(IntegrityError) as raised:
+        completion_service.complete_conversation(
+            db_session,
+            conversation_id=conversation.id,
+            expected_last_message_id=messages[-1].id,
+            now=datetime(2026, 8, 23, 8, 39, 10),
+        )
+
+    assert raised.value is original_error
+    assert not db_session.in_transaction()
+    with SessionLocal() as fresh_session:
+        saved = fresh_session.get(models.Conversation, conversation.id)
+        assert saved is not None
+        assert saved.status == "active"
+        assert saved.end_reason is None
+        assert saved.ended_at is None
+        assert saved.frozen_last_message_id is None
+        assert saved.revision == 0
+        assert _job_count(fresh_session, conversation.id) == 0
 
 
 @pytest.mark.parametrize("operation", ["flush", "commit"])

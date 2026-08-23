@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -88,7 +88,7 @@ def complete(
     payload: schemas.ConversationCompleteRequest,
     db: Session = Depends(get_db),
 ) -> schemas.ConversationCompleteResponse:
-    now = datetime.utcnow()
+    now = datetime.now(timezone.utc)
     return complete_conversation(
         db,
         conversation_id=conversation_id,
