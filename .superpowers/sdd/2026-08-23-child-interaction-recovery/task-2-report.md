@@ -125,3 +125,36 @@ request kept constructing browser fallback state.
   empty or non-string input, timer throws, and custom `onCancel` execution are
   all explicitly covered. `onCancel` is one-shot, and late browser results
   still cannot replace a cancellation result.
+
+## Second independent-review remediation
+
+### Commit lineage and RED → GREEN
+
+- `a02ccf5 feat(child): guarantee TTS fallback and settlement` was the initial
+  Task 2 delivery.
+- `f315967 fix(child): harden TTS cleanup and timing contracts` was the first
+  independent-review repair.
+- The second review added three focused regressions against `f315967`; the
+  strict suite was RED with 29 passing tests and 3 failures. They proved that
+  invalid input wrongly outranked terminal disposal, an invalid second speak
+  failed to supersede active work, and a malformed injected controller reached
+  the Edge loader.
+
+### Second-remediation evidence
+
+- `speak()` now gives terminal disposal priority for every input. When live,
+  it settles an existing request as `cancelled/superseded` before deciding that
+  a new empty or non-string input is `text/invalid-text`; the invalid request
+  creates neither timer nor loader work.
+- A controller is considered usable only when `abort` is callable and its
+  signal has boolean `aborted` plus callable `addEventListener` and
+  `removeEventListener`. This is structural rather than realm-specific, so a
+  standard injected native controller continues to provide a real
+  `AbortSignal` without imposing a local `instanceof` rule.
+- Missing controller constructors use the
+  `abort-controller-unavailable` fallback. Constructor failures and malformed
+  abort/signal structures use `abort-controller-invalid`; both bypass Edge
+  (`loaderCalls === 0`) and settle through the normal fallback path.
+- The second-review focused strict suite ran twice with 32 passing tests and
+  0 failures; the full child Node suite has 60 passing tests and 0 failures.
+  Syntax checks and diff check also pass before the follow-up commit.

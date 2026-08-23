@@ -26,11 +26,11 @@ export function createTTSController(deps = {}) {
   }
 
   function speak(text) {
+    if (disposed) return Promise.resolve(result('cancelled', 'disposed'));
+    cancel('superseded');
     if (typeof text !== 'string' || !text.trim()) {
       return Promise.resolve(result('text', 'invalid-text'));
     }
-    if (disposed) return Promise.resolve(result('cancelled', 'disposed'));
-    cancel('superseded');
 
     return new Promise(resolve => {
       const edgeAborter = createAborter(AbortController);
@@ -52,7 +52,7 @@ export function createTTSController(deps = {}) {
       request.settle = value => settle(request, value);
 
       if (!edgeAborter) {
-        startFallback(request, text, 'abort-controller-unavailable');
+        startFallback(request, text, aborterFailureReason(AbortController));
         return;
       }
 
@@ -334,11 +334,24 @@ function createAborter(AbortController) {
   if (typeof AbortController !== 'function') return null;
   try {
     const aborter = new AbortController();
-    if (!aborter?.signal || typeof aborter.abort !== 'function') return null;
+    const signal = aborter?.signal;
+    if (
+      !signal
+      || typeof signal.aborted !== 'boolean'
+      || typeof signal.addEventListener !== 'function'
+      || typeof signal.removeEventListener !== 'function'
+      || typeof aborter.abort !== 'function'
+    ) return null;
     return aborter;
   } catch {
     return null;
   }
+}
+
+function aborterFailureReason(AbortController) {
+  return typeof AbortController === 'function'
+    ? 'abort-controller-invalid'
+    : 'abort-controller-unavailable';
 }
 
 function run(work) {

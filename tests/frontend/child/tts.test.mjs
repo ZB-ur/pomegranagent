@@ -851,3 +851,64 @@ test('an asynchronously rejecting browser speak call settles text mode without a
   assert.deepEqual(await resultPromise, { mode: 'text', reason: 'browser-error' });
   assert.equal(clock.pending(), 0);
 });
+
+test('dispose takes precedence over empty and non-string speak input', async () => {
+  const tts = createTTSController({});
+  tts.dispose();
+
+  assert.deepEqual(await tts.speak(''), { mode: 'cancelled', reason: 'disposed' });
+  assert.deepEqual(await tts.speak(null), { mode: 'cancelled', reason: 'disposed' });
+});
+
+test('an invalid second speak supersedes active work before returning invalid-text', async () => {
+  const clock = fakeClock();
+  let loaderCalls = 0;
+  const tts = createTTSController({
+    loadEdgeBlob: () => {
+      loaderCalls += 1;
+      return new Promise(() => {});
+    },
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+
+  const active = tts.speak('有效第一句');
+  await tickMicrotasks();
+  const invalid = tts.speak('');
+  clock.advance(5000);
+
+  assert.deepEqual(await active, { mode: 'cancelled', reason: 'superseded' });
+  assert.deepEqual(await invalid, { mode: 'text', reason: 'invalid-text' });
+  assert.equal(loaderCalls, 1);
+  assert.equal(clock.pending(), 0);
+});
+
+test('a malformed injected AbortController bypasses Edge and reports the invalid-controller fallback', async () => {
+  const clock = fakeClock();
+  let loaderCalls = 0;
+  function MalformedAbortController() {
+    return {
+      abort() {},
+      signal: {
+        aborted: false,
+        addEventListener() {},
+      },
+    };
+  }
+  const tts = createTTSController({
+    AbortController: MalformedAbortController,
+    loadEdgeBlob: async () => {
+      loaderCalls += 1;
+      return { bytes: 'mp3' };
+    },
+    browserSpeak: async () => ({ mode: 'browser', reason: 'abort-controller-invalid' }),
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+
+  assert.deepEqual(await tts.speak('坏控制器'), {
+    mode: 'browser', reason: 'abort-controller-invalid',
+  });
+  assert.equal(loaderCalls, 0);
+  assert.equal(clock.pending(), 0);
+});
