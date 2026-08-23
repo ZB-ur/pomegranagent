@@ -1,8 +1,11 @@
 """Contracts for reversible child and duck resource deactivation."""
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, datetime, timedelta, timezone
+import re
 from threading import Event, Thread, current_thread
+from types import SimpleNamespace
 from uuid import uuid4
 
 import pytest
@@ -191,6 +194,178 @@ def _resource_snapshot(db_session) -> dict[str, list[tuple | int | str]]:
     }
 
 
+def _complete_snapshot(db_session) -> dict[str, dict[object, tuple[object, ...]]]:
+    """Capture every race-relevant row from a fresh session for exact comparison."""
+    return {
+        "children": {
+            row.id: (row.name, row.nickname, row.avatar, row.active, row.deactivated_at)
+            for row in db_session.scalars(select(models.Child).order_by(models.Child.id))
+        },
+        "ducks": {
+            row.id: (row.name, row.avatar, row.status, row.note, row.active, row.deactivated_at)
+            for row in db_session.scalars(select(models.Duck).order_by(models.Duck.id))
+        },
+        "rosters": {
+            row.id: (row.cycle, row.date, row.child_id)
+            for row in db_session.scalars(select(models.DutyRoster).order_by(models.DutyRoster.id))
+        },
+        "conversations": {
+            row.id: (
+                row.child_id,
+                row.date,
+                row.started_at,
+                row.ended_at,
+                row.status,
+                row.end_reason,
+                row.revision,
+                row.pending_end_reason,
+                row.frozen_last_message_id,
+            )
+            for row in db_session.scalars(select(models.Conversation).order_by(models.Conversation.id))
+        },
+        "messages": {
+            row.id: (row.conversation_id, row.role, row.text, row.created_at)
+            for row in db_session.scalars(select(models.Message).order_by(models.Message.id))
+        },
+        "chat_requests": {
+            row.request_id: (
+                row.child_id,
+                row.conversation_id,
+                row.base_last_message_id,
+                row.child_message_id,
+                row.diary_message_id,
+                row.payload_hash,
+                row.status,
+                row.attempt_count,
+                row.available_at,
+                row.lease_owner,
+                row.lease_expires_at,
+                row.last_error_code,
+                row.last_error_message,
+                row.response_json,
+                row.started_at,
+                row.finished_at,
+                row.created_at,
+                row.updated_at,
+            )
+            for row in db_session.scalars(
+                select(models.ChatRequestRecord).order_by(models.ChatRequestRecord.request_id)
+            )
+        },
+        "analysis_jobs": {
+            row.id: (
+                row.conversation_id,
+                row.frozen_last_message_id,
+                row.status,
+                row.attempt_count,
+                row.max_attempts,
+                row.available_at,
+                row.lease_owner,
+                row.lease_expires_at,
+                row.last_error_code,
+                row.last_error_message,
+                row.started_at,
+                row.finished_at,
+                row.created_at,
+                row.updated_at,
+            )
+            for row in db_session.scalars(select(models.AnalysisJob).order_by(models.AnalysisJob.id))
+        },
+        "roster_requests": {
+            row.request_id: (
+                row.operation,
+                row.payload_hash,
+                row.status,
+                row.response_json,
+                row.last_error_code,
+                row.last_error_message,
+                row.created_at,
+                row.updated_at,
+            )
+            for row in db_session.scalars(select(models.RosterRequest).order_by(models.RosterRequest.request_id))
+        },
+        "feeding_logs": {
+            row.id: (row.conversation_id, row.child_id, row.duck_id, row.category, row.content, row.occurred_at)
+            for row in db_session.scalars(select(models.FeedingLog).order_by(models.FeedingLog.id))
+        },
+        "emotion_logs": {
+            row.id: (row.conversation_id, row.child_id, row.emotion, row.intensity, row.note, row.occurred_at)
+            for row in db_session.scalars(select(models.EmotionLog).order_by(models.EmotionLog.id))
+        },
+        "insight_notes": {
+            row.id: (row.conversation_id, row.child_id, row.content, row.created_at)
+            for row in db_session.scalars(select(models.InsightNote).order_by(models.InsightNote.id))
+        },
+        "assessment_dimensions": {
+            row.id: (row.key, row.name, row.enabled, row.weight, row.description)
+            for row in db_session.scalars(
+                select(models.AssessmentDimension).order_by(models.AssessmentDimension.id)
+            )
+        },
+        "assessments": {
+            row.id: (row.conversation_id, row.child_id, row.status, row.overall)
+            for row in db_session.scalars(select(models.Assessment).order_by(models.Assessment.id))
+        },
+        "assessment_scores": {
+            row.id: (row.assessment_id, row.dimension_id, row.score, row.reason)
+            for row in db_session.scalars(select(models.AssessmentScore).order_by(models.AssessmentScore.id))
+        },
+        "duck_archives": {
+            row.id: (row.duck_id, row.summary, row.updated_at)
+            for row in db_session.scalars(select(models.DuckArchive).order_by(models.DuckArchive.id))
+        },
+        "teacher_credentials": {
+            row.id: (row.pin_salt, row.pin_hash, row.created_at, row.updated_at)
+            for row in db_session.scalars(
+                select(models.TeacherCredential).order_by(models.TeacherCredential.id)
+            )
+        },
+        "teacher_sessions": {
+            row.id: (row.token_hash, row.created_at)
+            for row in db_session.scalars(select(models.TeacherSession).order_by(models.TeacherSession.id))
+        },
+    }
+
+
+def _assert_seeded_history_unchanged(
+    before: dict[str, dict[object, tuple[object, ...]]],
+    after: dict[str, dict[object, tuple[object, ...]]],
+) -> None:
+    """Every pre-race row is immutable; races may add only their winner rows."""
+    for table, before_rows in before.items():
+        if table == "children":
+            continue
+        retained = {key: after[table][key] for key in before_rows}
+        assert retained == before_rows, table
+
+
+_PATH_PARAMETER = re.compile(r"\{[^}]+\}")
+
+
+def _normalized_path(path: str) -> str:
+    return _PATH_PARAMETER.sub("{}", path)
+
+
+def _effective_routes(routes) -> list[object]:
+    """Flatten direct FastAPI routes and lazy `_IncludedRouter` wrappers."""
+    effective: list[object] = []
+    for route in routes:
+        original_router = getattr(route, "original_router", None)
+        if original_router is not None:
+            effective.extend(_effective_routes(original_router.routes))
+        elif getattr(route, "methods", None):
+            effective.append(route)
+    return effective
+
+
+def _route_method_path_counts(routes) -> Counter[tuple[str, str]]:
+    return Counter(
+        (method, _normalized_path(route.path))
+        for route in routes
+        for method in route.methods
+    )
+
+
 def test_child_deactivation_preserves_history_and_reactivation_restores_today_visibility(
     client,
     db_session,
@@ -313,6 +488,12 @@ def test_duck_deactivation_filters_default_list_and_retains_feeding_history(clie
     }]
     assert list(db_session.scalars(select(models.FeedingLog.id).order_by(models.FeedingLog.id))) == log_ids
     assert db_session.scalar(select(models.DuckArchive.id)) == archive_id
+    repeated_deactivate = client.post(f"/api/ducks/{duck.id}/deactivate")
+    assert repeated_deactivate.json() == {
+        **response.json(),
+        "changed": False,
+    }
+    assert repeated_deactivate.json()["deactivated_at"] == response.json()["deactivated_at"]
     reactivated = client.post(f"/api/ducks/{duck.id}/reactivate")
     assert reactivated.json()["id"] == duck.id
     assert reactivated.json()["active"] is True
@@ -381,9 +562,10 @@ def test_race_first_conversation_and_deactivation_settle_without_partial_work_or
     db_session,
     winner,
 ):
-    """Catches the stale read that can create a first active conversation after deactivation commits."""
-    child = _child(db_session)
-    db_session.commit()
+    """Catches a race that mutates retained history or leaves first-turn work partially durable."""
+    child, _ = _seed_child_history(db_session)
+    with SessionLocal() as fresh:
+        before = _complete_snapshot(fresh)
     now = datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc)
     payload = schemas.ChatRequest.model_validate({
         "request_id": str(uuid4()),
@@ -465,28 +647,55 @@ def test_race_first_conversation_and_deactivation_settle_without_partial_work_or
     assert paused
     assert not any(isinstance(outcome, OperationalError) for outcome in outcomes.values())
     with SessionLocal() as fresh:
-        final_child = fresh.get(models.Child, child.id)
-        active_conversations = list(fresh.scalars(select(models.Conversation).where(
-            models.Conversation.child_id == child.id,
-            models.Conversation.status == "active",
-        )))
-        records = list(fresh.scalars(select(models.ChatRequestRecord).where(
-            models.ChatRequestRecord.request_id == str(payload.request_id)
-        )))
-    assert final_child is not None
-    assert not (final_child.active is False and active_conversations)
+        after = _complete_snapshot(fresh)
+    _assert_seeded_history_unchanged(before, after)
+    assert not (
+        after["children"][child.id][3] is False
+        and any(
+            row[0] == child.id and row[4] == "active"
+            for row in after["conversations"].values()
+        )
+    )
+    added_rows = {
+        table: set(after[table]) - set(before[table])
+        for table in before
+    }
+    assert all(
+        after[table] == before[table]
+        for table in before
+        if table not in {"children", "conversations", "chat_requests"}
+    )
     if winner == "chat":
         assert not isinstance(outcomes["chat"], BaseException)
         assert isinstance(outcomes["deactivate"], APIError)
         assert outcomes["deactivate"].code == "ACTIVE_CONVERSATION_EXISTS"
-        assert len(active_conversations) == 1
-        assert len(records) == 1
+        assert after["children"] == before["children"]
+        assert len(added_rows["conversations"]) == 1
+        assert added_rows["chat_requests"] == {str(payload.request_id)}
+        assert all(
+            not added_rows[table]
+            for table in before
+            if table not in {"conversations", "chat_requests"}
+        )
+        new_conversation_id = added_rows["conversations"].pop()
+        assert after["conversations"][new_conversation_id][0] == child.id
+        assert after["conversations"][new_conversation_id][4] == "active"
+        new_request = after["chat_requests"][str(payload.request_id)]
+        assert new_request[1] == new_conversation_id
+        assert new_request[6] == "processing"
     else:
         assert isinstance(outcomes["chat"], APIError)
         assert outcomes["chat"].code == "CHILD_NOT_FOUND"
         assert not isinstance(outcomes["deactivate"], BaseException)
-        assert active_conversations == []
-        assert records == []
+        assert after["children"][child.id][:3] == before["children"][child.id][:3]
+        assert after["children"][child.id][3:] == (False, after["children"][child.id][4])
+        assert after["children"][child.id][4] is not None
+        assert not added_rows["children"]
+        assert all(
+            not added_rows[table]
+            for table in before
+            if table != "children"
+        )
 
 
 def test_hard_delete_tombstones_have_stable_missing_codes_and_no_target_lookup_or_write(
@@ -528,51 +737,57 @@ def test_hard_delete_tombstones_have_stable_missing_codes_and_no_target_lookup_o
     assert db_session.scalar(select(func.count(models.Duck.id))) == 1
 
 
-def test_resource_route_inventory_has_one_teacher_protected_handler_per_canonical_path():
-    """Catches legacy duplicate handlers or a resource route that loses teacher-session protection."""
+def test_resource_route_inventory_flattens_direct_and_included_routes_and_rejects_legacy_parameter_aliases():
+    """Catches a legacy direct `/{id}` handler that escapes a non-normalized route inventory."""
     from app.backend.auth import require_teacher_session
+    from app.backend.database import get_db
     from app.backend.main import app
 
     canonical = {
         ("GET", "/api/children"),
         ("POST", "/api/children"),
-        ("PUT", "/api/children/{child_id}"),
-        ("DELETE", "/api/children/{child_id}"),
-        ("POST", "/api/children/{child_id}/deactivate"),
-        ("POST", "/api/children/{child_id}/reactivate"),
+        ("PUT", "/api/children/{}"),
+        ("DELETE", "/api/children/{}"),
+        ("POST", "/api/children/{}/deactivate"),
+        ("POST", "/api/children/{}/reactivate"),
         ("GET", "/api/ducks"),
         ("POST", "/api/ducks"),
-        ("PUT", "/api/ducks/{duck_id}"),
-        ("DELETE", "/api/ducks/{duck_id}"),
-        ("POST", "/api/ducks/{duck_id}/deactivate"),
-        ("POST", "/api/ducks/{duck_id}/reactivate"),
+        ("PUT", "/api/ducks/{}"),
+        ("DELETE", "/api/ducks/{}"),
+        ("POST", "/api/ducks/{}/deactivate"),
+        ("POST", "/api/ducks/{}/reactivate"),
     }
-    top_level_routes = [
-        route
-        for route in app.routes
-        if hasattr(route, "original_router")
-    ]
-    effective_routes = [
-        route
-        for included in top_level_routes
-        for route in included.original_router.routes
-    ]
-    routes = [
-        (method, route.path, route)
-        for route in effective_routes
-        if hasattr(route, "methods")
-        for method in route.methods
-        if (method, route.path) in canonical
-    ]
+    effective_routes = _effective_routes(app.routes)
+    counts = _route_method_path_counts(effective_routes)
 
-    assert {(method, path) for method, path, _route in routes} == canonical
-    for method, path in canonical:
-        matching = [route for route_method, route_path, route in routes if (route_method, route_path) == (method, path)]
+    assert {pair for pair in counts if pair in canonical} == canonical
+    assert all(counts[pair] == 1 for pair in canonical)
+    for method, normalized_path in canonical:
+        matching = [
+            route
+            for route in effective_routes
+            if method in route.methods and _normalized_path(route.path) == normalized_path
+        ]
         assert len(matching) == 1
+        direct_calls = [dependency.call for dependency in matching[0].dependant.dependencies]
         assert any(
             dependency.call is require_teacher_session
             for dependency in matching[0].dependant.dependencies
-        ), (method, path)
+        ), (method, normalized_path)
+        if method == "DELETE":
+            assert direct_calls == [require_teacher_session]
+            assert get_db not in direct_calls
+
+    child_delete = next(
+        route
+        for route in effective_routes
+        if route.path == "/api/children/{child_id}" and "DELETE" in route.methods
+    )
+    with_legacy_alias = _route_method_path_counts([
+        child_delete,
+        SimpleNamespace(path="/api/children/{id}", methods={"DELETE"}),
+    ])
+    assert with_legacy_alias[("DELETE", "/api/children/{}")] == 2
     assert any(route.path == "/api/roster/today" for route in effective_routes)
 
 

@@ -177,3 +177,70 @@ task handoff and repository HEAD).
 - `app/backend/services/chat.py`
 - `tests/test_deactivation.py`
 - `.superpowers/sdd/2026-08-23-reliable-conversation-pipeline/task-7-report.md`
+
+## Review evidence correction
+
+The Task 7 review requested stronger release evidence. This correction changes
+only `tests/test_deactivation.py` and this report; production files remain at
+`68a4143` because the strengthened tests did not expose an invariant failure.
+
+- The route inventory now recursively flattens both direct application routes
+  and every `_IncludedRouter.original_router` route. It normalizes every
+  `{parameter_name}` path placeholder to `{}` before `Counter`-based
+  `(method, path)` counting, so a direct legacy
+  `DELETE /api/children/{id}` would produce the same normalized pair as the
+  canonical `{child_id}` route and fail the exact-one assertion. It reasserts
+  teacher-session protection for all twelve canonical routes and verifies that
+  DELETE has only the direct teacher dependency, not a direct `get_db`
+  dependency.
+- Each real `claim_chat_request` versus `set_child_active` race now seeds an
+  ended transcript, past/today/future rosters, an unrelated retained chat
+  request, analysis job, feeding/emotion/insight rows, assessment, and score
+  before racing two independent `SessionLocal` threads. Fresh-session
+  snapshots compare 17 tables: children, ducks, rosters, conversations,
+  messages, chat requests, analysis jobs, roster requests, feeding/emotion/
+  insight projections, dimensions, assessments/scores, archives, credentials,
+  and sessions. The chat winner may add exactly one active conversation and
+  one processing request; the deactivate winner may change only the target
+  child state/timestamp. Every seeded row tuple is asserted unchanged, and the
+  losing request is asserted absent.
+- Duck same-state deactivation now explicitly returns `changed:false` while
+  retaining the exact non-null `deactivated_at` timestamp.
+
+The first stricter race attempt was intentionally RED because its generic
+immutable-row helper also compared the explicitly allowed child state change
+in the deactivation-wins case:
+
+```text
+./.venv/bin/pytest -q tests/test_deactivation.py -k "race or route_inventory or duck_deactivation"
+1 failed, 3 passed, 10 deselected
+```
+
+The helper was narrowed only to immutable history tables; child state is
+checked separately against its permitted transition. No production code was
+altered. GREEN evidence:
+
+```text
+./.venv/bin/pytest -q tests/test_deactivation.py
+14 passed
+./.venv/bin/pytest -q tests/test_deactivation.py
+14 passed
+./.venv/bin/pytest -q tests/test_deactivation.py -k "race or route_inventory or history or duck_deactivation"
+6 passed, 8 deselected
+```
+
+The Task 1–7 regression gate was rerun after the evidence correction:
+
+```text
+./.venv/bin/pytest -q \
+  tests/test_pipeline_models.py \
+  tests/test_chat_idempotency.py \
+  tests/test_conversation_completion.py \
+  tests/test_analysis_worker.py \
+  tests/test_roster_idempotency.py \
+  tests/test_review_atomicity.py \
+  tests/test_deactivation.py
+147 passed
+```
+
+Correction commit pending: `test: strengthen deactivation release evidence`.
