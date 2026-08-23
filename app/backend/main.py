@@ -3,7 +3,7 @@ from contextlib import asynccontextmanager
 import hashlib
 import logging
 import time
-from datetime import date, datetime, timedelta
+from datetime import date, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -200,68 +200,11 @@ def update_dimension(
 
 
 # ---------------- 提炼与评估 ----------------
-@app.post("/api/conversations/{conv_id}/finalize")
-def finalize(conv_id: int, db: Session = Depends(get_db)):
-    """会话结束后：提炼流水/情绪 + 生成能力评估初评。"""
-    conv = db.get(models.Conversation, conv_id)
-    if not conv:
-        raise HTTPException(404, "会话不存在")
-
-    transcript = "\n".join(f"{'幼儿' if m.role == 'child' else '日记本'}：{m.text}" for m in sorted(conv.messages, key=lambda x: x.id))
-    conv.status = "ended"
-    if not conv.end_reason:
-        conv.end_reason = "manual"
-    conv.ended_at = datetime.utcnow()
-
-    # 提炼
-    try:
-        info = ai_engine.extract_info(transcript)
-    except Exception:
-        info = {"feeding_logs": [], "emotion": {"emotion": "平静", "intensity": 3, "note": ""}, "insight": ""}
-
-    for log in info.get("feeding_logs", []):
-        duck_id = None
-        if log.get("duck_name"):
-            d = db.scalar(select(models.Duck).where(models.Duck.name == log["duck_name"]))
-            duck_id = d.id if d else None
-        db.add(models.FeedingLog(
-            conversation_id=conv_id, child_id=conv.child_id, duck_id=duck_id,
-            category=log.get("category", "其它"), content=log.get("content", ""),
-        ))
-    emo = info.get("emotion", {})
-    db.add(models.EmotionLog(
-        conversation_id=conv_id, child_id=conv.child_id,
-        emotion=emo.get("emotion", "平静"), intensity=emo.get("intensity", 3), note=emo.get("note"),
-    ))
-
-    # 心得/亮点落库（若提炼出非空 insight）
-    insight_text = (info.get("insight") or "").strip()
-    if insight_text:
-        db.add(models.InsightNote(conversation_id=conv_id, child_id=conv.child_id, content=insight_text))
-
-    # 评估初评
-    dims = [
-        {"key": d.key, "name": d.name, "description": d.description}
-        for d in db.scalars(select(models.AssessmentDimension).where(models.AssessmentDimension.enabled == True)).all()
-    ]
-    try:
-        assess = ai_engine.assess_conversation(transcript, dims)
-    except Exception:
-        assess = {"scores": [], "overall": 3.0}
-
-    assessment = models.Assessment(conversation_id=conv_id, child_id=conv.child_id, status="pending", overall=assess.get("overall", 3.0))
-    db.add(assessment)
-    db.commit()
-    db.refresh(assessment)
-
-    key_to_id = {d["key"]: d_id for d_id, d in ((d.id, {"key": d.key}) for d in db.scalars(select(models.AssessmentDimension)).all())}
-    for s in assess.get("scores", []):
-        dim_id = key_to_id.get(s.get("dimension_key"))
-        if dim_id:
-            db.add(models.AssessmentScore(assessment_id=assessment.id, dimension_id=dim_id, score=s.get("score", 3), reason=s.get("reason")))
-
-    db.commit()
-    return {"ok": True, "assessment_id": assessment.id, "insight": info.get("insight", "")}
+@app.post("/api/conversations/{conversation_id}/finalize")
+def finalize(conversation_id: int) -> None:
+    """Public compatibility tombstone for the retired mutating child finalizer."""
+    del conversation_id
+    raise APIError(410, "LEGACY_ENDPOINT_REMOVED", "旧会话结束接口已下线")
 
 
 # ---------------- 评估审阅 ----------------

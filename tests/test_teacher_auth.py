@@ -1,8 +1,34 @@
 """Teacher PIN session boundary integration tests."""
 
+from collections import Counter
+import re
+from uuid import uuid4
+
 from sqlalchemy import select
 
 from app.backend import models
+
+
+def _normalized_path(path: str) -> str:
+    return re.sub(r"\{[^}]+\}", "{}", path)
+
+
+def _effective_routes(routes) -> list[object]:
+    return [
+        child
+        for route in routes
+        for child in (route.original_router.routes if hasattr(route, "original_router") else [route])
+    ]
+
+
+def _route_method_path_counts(routes) -> Counter[tuple[str, str]]:
+    return Counter(
+        (method, _normalized_path(route.path))
+        for route in routes
+        if hasattr(route, "methods")
+        for method in route.methods
+        if route.path.startswith("/api/") or route.path == "/version.json"
+    )
 
 
 def test_first_setup_unlocks_with_a_nonpersistent_strict_session_cookie(client):
@@ -133,45 +159,118 @@ def test_unlock_requires_prior_setup(client):
 
 
 def test_teacher_route_inventory_has_the_session_dependency():
+    from app.backend.auth import require_teacher_session
     from app.backend.main import app
 
     protected = {
         ("GET", "/api/children"),
         ("POST", "/api/children"),
-        ("PUT", "/api/children/{child_id}"),
-        ("DELETE", "/api/children/{child_id}"),
+        ("PUT", "/api/children/{}"),
+        ("POST", "/api/children/{}/deactivate"),
+        ("POST", "/api/children/{}/reactivate"),
+        ("DELETE", "/api/children/{}"),
         ("GET", "/api/ducks"),
         ("POST", "/api/ducks"),
-        ("PUT", "/api/ducks/{duck_id}"),
-        ("DELETE", "/api/ducks/{duck_id}"),
-        ("GET", "/api/ducks/{duck_id}/archive"),
-        ("POST", "/api/ducks/{duck_id}/summarize"),
-        ("PUT", "/api/ducks/{duck_id}/archive"),
+        ("PUT", "/api/ducks/{}"),
+        ("POST", "/api/ducks/{}/deactivate"),
+        ("POST", "/api/ducks/{}/reactivate"),
+        ("DELETE", "/api/ducks/{}"),
+        ("GET", "/api/ducks/{}/archive"),
+        ("POST", "/api/ducks/{}/summarize"),
+        ("PUT", "/api/ducks/{}/archive"),
         ("GET", "/api/roster"),
         ("POST", "/api/roster"),
         ("POST", "/api/roster/auto"),
+        ("PUT", "/api/roster/{}"),
         ("GET", "/api/dimensions"),
         ("POST", "/api/dimensions"),
-        ("PUT", "/api/dimensions/{dim_id}"),
+        ("PUT", "/api/dimensions/{}"),
         ("GET", "/api/conversations"),
-        ("GET", "/api/conversations/{conv_id}"),
+        ("GET", "/api/conversations/{}"),
+        ("PUT", "/api/conversations/{}/review"),
+        ("POST", "/api/conversations/{}/analysis/retry"),
         ("GET", "/api/assessments"),
-        ("POST", "/api/assessments/{assessment_id}/confirm"),
-        ("PATCH", "/api/conversations/{conv_id}/logs"),
+        ("POST", "/api/assessments/{}/confirm"),
+        ("PATCH", "/api/conversations/{}/logs"),
         ("GET", "/api/analysis/growth"),
         ("GET", "/api/analysis/overview"),
     }
-    routes = {
-        (method, route.path): route
-        for route in app.routes
-        if hasattr(route, "methods")
-        for method in route.methods
+    expected_methods = {
+        "/api/auth/status": {"GET"},
+        "/api/auth/setup": {"POST"},
+        "/api/auth/unlock": {"POST"},
+        "/api/auth/lock": {"POST"},
+        "/api/children/{}/active-conversation": {"GET"},
+        "/api/conversations/{}/complete": {"POST"},
+        "/api/conversations/{}/analysis/retry": {"POST"},
+        "/api/conversations": {"GET"},
+        "/api/conversations/{}": {"GET"},
+        "/api/conversations/{}/review": {"PUT"},
+        "/api/chat": {"POST"},
+        "/api/children": {"GET", "POST"},
+        "/api/children/{}": {"PUT", "DELETE"},
+        "/api/children/{}/deactivate": {"POST"},
+        "/api/children/{}/reactivate": {"POST"},
+        "/api/ducks": {"GET", "POST"},
+        "/api/ducks/{}": {"PUT", "DELETE"},
+        "/api/ducks/{}/deactivate": {"POST"},
+        "/api/ducks/{}/reactivate": {"POST"},
+        "/api/roster/today": {"GET"},
+        "/api/roster": {"GET", "POST"},
+        "/api/roster/auto": {"POST"},
+        "/api/roster/{}": {"PUT"},
+        "/api/health": {"GET"},
+        "/version.json": {"GET"},
+        "/api/dimensions": {"GET", "POST"},
+        "/api/dimensions/{}": {"PUT"},
+        "/api/conversations/{}/finalize": {"POST"},
+        "/api/assessments": {"GET"},
+        "/api/assessments/{}/confirm": {"POST"},
+        "/api/conversations/{}/logs": {"PATCH"},
+        "/api/ducks/{}/archive": {"GET", "PUT"},
+        "/api/ducks/{}/summarize": {"POST"},
+        "/api/tts": {"GET"},
+        "/api/analysis/growth": {"GET"},
+        "/api/analysis/overview": {"GET"},
     }
 
-    assert protected <= routes.keys()
+    effective_routes = _effective_routes(app.router.routes)
+    counts = _route_method_path_counts(effective_routes)
+    expected_counts = Counter(
+        (method, path)
+        for path, methods in expected_methods.items()
+        for method in methods
+    )
+    assert counts == expected_counts
     for key in protected:
-        calls = [getattr(dependency.call, "__name__", None) for dependency in routes[key].dependant.dependencies]
-        assert "require_teacher_session" in calls, key
+        matching = [
+            route
+            for route in effective_routes
+            if hasattr(route, "methods") and key[0] in route.methods and _normalized_path(route.path) == key[1]
+        ]
+        assert len(matching) == 1, key
+        assert require_teacher_session in [dependency.call for dependency in matching[0].dependant.dependencies], key
+
+    for key in {
+        ("GET", "/api/children/{}/active-conversation"),
+        ("POST", "/api/conversations/{}/complete"),
+        ("POST", "/api/chat"),
+        ("POST", "/api/conversations/{}/finalize"),
+    }:
+        route = next(
+            route
+            for route in effective_routes
+            if hasattr(route, "methods") and key[0] in route.methods and _normalized_path(route.path) == key[1]
+        )
+        assert require_teacher_session not in [dependency.call for dependency in route.dependant.dependencies], key
+
+    documented = app.openapi()["paths"]
+    documented_methods = {
+        _normalized_path(path): {method.upper() for method in methods}
+        for path, methods in documented.items()
+        if path.startswith("/api/") or path == "/version.json"
+    }
+    assert documented_methods == expected_methods
 
 
 def test_teacher_routes_require_session_and_child_surface_remains_public(client):
@@ -193,6 +292,10 @@ def test_teacher_routes_require_session_and_child_surface_remains_public(client)
     assert client.get("/api/health").status_code == 200
     assert client.get("/version.json").status_code == 200
     assert client.get("/api/roster/today").status_code == 200
-    assert client.post("/api/chat", json={"child_id": 99999, "text": "你好"}).status_code == 404
-    assert client.post("/api/conversations/99999/finalize").status_code == 404
+    unknown_chat = client.post("/api/chat", json={"request_id": str(uuid4()), "child_id": 99999, "text": "你好"})
+    assert unknown_chat.status_code == 404
+    assert unknown_chat.json()["error"]["code"] == "CHILD_NOT_FOUND"
+    finalize = client.post("/api/conversations/99999/finalize", content=b"{not-json", headers={"content-type": "application/json"})
+    assert finalize.status_code == 410
+    assert finalize.json()["error"]["code"] == "LEGACY_ENDPOINT_REMOVED"
     assert client.get("/api/tts", params={"text": ""}).status_code == 400

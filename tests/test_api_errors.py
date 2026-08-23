@@ -23,9 +23,9 @@ def unlock_teacher(client):
     assert response.status_code == 200
 
 
-def test_http_exception_uses_standard_envelope(client):
+def test_missing_teacher_detail_uses_the_frozen_conversation_code(client):
     unlock_teacher(client)
-    assert_error(client.get("/api/conversations/99999"), status=404, code="NOT_FOUND")
+    assert_error(client.get("/api/conversations/99999"), status=404, code="CONVERSATION_NOT_FOUND")
 
 
 def test_validation_error_has_stable_field_paths(client):

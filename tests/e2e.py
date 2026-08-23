@@ -1,91 +1,152 @@
-"""端到端验证：进程内启动应用 + 真实 LLM，跑通核心链路。"""
-import os
-import sys
-import tempfile
-from pathlib import Path
+"""Deterministic release-gate end-to-end flow over Foundation fixtures."""
+from uuid import uuid4
 
-if os.environ.get("RUN_REAL_INTEGRATION") != "1":
-    raise SystemExit("set RUN_REAL_INTEGRATION=1 to run real LLM/TTS integration")
+from sqlalchemy import select
 
-E2E_RUNTIME_DIR = tempfile.TemporaryDirectory(prefix="duck-diary-e2e-")
-os.environ["APP_DB_MODE"] = "test"
-os.environ["APP_DB_PATH"] = str(Path(E2E_RUNTIME_DIR.name) / "e2e.db")
-
-ROOT = Path(__file__).resolve().parent.parent
-sys.path.insert(0, str(ROOT))
-
-from fastapi.testclient import TestClient  # noqa: E402
-
-from app.backend.database import Base, engine  # noqa: E402
-from app.backend.main import _seed_dimensions, app  # noqa: E402
+from app.backend import ai_engine, models
+from app.backend.analysis_worker import AnalysisWorker
+from app.backend.database import SessionLocal
 
 
-def step(name, ok):
-    print(("✅" if ok else "❌") + " " + name)
+class _FakeAnalyzer:
+    def extract_info(self, _transcript: str) -> dict:
+        return {
+            "feeding_logs": [{"category": "喂食", "content": "给小黄添了菜叶", "duck_name": "小黄"}],
+            "emotion": {"emotion": "开心", "intensity": 4, "note": "完整分享"},
+            "insight": "能完整说出照顾小鸭的过程。",
+        }
+
+    def assess_conversation(self, _transcript: str, dimensions: list[dict]) -> dict:
+        return {
+            "scores": [
+                {"dimension_key": item["key"], "score": 4, "reason": f"提到了{item['name']}"}
+                for item in dimensions
+            ],
+            "overall": 4.0,
+        }
 
 
-try:
-    # 清库重建，保证 e2e 从干净状态开始
-    Base.metadata.drop_all(bind=engine)
-    Base.metadata.create_all(bind=engine)
-    _seed_dimensions()
+def _chat(client, *, child_id: int, text: str, conversation_id: int | None) -> dict:
+    response = client.post(
+        "/api/chat",
+        json={
+            "request_id": str(uuid4()),
+            "child_id": child_id,
+            "text": text,
+            "conversation_id": conversation_id,
+        },
+    )
+    assert response.status_code == 200
+    return response.json()
 
-    with TestClient(app) as client:
-        print("=== 端到端验证（真实 LLM）===")
 
-        # 1. 幼儿与小鸭
-        child = client.post("/api/children", json={"name": "测试幼儿", "nickname": "小测"}).json()
-        step("创建幼儿", bool(child.get("id")))
-        duck = client.post("/api/ducks", json={"name": "小黄", "status": "活泼健康"}).json()
-        step("创建小鸭", bool(duck.get("id")))
+def test_reliable_end_to_end_flow(monkeypatch, client, db_session):
+    """Use only disposable SQLite, fake providers, and one manually driven worker."""
+    def fake_chat_reply(**_kwargs):
+        return {"reply": "我记下来了，还有什么发现？", "ended": False, "end_reason": None}
 
-        # 2. 排班
-        for i in range(3):
-            client.post("/api/children", json={"name": f"幼儿{i}", "nickname": f"娃{i}"})
-        roster = client.post("/api/roster/auto", json={"start_date": "2026-08-17", "days": 5, "cycle": "第1周"}).json()
-        step("自动排班（5 个工作日）", len(roster.get("schedule", [])) == 5)
+    monkeypatch.setattr(ai_engine, "chat_reply", fake_chat_reply)
+    setup = client.post("/api/auth/setup", json={"pin": "1234"})
+    assert setup.status_code == 200
+    assert setup.json() == {"configured": True, "authenticated": True}
 
-        # 3. 真实多轮对话（3 轮 → 触发 max_rounds 结束）
-        conv_id = None
-        ended = False
-        talks = ["我今天喂了小鸭，给它们吃了青菜", "我还给它们换了干净的水", "我看到小鸭在水里游来游去很开心"]
-        for i, t in enumerate(talks, 1):
-            r = client.post("/api/chat", json={"child_id": child["id"], "text": t, "conversation_id": conv_id})
-            d = r.json()
-            conv_id = d["conversation_id"]
-            ended = d["ended"]
-            print(f"    第{i}轮 日记本：{d['reply'][:48]}...")
-            step(f"对话第 {i} 轮", bool(d["reply"]))
-        step("第 3 轮触发 max_rounds 结束", ended)
+    child_response = client.post("/api/children", json={"name": "测试幼儿", "nickname": "小测"})
+    duck_response = client.post("/api/ducks", json={"name": "小黄", "status": "活泼健康"})
+    assert child_response.status_code == 200
+    assert duck_response.status_code == 200
+    child_id = child_response.json()["id"]
+    duck_id = duck_response.json()["id"]
+    for index in range(3):
+        assert client.post("/api/children", json={"name": f"排班幼儿{index}"}).status_code == 200
 
-        # 4. 提炼 + 评估（真实 LLM）
-        fin = client.post(f"/api/conversations/{conv_id}/finalize").json()
-        step("提炼流水/情绪 + 评估初评", bool(fin.get("assessment_id")))
+    roster_request_id = str(uuid4())
+    roster_body = {
+        "request_id": roster_request_id,
+        "start_date": "2026-08-17",
+        "days": 5,
+        "cycle": "第1周",
+    }
+    roster = client.post("/api/roster/auto", json=roster_body)
+    roster_replay = client.post("/api/roster/auto", json=roster_body)
+    assert roster.status_code == 200
+    assert roster.json()["request_id"] == roster_request_id
+    assert len(roster.json()["schedule"]) == 5
+    assert roster_replay.status_code == 200
+    assert roster_replay.json()["replayed"] is True
+    assert roster_replay.json()["schedule"] == roster.json()["schedule"]
 
-        detail = client.get(f"/api/conversations/{conv_id}").json()
-        step("提炼出饲养流水", len(detail.get("feeding_logs", [])) >= 1)
-        step("提炼出情绪", detail.get("emotion") is not None)
-        print("    情绪：", detail.get("emotion"))
-        print("    流水：", [f["category"] + "·" + f["content"] for f in detail.get("feeding_logs", [])])
-        for s in detail["assessment"]["scores"]:
-            print(f"    维度[{s['dimension_name']}]={s['score']}分：{s['reason'][:40]}...")
+    first = _chat(client, child_id=child_id, text="我今天喂了小鸭，给它们吃了青菜", conversation_id=None)
+    second = _chat(
+        client,
+        child_id=child_id,
+        text="我还给它们换了干净的水",
+        conversation_id=first["conversation_id"],
+    )
+    third = _chat(
+        client,
+        child_id=child_id,
+        text="我看到小鸭在水里游来游去很开心",
+        conversation_id=first["conversation_id"],
+    )
+    assert first["conversation_id"] == second["conversation_id"] == third["conversation_id"]
+    assert third["ended"] is True
+    assert third["end_reason"] == "max_rounds"
 
-        # 5. 确认评估
-        aid = detail["assessment"]["id"]
-        scores = {s["dimension_id"]: {"score": s["score"]} for s in detail["assessment"]["scores"]}
-        conf = client.post(f"/api/assessments/{aid}/confirm", json={"scores": scores}).json()
-        step("确认评估", conf.get("ok"))
+    completed = client.post(
+        f"/api/conversations/{third['conversation_id']}/complete",
+        json={"expected_last_message_id": third["diary_message_id"]},
+    )
+    assert completed.status_code == 200
+    assert completed.json()["conversation_id"] == third["conversation_id"]
+    assert completed.json()["analysis_status"] == "pending"
+    db_session.expire_all()
+    assert db_session.scalar(
+        select(models.AnalysisJob.status).where(models.AnalysisJob.id == completed.json()["analysis_job_id"])
+    ) == "pending"
 
-        # 6. 成长曲线
-        g = client.get(f"/api/analysis/growth?child_id={child['id']}").json()
-        step("成长曲线数据（3 维度）", len(g.get("dimensions", [])) == 3)
+    worker = AnalysisWorker(session_factory=SessionLocal, analyzer=_FakeAnalyzer())
+    assert worker.run_once() is True
+    detail_response = client.get(f"/api/conversations/{third['conversation_id']}")
+    assert detail_response.status_code == 200
+    detail = detail_response.json()
+    assert detail["analysis"]["status"] == "succeeded"
+    review = detail["review"]
+    assert review is not None
+    assert review["feeding_logs"] == [
+        {
+            "id": review["feeding_logs"][0]["id"],
+            "category": "喂食",
+            "content": "给小黄添了菜叶",
+            "duck_id": duck_id,
+        }
+    ]
 
-        # 7. 前端页面可访问
-        r1 = client.get("/")
-        r2 = client.get("/teacher.html")
-        step("幼儿端页面可访问", r1.status_code == 200 and "鸭鸭日记本" in r1.text)
-        step("教师端页面可访问", r2.status_code == 200 and "教师端" in r2.text)
+    confirmed = client.put(
+        f"/api/conversations/{third['conversation_id']}/review",
+        json={
+            "revision": detail["revision"],
+            "feeding_logs": review["feeding_logs"],
+            "emotion": review["emotion"],
+            "insight": review["insight"],
+            "scores": [
+                {
+                    "dimension_id": score["dimension_id"],
+                    "score": 5,
+                    "reason": f"教师确认：{score['dimension_name']}",
+                }
+                for score in review["scores"]
+            ],
+            "action": "confirm",
+        },
+    )
+    assert confirmed.status_code == 200
+    assert confirmed.json()["review_status"] == "confirmed"
 
-        print("\n===== e2e 全链路通过 =====")
-finally:
-    E2E_RUNTIME_DIR.cleanup()
+    growth = client.get("/api/analysis/growth", params={"child_id": child_id})
+    assert growth.status_code == 200
+    assert all(series["points"] == [{"date": detail["date"], "score": 5}] for series in growth.json()["dimensions"])
+
+    child_page = client.get("/")
+    teacher_page = client.get("/teacher.html")
+    assert child_page.status_code == 200 and "鸭鸭日记本" in child_page.text
+    assert teacher_page.status_code == 200 and "教师端" in teacher_page.text

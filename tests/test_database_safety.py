@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+from app.backend import ai_engine
+
 # Ensure the project package is importable when pytest prepends tests/ to sys.path.
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -17,6 +19,51 @@ from app.backend.settings import (
     UnsafeTestDatabaseError,
     assert_safe_test_database_path,
 )
+
+
+def test_lowest_level_ai_test_breaker_fails_before_the_provider_transport(monkeypatch):
+    """A test must not reach HTTP even when an AI call is accidentally unmocked."""
+    outbound: list[dict] = []
+
+    class SyntheticResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "synthetic provider response"}}]}
+
+    def fake_post(url, **kwargs):
+        outbound.append({"url": url, "body": kwargs.get("json")})
+        return SyntheticResponse()
+
+    monkeypatch.setattr(ai_engine.httpx, "post", fake_post)
+    try:
+        ai_engine._llm([{"role": "user", "content": "synthetic test input"}], retries=0)
+    except AssertionError as error:
+        assert str(error) == "external AI disabled in tests"
+    else:
+        pytest.fail(f"test breaker did not run before outbound={outbound!r}")
+    assert outbound == []
+
+
+def test_concurrent_retry_does_not_leave_schema_reflection_on_a_stale_connection():
+    """The shared test engine must clear retained pool connections between resets."""
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_analysis_worker.py::test_two_concurrent_retries_have_one_accept_and_one_pending_replay",
+            "tests/test_pipeline_models.py::test_required_reliability_schema_names_are_visible_on_the_test_engine",
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        env=os.environ | {"DISABLE_EXTERNAL_AI": "1"},
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 def test_relative_app_db_path_resolves_from_project_root(monkeypatch):

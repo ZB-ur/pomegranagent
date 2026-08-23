@@ -1054,6 +1054,7 @@ def test_stale_failed_retry_cannot_overwrite_a_newer_worker_state(
 def test_two_concurrent_retries_have_one_accept_and_one_pending_replay(db_session):
     """Catches two failed-state readers both reporting that they reset the same job."""
     conversation, job = _ended_conversation_with_job(db_session)
+    conversation_id = conversation.id
     job.status = "failed"
     job.attempt_count = 3
     db_session.commit()
@@ -1076,7 +1077,7 @@ def test_two_concurrent_retries_have_one_accept_and_one_pending_replay(db_sessio
 
         session.scalar = scalar
         try:
-            results.append(analysis.retry_analysis(session, conversation.id, now=NOW))
+            results.append(analysis.retry_analysis(session, conversation_id, now=NOW))
         except BaseException as exc:  # Captured so the assertion reports both worker outcomes.
             failures.append(exc)
         finally:
