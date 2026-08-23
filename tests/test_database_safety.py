@@ -21,6 +21,53 @@ from app.backend.settings import (
 )
 
 
+_NEUTRAL_SUBPROCESS_ENV_NAMES = ("PATH", "LANG", "LC_ALL", "TMPDIR", "TZ", "SYSTEMROOT")
+
+
+def _safe_pytest_subprocess_env(test_db_path: Path) -> dict[str, str]:
+    """Return the only inherited process state a disposable pytest needs."""
+    env = {
+        name: value
+        for name in _NEUTRAL_SUBPROCESS_ENV_NAMES
+        if (value := os.environ.get(name)) is not None
+    }
+    env.update(
+        {
+            "APP_DB_MODE": "test",
+            "APP_DB_PATH": str(test_db_path.resolve()),
+            "DISABLE_EXTERNAL_AI": "1",
+            "PYTHONNOUSERSITE": "1",
+        }
+    )
+    return env
+
+
+def test_safe_pytest_subprocess_env_discards_hostile_parent_configuration(monkeypatch, tmp_path: Path):
+    sentinel = tmp_path / "application-sentinel.db"
+    child_db = tmp_path / "child-subprocess.db"
+    monkeypatch.setenv("APP_DB_MODE", "app")
+    monkeypatch.setenv("APP_DB_PATH", str(sentinel))
+    monkeypatch.setenv("APP_DB_UNRELATED", "must-not-leak")
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "secret-deepseek")
+    monkeypatch.setenv("DEEPSEEK_BASE_URL", "https://provider.invalid")
+    monkeypatch.setenv("OPENAI_API_KEY", "secret-openai")
+    monkeypatch.setenv("SERVICE_API_KEY", "secret-generic")
+    monkeypatch.setenv("PROVIDER_TOKEN", "secret-provider")
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.invalid")
+
+    env = _safe_pytest_subprocess_env(child_db)
+
+    assert env["APP_DB_MODE"] == "test"
+    assert env["APP_DB_PATH"] == str(child_db.resolve())
+    assert env["DISABLE_EXTERNAL_AI"] == "1"
+    assert env["PYTHONNOUSERSITE"] == "1"
+    assert {key for key in env if key.startswith("APP_DB_")} == {"APP_DB_MODE", "APP_DB_PATH"}
+    forbidden = ("DEEPSEEK", "OPENAI", "API_KEY", "PROVIDER", "PROXY")
+    assert all(not any(marker in key for marker in forbidden) for key in env)
+
+
 def test_lowest_level_ai_test_breaker_fails_before_the_provider_transport(monkeypatch):
     """A test must not reach HTTP even when an AI call is accidentally unmocked."""
     outbound: list[dict] = []
@@ -46,7 +93,7 @@ def test_lowest_level_ai_test_breaker_fails_before_the_provider_transport(monkey
     assert outbound == []
 
 
-def test_concurrent_retry_does_not_leave_schema_reflection_on_a_stale_connection():
+def test_concurrent_retry_does_not_leave_schema_reflection_on_a_stale_connection(tmp_path: Path):
     """The shared test engine must clear retained pool connections between resets."""
     result = subprocess.run(
         [
@@ -58,7 +105,7 @@ def test_concurrent_retry_does_not_leave_schema_reflection_on_a_stale_connection
             "tests/test_pipeline_models.py::test_required_reliability_schema_names_are_visible_on_the_test_engine",
         ],
         cwd=Path(__file__).resolve().parents[1],
-        env=os.environ | {"DISABLE_EXTERNAL_AI": "1"},
+        env=_safe_pytest_subprocess_env(tmp_path / "stale-pool-subprocess.db"),
         capture_output=True,
         text=True,
         check=False,
@@ -87,11 +134,10 @@ def test_test_mode_accepts_a_pytest_temp_path(tmp_path: Path):
 
 def test_importing_database_does_not_create_tables(tmp_path: Path):
     db_path = tmp_path / "import-only.db"
-    env = os.environ | {"APP_DB_MODE": "test", "APP_DB_PATH": str(db_path)}
     result = subprocess.run(
         [sys.executable, "-c", "import app.backend.database"],
         cwd=Path(__file__).resolve().parents[1],
-        env=env,
+        env=_safe_pytest_subprocess_env(db_path),
         capture_output=True,
         text=True,
         check=False,
@@ -108,11 +154,10 @@ def test_pytest_subprocess_does_not_change_application_db(tmp_path: Path):
     application_db = tmp_path / "protected-app.db"
     application_db.write_bytes(b"application-database-sentinel")
     before = _sha256(application_db)
-    env = os.environ | {"APP_DB_PATH": str(application_db), "APP_DB_MODE": "app"}
     result = subprocess.run(
         [sys.executable, "-m", "pytest", "tests/test_api.py::test_dimensions_seeded", "-q"],
         cwd=Path(__file__).resolve().parents[1],
-        env=env,
+        env=_safe_pytest_subprocess_env(tmp_path / "isolated-pytest-subprocess.db"),
         capture_output=True,
         text=True,
         check=False,

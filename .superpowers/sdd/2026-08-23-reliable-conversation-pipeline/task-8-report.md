@@ -67,6 +67,19 @@ origin was that expired ORM load (`IndexError`); the other thread then raised
 on the main thread before commit, and worker threads use only that integer. The
 node passed 30 consecutive invocations; no production retry code changed.
 
+### Subprocess environment review fix
+
+Review found that two safety subprocesses still copied their parent's full
+environment and one deliberately started in app DB mode. The test-only helper
+`_safe_pytest_subprocess_env()` now inherits only present neutral process values
+(`PATH`, `LANG`, `LC_ALL`, `TMPDIR`, `TZ`, and `SYSTEMROOT`) and explicitly sets
+`APP_DB_MODE=test`, a fresh `tmp_path` child DB, `DISABLE_EXTERNAL_AI=1`, and
+`PYTHONNOUSERSITE=1`. It never merges `os.environ`; inherited `APP_DB_*`,
+DeepSeek/OpenAI/generic API-key/provider credentials, and proxy variables are
+excluded. The hostile-parent regression proves this output. All Python
+subprocesses in `tests/test_database_safety.py` now use this helper, including
+the protected-sentinel guard; no child process intentionally starts in app mode.
+
 ## Migrated contracts
 
 - API chat and auto-roster requests use UUID request IDs. Active chat history
@@ -120,13 +133,15 @@ before: c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3
 after:  c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3
 ```
 
-- AI breaker and stale-pool subprocess regressions: `2 passed`.
+- Original AI-breaker and stale-pool subprocess regressions: `2 passed`.
+- Review environment regression: hostile-parent helper `1 passed`; stale-pool
+  and protected-sentinel subprocesses `2 passed`.
 - Concurrent retry regression: `30` consecutive node passes.
 - Task 4 focused suite: `34 passed`.
 - Seven pipeline suites plus migrated API/E2E: `159 passed`.
 - Complete backend suite, explicitly including E2E:
   `DISABLE_EXTERNAL_AI=1 ./.venv/bin/pytest -q tests tests/e2e.py`:
-  `219 passed`.
+  `220 passed` (the original 219 plus the new hostile-parent environment test).
 - Corrected failure matrix: chat `4`, worker `15`, roster `11`, review `6`,
   deactivation `6` selected tests; every selector collected tests and passed.
 - `./.venv/bin/python -m py_compile` over every changed Python file: exit 0.
@@ -208,3 +223,5 @@ Changed Task 8 files:
 - this report
 
 Commit subject: `test: enforce reliable backend release gate`.
+
+Review-fix commit subject: `test: sanitize release-gate subprocesses`.
