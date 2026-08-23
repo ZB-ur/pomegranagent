@@ -24,6 +24,27 @@ def test_foreign_origin_is_rejected_with_standard_error_envelope(client):
     assert response.headers["x-request-id"] == "foreign-123"
 
 
+def test_duplicate_raw_origin_headers_are_rejected(client):
+    request = client.build_request(
+        "GET",
+        "/api/health",
+        headers=[
+            ("Origin", "http://testserver"),
+            ("Origin", "https://attacker.example"),
+            ("X-Request-ID", "duplicate-origin-123"),
+        ],
+    )
+    origin_headers = [
+        value for name, value in request.headers.raw if name.lower() == b"origin"
+    ]
+    assert origin_headers == [b"http://testserver", b"https://attacker.example"]
+
+    response = client.send(request)
+
+    assert_cross_origin_rejection(response)
+    assert response.headers["x-request-id"] == "duplicate-origin-123"
+
+
 def test_same_origin_is_allowed_without_cors_header(client):
     response = client.get("/api/health", headers={"Origin": "http://testserver"})
 
@@ -94,9 +115,25 @@ def test_request_without_origin_remains_allowed(client):
     assert response.status_code == 200
 
 
-def test_launchers_bind_only_loopback():
+def test_launchers_bind_only_loopback_without_proxy_headers():
     root = Path(__file__).resolve().parents[1]
-    assert "--host 127.0.0.1" in (root / "run.sh").read_text(encoding="utf-8")
-    assert "--host 127.0.0.1" in (root / "run.bat").read_text(encoding="utf-8")
-    assert "0.0.0.0" not in (root / "run.sh").read_text(encoding="utf-8")
-    assert "0.0.0.0" not in (root / "run.bat").read_text(encoding="utf-8")
+    run_sh = (root / "run.sh").read_text(encoding="utf-8")
+    run_bat = (root / "run.bat").read_text(encoding="utf-8")
+    assert "--host 127.0.0.1" in run_sh
+    assert "--host 127.0.0.1" in run_bat
+    assert "--no-proxy-headers" in run_sh
+    assert "--no-proxy-headers" in run_bat
+    assert "0.0.0.0" not in run_sh
+    assert "0.0.0.0" not in run_bat
+
+
+def test_documented_direct_uvicorn_commands_disable_proxy_headers():
+    root = Path(__file__).resolve().parents[1]
+    direct_commands = [
+        line for line in (root / "README.md").read_text(encoding="utf-8").splitlines()
+        if "uvicorn app.backend.main:app" in line
+    ]
+
+    assert len(direct_commands) == 2
+    assert all("--host 127.0.0.1" in command for command in direct_commands)
+    assert all("--no-proxy-headers" in command for command in direct_commands)
