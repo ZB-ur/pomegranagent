@@ -584,3 +584,270 @@ test('late injected browser rejection after cancellation is absorbed under stric
   assert.deepEqual(await resultPromise, { mode: 'cancelled', reason: 'manual-stop' });
   assert.equal(clock.pending(), 0);
 });
+
+test('caller timing overrides cannot shorten the fixed 5000 ms cold start or 15000 ms browser maximum', async () => {
+  const coldClock = fakeClock();
+  const audio = fakeAudio();
+  const coldTTS = createTTSController({
+    loadEdgeBlob: async () => ({ bytes: 'mp3' }),
+    Audio: () => audio,
+    createObjectURL: () => 'blob:edge',
+    revokeObjectURL: () => {},
+    browserSpeak: async () => ({ mode: 'browser', reason: 'unexpected' }),
+    setTimer: coldClock.setTimer,
+    clearTimer: coldClock.clearTimer,
+    coldStartMs: 1,
+  });
+  const coldResult = coldTTS.speak('固定冷启动');
+  await tickMicrotasks();
+  coldClock.advance(1);
+  audio.onplaying();
+  audio.onended();
+  assert.deepEqual(await coldResult, { mode: 'edge', reason: 'ended' });
+
+  const browserClock = fakeClock();
+  let settleBrowser;
+  const browserTTS = createTTSController({
+    loadEdgeBlob: async () => { throw new Error('edge'); },
+    browserSpeak: () => new Promise(resolve => { settleBrowser = resolve; }),
+    setTimer: browserClock.setTimer,
+    clearTimer: browserClock.clearTimer,
+    browserTimeoutMs: 1,
+  });
+  const browserResult = browserTTS.speak('固定浏览器上限');
+  await tickMicrotasks();
+  browserClock.advance(1);
+  settleBrowser({ mode: 'browser', reason: 'ended' });
+  assert.deepEqual(await browserResult, { mode: 'browser', reason: 'ended' });
+  assert.equal(browserClock.pending(), 0);
+});
+
+test('injected native AbortController provides a real AbortSignal to the Edge loader', async () => {
+  const clock = fakeClock();
+  let observedSignal = null;
+  const tts = createTTSController({
+    AbortController,
+    loadEdgeBlob: (_text, signal) => {
+      observedSignal = signal;
+      return new Promise(() => {});
+    },
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+
+  const resultPromise = tts.speak('原生信号');
+  await tickMicrotasks();
+  assert.equal(observedSignal instanceof AbortSignal, true);
+  tts.cancel('test-end');
+  assert.deepEqual(await resultPromise, { mode: 'cancelled', reason: 'test-end' });
+});
+
+test('missing AbortController skips Edge loading and safely starts the fallback path', async () => {
+  const clock = fakeClock();
+  let loaderCalls = 0;
+  const tts = createTTSController({
+    AbortController: null,
+    loadEdgeBlob: async () => {
+      loaderCalls += 1;
+      return { bytes: 'mp3' };
+    },
+    browserSpeak: async () => ({ mode: 'browser', reason: 'abort-controller-unavailable' }),
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+
+  assert.deepEqual(await tts.speak('没有控制器'), {
+    mode: 'browser', reason: 'abort-controller-unavailable',
+  });
+  assert.equal(loaderCalls, 0);
+  assert.equal(clock.pending(), 0);
+});
+
+test('clearTimer reentrancy cancels the old request without starting browser fallback or leaving timers', async () => {
+  const timers = new Map();
+  let next = 0;
+  let tts;
+  let reentered = false;
+  let browserStarts = 0;
+  const setTimer = (callback, delay) => {
+    const id = ++next;
+    timers.set(id, { callback, delay });
+    return id;
+  };
+  const clearTimer = id => {
+    timers.delete(id);
+    if (!reentered) {
+      reentered = true;
+      tts.cancel('clear-reentrant');
+    }
+  };
+  tts = createTTSController({
+    loadEdgeBlob: async () => { throw new Error('edge'); },
+    browserSpeak: async () => {
+      browserStarts += 1;
+      return { mode: 'browser', reason: 'unexpected' };
+    },
+    setTimer,
+    clearTimer,
+  });
+
+  const resultPromise = tts.speak('清理重入');
+  await tickMicrotasks();
+  assert.deepEqual(await resultPromise, { mode: 'cancelled', reason: 'clear-reentrant' });
+  assert.equal(browserStarts, 0);
+  assert.equal(timers.size, 0);
+});
+
+test('audio pause reentrancy during timeout cannot resurrect an old browser fallback', async () => {
+  const clock = fakeClock();
+  let tts;
+  let reentered = false;
+  let browserStarts = 0;
+  const audio = fakeAudio();
+  audio.pause = () => {
+    audio.pauseCount += 1;
+    if (!reentered) {
+      reentered = true;
+      tts.cancel('pause-reentrant');
+    }
+  };
+  tts = createTTSController({
+    loadEdgeBlob: async () => ({ bytes: 'mp3' }),
+    Audio: () => audio,
+    createObjectURL: () => 'blob:edge',
+    revokeObjectURL: () => {},
+    browserSpeak: async () => {
+      browserStarts += 1;
+      return { mode: 'browser', reason: 'unexpected' };
+    },
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+
+  const resultPromise = tts.speak('暂停重入');
+  await tickMicrotasks();
+  clock.advance(5000);
+  assert.deepEqual(await resultPromise, { mode: 'cancelled', reason: 'pause-reentrant' });
+  assert.equal(browserStarts, 0);
+  assert.equal(clock.pending(), 0);
+});
+
+test('async URL revocation rejection is absorbed after cancellation in strict mode', async () => {
+  const clock = fakeClock();
+  const audio = fakeAudio();
+  const tts = createTTSController({
+    loadEdgeBlob: async () => ({ bytes: 'mp3' }),
+    Audio: () => audio,
+    createObjectURL: () => 'blob:async-revoke',
+    revokeObjectURL: async () => { throw new Error('revoke rejected'); },
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+
+  const resultPromise = tts.speak('异步撤销');
+  await tickMicrotasks();
+  tts.cancel('manual-stop');
+  await tickMicrotasks();
+  assert.deepEqual(await resultPromise, { mode: 'cancelled', reason: 'manual-stop' });
+  assert.equal(clock.pending(), 0);
+});
+
+test('browser constructor/speak failures, missing dependencies, and invalid text only resolve safe result objects', async () => {
+  const makeFallback = (synthesis, Utterance) => {
+    const clock = fakeClock();
+    return createTTSController({
+      loadEdgeBlob: async () => { throw new Error('edge'); },
+      speechSynthesis: synthesis,
+      SpeechSynthesisUtterance: Utterance,
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+    });
+  };
+  class ThrowingUtterance {
+    constructor() { throw new Error('constructor'); }
+  }
+  assert.deepEqual(await makeFallback(fakeSynthesis(), ThrowingUtterance).speak('构造失败'), {
+    mode: 'text', reason: 'browser-error',
+  });
+  assert.deepEqual(await makeFallback({ speak() { throw new Error('speak'); }, cancel() {} }, FakeUtterance).speak('调用失败'), {
+    mode: 'text', reason: 'browser-error',
+  });
+  assert.deepEqual(await makeFallback(undefined, undefined).speak('缺失依赖'), {
+    mode: 'text', reason: 'browser-unavailable',
+  });
+  const invalid = createTTSController({});
+  assert.deepEqual(await invalid.speak(''), { mode: 'text', reason: 'invalid-text' });
+  assert.deepEqual(await invalid.speak(null), { mode: 'text', reason: 'invalid-text' });
+});
+
+test('custom browser onCancel runs exactly once and timer setup failures still settle', async () => {
+  const clock = fakeClock();
+  let cancelCalls = 0;
+  const tts = createTTSController({
+    loadEdgeBlob: async () => { throw new Error('edge'); },
+    browserSpeak: (_text, context) => {
+      context.onCancel(() => { cancelCalls += 1; });
+      return new Promise(() => {});
+    },
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+  const resultPromise = tts.speak('自定义取消');
+  await tickMicrotasks();
+  tts.cancel('manual-stop');
+  tts.cancel('again');
+  assert.deepEqual(await resultPromise, { mode: 'cancelled', reason: 'manual-stop' });
+  assert.equal(cancelCalls, 1);
+
+  const brokenTimer = createTTSController({
+    setTimer: () => { throw new Error('timer'); },
+    clearTimer: () => {},
+  });
+  assert.deepEqual(await brokenTimer.speak('定时器失败'), { mode: 'text', reason: 'browser-timer-error' });
+});
+
+test('a timer that fires synchronously cannot leave its returned handle on an already-settled request', async () => {
+  const handles = new Set();
+  let next = 0;
+  let loaderCalls = 0;
+  const setTimer = (callback, delay) => {
+    const id = ++next;
+    handles.add(id);
+    if (delay === 5000) callback();
+    return id;
+  };
+  const tts = createTTSController({
+    loadEdgeBlob: async () => {
+      loaderCalls += 1;
+      return { bytes: 'mp3' };
+    },
+    browserSpeak: async (_text, context) => ({ mode: 'browser', reason: context.reason }),
+    setTimer,
+    clearTimer: id => handles.delete(id),
+  });
+
+  assert.deepEqual(await tts.speak('同步定时器'), { mode: 'browser', reason: 'edge-timeout' });
+  assert.equal(loaderCalls, 0);
+  assert.equal(handles.size, 0);
+});
+
+test('an asynchronously rejecting browser speak call settles text mode without an unhandled rejection', async () => {
+  const clock = fakeClock();
+  const tts = createTTSController({
+    loadEdgeBlob: async () => { throw new Error('edge'); },
+    speechSynthesis: {
+      cancel() {},
+      speak() { return Promise.reject(new Error('async speak rejection')); },
+    },
+    SpeechSynthesisUtterance: FakeUtterance,
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
+  });
+
+  const resultPromise = tts.speak('异步浏览器调用');
+  await tickMicrotasks();
+  await tickMicrotasks();
+  clock.advance(15000);
+  assert.deepEqual(await resultPromise, { mode: 'text', reason: 'browser-error' });
+  assert.equal(clock.pending(), 0);
+});

@@ -1,3 +1,8 @@
+const COLD_START_MS = 5000;
+const BROWSER_TIMEOUT_MS = 15000;
+const SCHEDULING = Symbol('scheduling');
+const SKIPPED = Symbol('skipped');
+
 export function createTTSController(deps = {}) {
   const {
     loadEdgeBlob,
@@ -9,17 +14,26 @@ export function createTTSController(deps = {}) {
     SpeechSynthesisUtterance,
     setTimer,
     clearTimer,
-    coldStartMs = 5000,
-    browserTimeoutMs = 15000,
   } = deps;
+  const AbortController = Object.hasOwn(deps, 'AbortController')
+    ? deps.AbortController
+    : globalThis.AbortController;
   let active = null;
   let disposed = false;
 
+  function isActive(request) {
+    return request !== null && active === request && !request.done;
+  }
+
   function speak(text) {
+    if (typeof text !== 'string' || !text.trim()) {
+      return Promise.resolve(result('text', 'invalid-text'));
+    }
     if (disposed) return Promise.resolve(result('cancelled', 'disposed'));
     cancel('superseded');
 
     return new Promise(resolve => {
+      const edgeAborter = createAborter(AbortController);
       const request = {
         audio: null,
         browserAborter: null,
@@ -27,7 +41,8 @@ export function createTTSController(deps = {}) {
         browserTimer: null,
         coldTimer: null,
         done: false,
-        edgeAborter: createAborter(),
+        edgeAborter,
+        edgeSignal: edgeAborter?.signal ?? null,
         fallbackStarted: false,
         objectURL: null,
         resolve,
@@ -36,17 +51,23 @@ export function createTTSController(deps = {}) {
       active = request;
       request.settle = value => settle(request, value);
 
-      try {
-        request.coldTimer = setTimer(() => {
-          request.coldTimer = null;
-          request.edgeAborter.abort();
-          startFallback(request, text, 'edge-timeout');
-        }, coldStartMs);
-      } catch {
-        startFallback(request, text, 'edge-timer-error');
+      if (!edgeAborter) {
+        startFallback(request, text, 'abort-controller-unavailable');
+        return;
       }
 
-      run(() => loadEdgeBlob(text, request.edgeAborter.signal))
+      const coldTimerStarted = scheduleTimer(request, 'coldTimer', () => {
+        abortEdge(request);
+        if (!isActive(request)) return;
+        startFallback(request, text, 'edge-timeout');
+      }, COLD_START_MS);
+      if (!isActive(request)) return;
+      if (!coldTimerStarted) {
+        startFallback(request, text, 'edge-timer-error');
+        return;
+      }
+
+      run(() => loadEdgeBlob(text, request.edgeSignal))
         .then(blob => startEdgeAudio(request, blob, text))
         .catch(error => {
           if (!edgeIsCurrent(request)) return;
@@ -57,10 +78,13 @@ export function createTTSController(deps = {}) {
 
   function cancel(reason = 'cancelled') {
     const request = active;
-    if (!request || request.done) return;
-    request.edgeAborter.abort();
+    if (!isActive(request)) return;
+    abortEdge(request);
+    if (!isActive(request)) return;
     stopEdge(request);
+    if (!isActive(request)) return;
     stopBrowser(request);
+    if (!isActive(request)) return;
     request.settle(result('cancelled', reason));
   }
 
@@ -87,7 +111,7 @@ export function createTTSController(deps = {}) {
           }
           request.audio = audio;
           audio.onplaying = () => {
-            if (edgeIsCurrent(request)) clearColdTimer(request);
+            if (edgeIsCurrent(request)) clearTimerOnce(request, 'coldTimer');
           };
           audio.onended = () => {
             if (edgeIsCurrent(request)) request.settle(result('edge', 'ended'));
@@ -106,20 +130,26 @@ export function createTTSController(deps = {}) {
   }
 
   function startFallback(request, text, reason) {
-    if (request.done || request.fallbackStarted || active !== request) return;
-    if (reason !== 'edge-timeout') clearColdTimer(request);
+    if (!isActive(request) || request.fallbackStarted) return;
+    if (reason !== 'edge-timeout') {
+      clearTimerOnce(request, 'coldTimer');
+      if (!isActive(request)) return;
+    }
     request.fallbackStarted = true;
-    request.edgeAborter.abort();
+    abortEdge(request);
+    if (!isActive(request)) return;
     stopEdge(request);
-    request.browserAborter = createAborter();
+    if (!isActive(request)) return;
 
-    try {
-      request.browserTimer = setTimer(() => {
-        request.browserTimer = null;
-        stopBrowser(request);
-        request.settle(result('text', 'browser-timeout'));
-      }, browserTimeoutMs);
-    } catch {
+    request.browserAborter = createAborter(AbortController);
+    if (!isActive(request)) return;
+    const browserTimerStarted = scheduleTimer(request, 'browserTimer', () => {
+      stopBrowser(request);
+      if (!isActive(request)) return;
+      request.settle(result('text', 'browser-timeout'));
+    }, BROWSER_TIMEOUT_MS);
+    if (!isActive(request)) return;
+    if (!browserTimerStarted) {
       request.settle(result('text', 'browser-timer-error'));
       return;
     }
@@ -128,15 +158,16 @@ export function createTTSController(deps = {}) {
       clearTimer,
       onCancel(cancelBrowser) {
         if (typeof cancelBrowser !== 'function') return;
-        if (request.browserAborter.signal.aborted) {
-          safely(cancelBrowser);
-        } else {
-          request.browserCancels.push(cancelBrowser);
+        const once = onceOnly(cancelBrowser);
+        if (!browserIsCurrent(request)) {
+          if (request.done || request.browserAborter?.signal?.aborted) absorbCleanup(once);
+          return;
         }
+        request.browserCancels.push(once);
       },
       reason,
       setTimer,
-      signal: request.browserAborter.signal,
+      signal: request.browserAborter?.signal ?? null,
     };
     const invokeBrowser = typeof browserSpeak === 'function'
       ? () => browserSpeak(text, context)
@@ -146,51 +177,80 @@ export function createTTSController(deps = {}) {
         SpeechSynthesisUtterance,
       });
 
-    run(invokeBrowser)
-      .then(value => request.settle(normalizeFallback(value, reason)))
-      .catch(() => request.settle(result('text', reason)));
+    run(() => browserIsCurrent(request) ? invokeBrowser() : SKIPPED)
+      .then(value => {
+        if (!browserIsCurrent(request) || value === SKIPPED) return;
+        request.settle(normalizeFallback(value, reason));
+      })
+      .catch(() => {
+        if (browserIsCurrent(request)) request.settle(result('text', reason));
+      });
   }
 
   function settle(request, value) {
     if (request.done) return;
     request.done = true;
-    clearColdTimer(request);
-    clearBrowserTimer(request);
+    clearTimerOnce(request, 'coldTimer');
+    clearTimerOnce(request, 'browserTimer');
     detachAudio(request);
     revokeURL(request);
     if (active === request) active = null;
     request.resolve(result(value.mode, value.reason));
   }
 
-  function clearColdTimer(request) {
-    clearTimerOnce(request, 'coldTimer');
-  }
-
-  function clearBrowserTimer(request) {
-    clearTimerOnce(request, 'browserTimer');
+  function scheduleTimer(request, key, callback, delay) {
+    if (!isActive(request)) return false;
+    let timer;
+    request[key] = SCHEDULING;
+    const fire = () => {
+      if (request[key] !== SCHEDULING && request[key] !== timer) return;
+      request[key] = null;
+      callback();
+    };
+    try {
+      timer = setTimer(fire, delay);
+    } catch {
+      if (request[key] === SCHEDULING) request[key] = null;
+      return false;
+    }
+    absorbThenable(timer);
+    if (request[key] !== SCHEDULING || !isActive(request)) {
+      absorbCleanup(() => clearTimer(timer));
+      return false;
+    }
+    request[key] = timer;
+    return true;
   }
 
   function clearTimerOnce(request, key) {
-    if (request[key] === null) return;
     const timer = request[key];
+    if (timer === null) return;
     request[key] = null;
-    safely(() => clearTimer(timer));
+    if (timer !== SCHEDULING) absorbCleanup(() => clearTimer(timer));
+  }
+
+  function abortEdge(request) {
+    const aborter = request.edgeAborter;
+    request.edgeAborter = null;
+    if (aborter) absorbCleanup(() => aborter.abort());
   }
 
   function stopEdge(request) {
     const audio = request.audio;
     request.audio = null;
     if (audio) {
-      safely(() => audio.pause?.());
+      absorbCleanup(() => audio.pause?.());
       detachAudioValue(audio);
     }
     revokeURL(request);
   }
 
   function stopBrowser(request) {
-    if (!request.browserAborter) return;
-    request.browserAborter.abort();
-    for (const cancelBrowser of request.browserCancels.splice(0)) safely(cancelBrowser);
+    const aborter = request.browserAborter;
+    request.browserAborter = null;
+    const cancels = request.browserCancels.splice(0);
+    if (aborter) absorbCleanup(() => aborter.abort());
+    for (const cancelBrowser of cancels) absorbCleanup(cancelBrowser);
   }
 
   function detachAudio(request) {
@@ -200,7 +260,7 @@ export function createTTSController(deps = {}) {
   }
 
   function detachAudioValue(audio) {
-    safely(() => {
+    absorbCleanup(() => {
       audio.onplaying = null;
       audio.onended = null;
       audio.onerror = null;
@@ -212,21 +272,25 @@ export function createTTSController(deps = {}) {
     if (objectURL === null || objectURL === undefined || request.revokedURL === objectURL) return;
     request.revokedURL = objectURL;
     if (request.objectURL === objectURL) request.objectURL = null;
-    safely(() => revokeObjectURL(objectURL));
+    absorbCleanup(() => revokeObjectURL(objectURL));
   }
 
   function edgeIsCurrent(request) {
-    return active === request
-      && !request.done
+    return isActive(request)
       && !request.fallbackStarted
-      && !request.edgeAborter.signal.aborted;
+      && request.edgeAborter !== null
+      && request.edgeSignal?.aborted !== true;
+  }
+
+  function browserIsCurrent(request) {
+    return isActive(request) && request.fallbackStarted;
   }
 
   return Object.freeze({ speak, cancel, dispose });
 }
 
 function defaultBrowserSpeak(text, {
-  signal,
+  onCancel,
   speechSynthesis,
   SpeechSynthesisUtterance,
 } = {}) {
@@ -236,7 +300,6 @@ function defaultBrowserSpeak(text, {
     const settle = value => {
       if (done) return;
       done = true;
-      safely(() => signal?.removeEventListener?.('abort', cancelled));
       if (utterance) {
         utterance.onend = null;
         utterance.onerror = null;
@@ -244,7 +307,7 @@ function defaultBrowserSpeak(text, {
       resolve(value);
     };
     const cancelled = () => {
-      safely(() => speechSynthesis?.cancel?.());
+      absorbCleanup(() => speechSynthesis?.cancel?.());
       settle(result('cancelled', 'browser-cancelled'));
     };
 
@@ -252,51 +315,55 @@ function defaultBrowserSpeak(text, {
       settle(result('text', 'browser-unavailable'));
       return;
     }
-    if (signal?.aborted) {
-      cancelled();
-      return;
-    }
 
     try {
       utterance = new SpeechSynthesisUtterance(text);
       utterance.onend = () => settle(result('browser', 'ended'));
       utterance.onerror = () => settle(result('text', 'browser-error'));
-      signal?.addEventListener?.('abort', cancelled);
-      speechSynthesis.speak(utterance);
+      onCancel?.(cancelled);
+      if (done) return;
+      run(() => done ? undefined : speechSynthesis.speak(utterance))
+        .catch(() => settle(result('text', 'browser-error')));
     } catch {
       settle(result('text', 'browser-error'));
     }
   });
 }
 
-function createAborter() {
-  const listeners = new Set();
-  const signal = {
-    aborted: false,
-    addEventListener(type, listener) {
-      if (type === 'abort') listeners.add(listener);
-    },
-    removeEventListener(type, listener) {
-      if (type === 'abort') listeners.delete(listener);
-    },
-  };
-  return {
-    signal,
-    abort() {
-      if (signal.aborted) return;
-      signal.aborted = true;
-      for (const listener of [...listeners]) safely(listener);
-      listeners.clear();
-    },
-  };
+function createAborter(AbortController) {
+  if (typeof AbortController !== 'function') return null;
+  try {
+    const aborter = new AbortController();
+    if (!aborter?.signal || typeof aborter.abort !== 'function') return null;
+    return aborter;
+  } catch {
+    return null;
+  }
 }
 
 function run(work) {
   return Promise.resolve().then(work);
 }
 
-function safely(work) {
-  try { work(); } catch {}
+function absorbCleanup(work) {
+  try {
+    absorbThenable(work());
+  } catch {}
+}
+
+function absorbThenable(value) {
+  try {
+    if (value && typeof value.then === 'function') Promise.resolve(value).catch(() => {});
+  } catch {}
+}
+
+function onceOnly(callback) {
+  let called = false;
+  return () => {
+    if (called) return;
+    called = true;
+    return callback();
+  };
 }
 
 function normalizeFallback(value, reason) {
