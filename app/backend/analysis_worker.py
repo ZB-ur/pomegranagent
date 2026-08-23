@@ -76,44 +76,46 @@ class AnalysisWorker:
                 db.close()
             self._set_state("idle")
             while not self._stop_event.is_set():
-                try:
-                    worked = self.run_once()
-                except Exception as exc:  # A worker-level failure must be externally visible.
-                    logger.exception("analysis worker failed error_type=%s", type(exc).__name__)
-                    self._set_state("failed")
-                    return
+                worked = self.run_once()
                 if not worked:
                     self._stop_event.wait(self._poll_interval_seconds)
+        except Exception as exc:  # Startup recovery and direct job failures share health state.
+            logger.exception("analysis worker failed error_type=%s", type(exc).__name__)
+            self._set_state("failed")
         finally:
             if self.status() != "failed":
                 self._set_state("stopped")
 
     def run_once(self) -> bool:
-        db = self._session_factory()
         try:
-            job_id = claim_next_analysis_job(
-                db,
+            db = self._session_factory()
+            try:
+                job_id = claim_next_analysis_job(
+                    db,
+                    worker_id=self.worker_id,
+                    now=self._clock(),
+                    lease_seconds=self._lease_seconds,
+                )
+            finally:
+                db.close()
+            if job_id is None:
+                if not self._stop_event.is_set():
+                    self._set_state("idle")
+                return False
+            self._set_state("processing", active_job_id=job_id)
+            process_analysis_job(
+                self._session_factory,
+                job_id=job_id,
                 worker_id=self.worker_id,
-                now=self._clock(),
-                lease_seconds=self._lease_seconds,
+                analyzer=self._analyzer,
+                clock=self._clock,
             )
-        finally:
-            db.close()
-        if job_id is None:
             if not self._stop_event.is_set():
                 self._set_state("idle")
-            return False
-        self._set_state("processing", active_job_id=job_id)
-        process_analysis_job(
-            self._session_factory,
-            job_id=job_id,
-            worker_id=self.worker_id,
-            analyzer=self._analyzer,
-            clock=self._clock,
-        )
-        if not self._stop_event.is_set():
-            self._set_state("idle")
-        return True
+            return True
+        except Exception:
+            self._set_state("failed")
+            raise
 
     def stop(self, timeout_seconds: float = 5.0) -> None:
         self._stop_event.set()
@@ -121,7 +123,7 @@ class AnalysisWorker:
             thread = self._thread
         if thread is not None and thread is not threading.current_thread():
             thread.join(timeout_seconds)
-        if thread is None or not thread.is_alive():
+        if (thread is None or not thread.is_alive()) and self.status() != "failed":
             self._set_state("stopped")
 
     def status(self) -> str:

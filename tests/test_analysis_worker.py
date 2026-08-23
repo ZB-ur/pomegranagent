@@ -2,14 +2,15 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from threading import Event
+from threading import Barrier, Event, Thread
 
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import func, select
 
-from app.backend import models
+from app.backend import models, schemas
 from app.backend.analysis_worker import AnalysisWorker
+from app.backend.api_errors import APIError
 from app.backend.database import SessionLocal
 from app.backend.main import app
 from app.backend.services import analysis
@@ -165,6 +166,97 @@ def _projection_counts(db_session, conversation_id: int) -> dict[str, int]:
     }
 
 
+def _seed_existing_projection(db_session, conversation: models.Conversation) -> dict:
+    dimensions = db_session.scalars(
+        select(models.AssessmentDimension).order_by(models.AssessmentDimension.id)
+    ).all()
+    db_session.add_all([
+        models.FeedingLog(
+            conversation_id=conversation.id,
+            child_id=conversation.child_id,
+            category="清洁",
+            content="已有的清洁记录",
+        ),
+        models.EmotionLog(
+            conversation_id=conversation.id,
+            child_id=conversation.child_id,
+            emotion="平静",
+            intensity=2,
+            note="已有的情绪记录",
+        ),
+        models.InsightNote(
+            conversation_id=conversation.id,
+            child_id=conversation.child_id,
+            content="已有的心得记录",
+        ),
+    ])
+    assessment = models.Assessment(
+        conversation_id=conversation.id,
+        child_id=conversation.child_id,
+        status="pending",
+        overall=2.0,
+    )
+    db_session.add(assessment)
+    db_session.flush()
+    db_session.add_all([
+        models.AssessmentScore(
+            assessment_id=assessment.id,
+            dimension_id=dimension.id,
+            score=2,
+            reason=f"已有的{dimension.key}评分",
+        )
+        for dimension in dimensions
+    ])
+    conversation.revision = 7
+    db_session.commit()
+    return _projection_snapshot(db_session, conversation.id)
+
+
+def _projection_snapshot(db_session, conversation_id: int) -> dict:
+    assessment = db_session.scalar(
+        select(models.Assessment).where(models.Assessment.conversation_id == conversation_id)
+    )
+    assert assessment is not None
+    conversation = db_session.get(models.Conversation, conversation_id)
+    assert conversation is not None
+    return {
+        "revision": conversation.revision,
+        "feeding": [
+            (row.id, row.category, row.content, row.duck_id)
+            for row in db_session.scalars(
+                select(models.FeedingLog)
+                .where(models.FeedingLog.conversation_id == conversation_id)
+                .order_by(models.FeedingLog.id)
+            )
+        ],
+        "emotion": [
+            (row.id, row.emotion, row.intensity, row.note)
+            for row in db_session.scalars(
+                select(models.EmotionLog)
+                .where(models.EmotionLog.conversation_id == conversation_id)
+                .order_by(models.EmotionLog.id)
+            )
+        ],
+        "insight": [
+            (row.id, row.content)
+            for row in db_session.scalars(
+                select(models.InsightNote)
+                .where(models.InsightNote.conversation_id == conversation_id)
+                .order_by(models.InsightNote.id)
+            )
+        ],
+        "assessment": (assessment.id, assessment.status, assessment.overall),
+        "scores": [
+            (row.id, row.dimension_id, row.score, row.reason)
+            for row in db_session.scalars(
+                select(models.AssessmentScore)
+                .where(models.AssessmentScore.assessment_id == assessment.id)
+                .order_by(models.AssessmentScore.id)
+            )
+        ],
+    }
+
+
 def test_claims_due_jobs_oldest_first_with_one_attempt_and_a_lease(db_session):
     """Catches choosing a newer job or claiming a job without durable ownership."""
     _, first = _ended_conversation_with_job(
@@ -249,6 +341,59 @@ def test_claim_compare_and_set_loser_does_not_increment_the_live_attempt(db_sess
     assert saved is not None
     assert saved.attempt_count == 1
     assert saved.lease_owner == "worker-a"
+
+
+def test_two_sessions_observing_one_pending_job_have_one_cas_claim_winner(db_session):
+    """Catches a real concurrent claim race incrementing attempts or granting two owners."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+    both_observed = Barrier(2)
+    results: dict[str, int | None] = {}
+    failures: list[BaseException] = []
+
+    def claim_in_own_session(worker_id: str) -> None:
+        session = SessionLocal()
+        original_scalar = session.scalar
+        waited = False
+
+        def scalar(statement, *args, **kwargs):
+            nonlocal waited
+            result = original_scalar(statement, *args, **kwargs)
+            if not waited and "analysis_jobs" in str(statement):
+                waited = True
+                both_observed.wait(timeout=2)
+            return result
+
+        session.scalar = scalar
+        try:
+            results[worker_id] = analysis.claim_next_analysis_job(
+                session,
+                worker_id=worker_id,
+                now=NOW,
+                lease_seconds=30,
+            )
+        except BaseException as exc:  # Keep both thread outcomes visible to the assertion.
+            failures.append(exc)
+        finally:
+            session.close()
+
+    first = Thread(target=claim_in_own_session, args=("worker-a",))
+    second = Thread(target=claim_in_own_session, args=("worker-b",))
+    first.start()
+    second.start()
+    first.join(3)
+    second.join(3)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert failures == []
+    winners = [worker_id for worker_id, result in results.items() if result == job.id]
+    assert len(winners) == 1
+    assert list(results.values()).count(None) == 1
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.attempt_count == 1
+    assert saved.lease_owner == winners[0]
 
 
 def test_process_builds_the_frozen_input_outside_a_database_session_and_projects_once(
@@ -343,6 +488,41 @@ def test_process_builds_the_frozen_input_outside_a_database_session_and_projects
     assert feeding[0].duck_id == duck.id
 
 
+def test_frozen_transcript_excludes_a_later_message_in_the_same_conversation(db_session):
+    """Catches analysis silently including text that arrived after completion froze the job."""
+    conversation, job = _ended_conversation_with_job(
+        db_session,
+        messages=[("child", "冻结前的观察")],
+    )
+    late = models.Message(
+        conversation_id=conversation.id,
+        role="child",
+        text="冻结后绝不能分析的消息",
+    )
+    db_session.add(late)
+    db_session.commit()
+    assert late.id > job.frozen_last_message_id
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    ) == job.id
+    analyzer = FakeAnalysisEngine(extraction=_analysis_output(), assessment=_assessment_output())
+
+    analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=analyzer,
+        clock=lambda: NOW,
+    )
+
+    assert analyzer.extract_calls == ["child: 冻结前的观察"]
+    assert analyzer.assessment_calls[0][0] == "child: 冻结前的观察"
+    assert "冻结后绝不能分析的消息" not in analyzer.extract_calls[0]
+
+
 def assert_no_open_analysis_session(factory: TrackingSessionFactory) -> None:
     assert factory.open_sessions == 0
 
@@ -391,6 +571,54 @@ def test_assessment_failure_or_malformed_output_writes_no_partial_projection(
     assert saved.last_error_message == "分析服务暂时不可用"
     assert saved.lease_owner is None
     assert saved.lease_expires_at is None
+
+
+@pytest.mark.parametrize("failure_kind", ["extraction", "assessment", "malformed"])
+def test_ai_failure_or_malformed_output_preserves_every_existing_projection(
+    db_session,
+    failure_kind,
+):
+    """Catches a failed replacement deleting any retained generated record or revision."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    before = _seed_existing_projection(db_session, conversation)
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=30,
+    ) == job.id
+    if failure_kind == "extraction":
+        analyzer = FakeAnalysisEngine(
+            extraction=RuntimeError("extract provider failure"),
+            assessment=_assessment_output(),
+        )
+    elif failure_kind == "assessment":
+        analyzer = FakeAnalysisEngine(
+            extraction=_analysis_output(),
+            assessment=RuntimeError("assessment provider failure"),
+        )
+    else:
+        analyzer = FakeAnalysisEngine(
+            extraction=_analysis_output(),
+            assessment={"scores": [{"dimension_key": "language", "score": 9, "reason": "坏输出"}]},
+        )
+
+    analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job.id,
+        worker_id="worker-a",
+        analyzer=analyzer,
+        clock=lambda: NOW,
+    )
+
+    db_session.expire_all()
+    assert _projection_snapshot(db_session, conversation.id) == before
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "pending"
+    assert saved.available_at == (NOW + timedelta(seconds=1)).replace(tzinfo=None)
+    assert saved.last_error_code == "ANALYSIS_UPSTREAM_FAILED"
+    assert saved.last_error_message == "分析服务暂时不可用"
 
 
 def test_rejects_a_frozen_message_id_from_another_conversation_without_calling_ai(
@@ -771,6 +999,110 @@ def test_teacher_retry_treats_a_conversation_without_its_required_job_as_not_fou
     ) == 0
 
 
+@pytest.mark.parametrize(
+    ("advanced_status", "expected_code"),
+    [
+        ("processing", "ANALYSIS_IN_PROGRESS"),
+        ("succeeded", "ANALYSIS_ALREADY_SUCCEEDED"),
+    ],
+)
+def test_stale_failed_retry_cannot_overwrite_a_newer_worker_state(
+    db_session,
+    advanced_status,
+    expected_code,
+):
+    """Catches a stale ORM job write resetting a job already advanced elsewhere."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    job.status = "failed"
+    job.attempt_count = 3
+    db_session.commit()
+    stale_session = SessionLocal(expire_on_commit=False)
+    advancing_session = SessionLocal()
+    try:
+        stale = stale_session.get(models.AnalysisJob, job.id)
+        assert stale is not None and stale.status == "failed"
+        stale_session.commit()  # End SQLite's read transaction while retaining stale ORM values.
+
+        accepted = analysis.retry_analysis(
+            advancing_session,
+            conversation.id,
+            now=NOW,
+        )
+        assert accepted.retry_accepted is True
+        advanced = advancing_session.get(models.AnalysisJob, job.id)
+        assert advanced is not None
+        advanced.status = advanced_status
+        if advanced_status == "processing":
+            advanced.attempt_count = 1
+            advanced.lease_owner = "worker-b"
+            advanced.lease_expires_at = NOW + timedelta(seconds=30)
+        advancing_session.commit()
+
+        with pytest.raises(APIError) as raised:
+            analysis.retry_analysis(stale_session, conversation.id, now=NOW)
+
+        assert raised.value.code == expected_code
+        db_session.expire_all()
+        saved = db_session.get(models.AnalysisJob, job.id)
+        assert saved is not None
+        assert saved.status == advanced_status
+    finally:
+        stale_session.close()
+        advancing_session.close()
+
+
+def test_two_concurrent_retries_have_one_accept_and_one_pending_replay(db_session):
+    """Catches two failed-state readers both reporting that they reset the same job."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    job.status = "failed"
+    job.attempt_count = 3
+    db_session.commit()
+    both_read = Barrier(2)
+    results: list[schemas.AnalysisRetryResponse] = []
+    failures: list[BaseException] = []
+
+    def retry_in_own_session() -> None:
+        session = SessionLocal()
+        original_scalar = session.scalar
+        waited = False
+
+        def scalar(statement, *args, **kwargs):
+            nonlocal waited
+            result = original_scalar(statement, *args, **kwargs)
+            if not waited and "analysis_jobs" in str(statement):
+                waited = True
+                both_read.wait(timeout=2)
+            return result
+
+        session.scalar = scalar
+        try:
+            results.append(analysis.retry_analysis(session, conversation.id, now=NOW))
+        except BaseException as exc:  # Captured so the assertion reports both worker outcomes.
+            failures.append(exc)
+        finally:
+            session.close()
+
+    first = Thread(target=retry_in_own_session)
+    second = Thread(target=retry_in_own_session)
+    first.start()
+    second.start()
+    first.join(3)
+    second.join(3)
+
+    assert not first.is_alive()
+    assert not second.is_alive()
+    assert failures == []
+    assert sorted((result.retry_accepted, result.replayed) for result in results) == [
+        (False, True),
+        (True, False),
+    ]
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "pending"
+    assert saved.attempt_count == 0
+
+
 def test_worker_start_recovers_once_rejects_double_start_and_stops_cleanly(
     db_session,
     monkeypatch,
@@ -836,6 +1168,51 @@ def test_worker_run_once_uses_the_injected_engine_and_durable_claim(db_session):
     assert saved.status == "succeeded"
     assert analyzer.extract_calls
     assert _projection_counts(db_session, conversation.id)["assessment"] == 1
+
+
+def test_direct_run_once_claim_fault_sets_failed_before_reraising(monkeypatch):
+    """Catches the public worker seam reporting an old idle/stopped state after failure."""
+    import app.backend.analysis_worker as worker_module
+
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=FakeAnalysisEngine(extraction=_analysis_output(), assessment=_assessment_output()),
+        clock=lambda: NOW,
+    )
+
+    def claim_fault(*_args, **_kwargs):
+        raise RuntimeError("claim database fault")
+
+    monkeypatch.setattr(worker_module, "claim_next_analysis_job", claim_fault)
+
+    with pytest.raises(RuntimeError, match="claim database fault"):
+        worker.run_once()
+
+    assert worker.status() == "failed"
+
+
+def test_startup_recovery_fault_remains_failed_for_health(monkeypatch):
+    """Catches lifespan health claiming stopped when startup recovery actually failed."""
+    import app.backend.analysis_worker as worker_module
+
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=FakeAnalysisEngine(extraction=_analysis_output(), assessment=_assessment_output()),
+        clock=lambda: NOW,
+    )
+    attempted = Event()
+
+    def recovery_fault(*_args, **_kwargs):
+        attempted.set()
+        raise RuntimeError("recovery database fault")
+
+    monkeypatch.setattr(worker_module, "recover_expired_jobs", recovery_fault)
+
+    worker.start()
+    assert attempted.wait(1)
+    worker.stop()
+
+    assert worker.status() == "failed"
 
 
 def test_lifespan_uses_the_injected_single_worker_for_health_and_teardown(monkeypatch):
