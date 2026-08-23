@@ -28,6 +28,47 @@ function loadDuckAPI(fetchImpl) {
   return { api: window.DuckAPI, document };
 }
 
+function loadVersionGateHarness(fetchImpl) {
+  const dispatched = [];
+  const stateWrites = [];
+  let appState;
+  let maintenancePanel = null;
+  const dataset = {};
+  Object.defineProperty(dataset, 'appState', {
+    get: () => appState,
+    set: value => {
+      appState = value;
+      stateWrites.push(value);
+    },
+  });
+  const window = {
+    dispatchEvent(event) { dispatched.push(event); },
+  };
+  const document = {
+    documentElement: { dataset },
+    getElementById: id => (id === 'runtime-maintenance' ? maintenancePanel : null),
+    createElement: () => ({ id: '', innerHTML: '', setAttribute() {} }),
+    body: {
+      replacements: [],
+      replaceChildren(...children) {
+        this.replacements.push(children);
+        maintenancePanel = children.find(child => child.id === 'runtime-maintenance') || null;
+      },
+    },
+  };
+  vm.runInNewContext(source, {
+    window, fetch: fetchImpl, Headers, FormData, AbortController, DOMException,
+    CustomEvent: class CustomEvent {
+      constructor(type, init = {}) {
+        this.type = type;
+        this.detail = init.detail;
+      }
+    },
+    setTimeout, clearTimeout, document, console,
+  });
+  return { api: window.DuckAPI, dispatched, document, stateWrites };
+}
+
 function loadTeacherWithPendingGates() {
   const listeners = {};
   const requests = [];
@@ -143,6 +184,98 @@ test('version mismatch enters maintenance before any business request', async ()
   await assert.rejects(api.ready(), error => error.code === 'VERSION_MISMATCH');
   assert.equal(document.documentElement.dataset.appState, 'maintenance');
   assert.equal(seen.length, 2);
+});
+
+test('bootstrapVersionGate and ready share one pending successful gate promise', async () => {
+  const calls = [];
+  let resolveDisk;
+  let resolveHealth;
+  const disk = { release_id: 'build-1', api_version: '2', schema_version: 2 };
+  const health = { ...disk, db_mode: 'app' };
+  const harness = loadVersionGateHarness(path => new Promise(resolve => {
+    calls.push(path);
+    if (path.startsWith('/version.json')) resolveDisk = resolve;
+    else resolveHealth = resolve;
+  }));
+
+  const bootstrap = harness.api.bootstrapVersionGate();
+  const ready = harness.api.ready();
+
+  assert.strictEqual(ready, bootstrap);
+  assert.equal(calls.filter(path => path.startsWith('/version.json')).length, 1);
+  assert.equal(calls.filter(path => path === '/api/health').length, 1);
+
+  resolveDisk(jsonResponse(disk));
+  resolveHealth(jsonResponse(health));
+  const [bootstrapHealth, readyHealth] = await Promise.all([bootstrap, ready]);
+  assert.strictEqual(bootstrapHealth, health);
+  assert.strictEqual(readyHealth, health);
+  assert.deepEqual(harness.stateWrites, ['ready']);
+  assert.deepEqual(harness.dispatched.map(event => event.type), ['duck:runtime-ready']);
+});
+
+test('ready, bootstrapVersionGate, and repeated ready calls share one pending gate promise', async () => {
+  const calls = [];
+  let resolveDisk;
+  let resolveHealth;
+  const disk = { release_id: 'build-2', api_version: '2', schema_version: 2 };
+  const health = { ...disk, db_mode: 'app' };
+  const harness = loadVersionGateHarness(path => new Promise(resolve => {
+    calls.push(path);
+    if (path.startsWith('/version.json')) resolveDisk = resolve;
+    else resolveHealth = resolve;
+  }));
+
+  const firstReady = harness.api.ready();
+  const bootstrap = harness.api.bootstrapVersionGate();
+  const repeatedReady = harness.api.ready();
+
+  assert.strictEqual(bootstrap, firstReady);
+  assert.strictEqual(repeatedReady, firstReady);
+  assert.equal(calls.filter(path => path.startsWith('/version.json')).length, 1);
+  assert.equal(calls.filter(path => path === '/api/health').length, 1);
+
+  resolveDisk(jsonResponse(disk));
+  resolveHealth(jsonResponse(health));
+  const [firstHealth, bootstrapHealth, repeatedHealth] = await Promise.all([firstReady, bootstrap, repeatedReady]);
+  assert.strictEqual(firstHealth, health);
+  assert.strictEqual(bootstrapHealth, health);
+  assert.strictEqual(repeatedHealth, health);
+  assert.deepEqual(harness.stateWrites, ['ready']);
+  assert.deepEqual(harness.dispatched.map(event => event.type), ['duck:runtime-ready']);
+});
+
+test('a failed gate is shared by later bootstrapVersionGate and ready calls without retrying', async () => {
+  const calls = [];
+  const disk = { release_id: 'build-new', api_version: '2', schema_version: 2 };
+  const health = { ...disk, release_id: 'build-old', db_mode: 'app' };
+  const harness = loadVersionGateHarness(path => {
+    calls.push(path);
+    return Promise.resolve(jsonResponse(path.startsWith('/version.json') ? disk : health));
+  });
+
+  const initial = harness.api.ready();
+  const [initialResult] = await Promise.allSettled([initial]);
+  assert.equal(initialResult.status, 'rejected');
+  const initialError = initialResult.reason;
+  assert.equal(initialError.code, 'VERSION_MISMATCH');
+  const bootstrap = harness.api.bootstrapVersionGate();
+  const repeatedReady = harness.api.ready();
+  bootstrap.catch(() => {});
+
+  assert.strictEqual(bootstrap, initial);
+  assert.strictEqual(repeatedReady, initial);
+  const [bootstrapResult, readyResult] = await Promise.allSettled([bootstrap, repeatedReady]);
+  assert.equal(bootstrapResult.status, 'rejected');
+  assert.equal(readyResult.status, 'rejected');
+  assert.strictEqual(bootstrapResult.reason, initialError);
+  assert.strictEqual(readyResult.reason, initialError);
+  assert.equal(calls.filter(path => path.startsWith('/version.json')).length, 1);
+  assert.equal(calls.filter(path => path === '/api/health').length, 1);
+  assert.deepEqual(harness.stateWrites, ['maintenance']);
+  assert.deepEqual(harness.dispatched.map(event => event.type), ['duck:runtime-blocked']);
+  assert.equal(harness.document.body.replacements.length, 1);
+  assert.equal(harness.document.body.replacements[0][0].id, 'runtime-maintenance');
 });
 
 test('teacher navigation and hash routes cannot start business requests before runtime and authentication readiness', async () => {

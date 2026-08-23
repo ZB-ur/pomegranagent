@@ -108,7 +108,7 @@
     global.dispatchEvent(new CustomEvent(state === 'ready' ? 'duck:runtime-ready' : 'duck:runtime-blocked', { detail }));
   }
 
-  async function bootstrapVersionGate() {
+  async function performVersionGate() {
     try {
       const [disk, health] = await Promise.all([
         request(`/version.json?ts=${Date.now()}`, { cache: 'no-store' }),
@@ -127,9 +127,13 @@
     }
   }
 
-  function ready() {
-    if (!readyPromise) readyPromise = bootstrapVersionGate();
+  function bootstrapVersionGate() {
+    if (!readyPromise) readyPromise = performVersionGate();
     return readyPromise;
+  }
+
+  function ready() {
+    return bootstrapVersionGate();
   }
 
   function renderMaintenance(message) {
