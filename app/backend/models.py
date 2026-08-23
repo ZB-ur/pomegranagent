@@ -1,7 +1,18 @@
 """SQLAlchemy 数据模型（与需求规格数据模型一致）。"""
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .database import Base
@@ -34,7 +45,8 @@ class Child(Base):
     name: Mapped[str] = mapped_column(String(64))
     nickname: Mapped[str | None] = mapped_column(String(64), nullable=True)
     avatar: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    active: Mapped[bool] = mapped_column(Boolean, default=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class Duck(Base):
@@ -45,10 +57,15 @@ class Duck(Base):
     avatar: Mapped[str | None] = mapped_column(String(255), nullable=True)
     status: Mapped[str | None] = mapped_column(String(255), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    deactivated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
 class DutyRoster(Base):
     __tablename__ = "duty_rosters"
+    __table_args__ = (
+        UniqueConstraint("date", "child_id", name="uq_roster_date_child"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     cycle: Mapped[str] = mapped_column(String(64))  # 周期标识，如 "2026-W33"
@@ -58,14 +75,30 @@ class DutyRoster(Base):
 
 class Conversation(Base):
     __tablename__ = "conversations"
+    __table_args__ = (
+        Index(
+            "uq_conversations_child_active",
+            "child_id",
+            unique=True,
+            sqlite_where=text("status = 'active'"),
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     child_id: Mapped[int] = mapped_column(ForeignKey("children.id"))
     date: Mapped[str] = mapped_column(String(16))
     started_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     ended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    status: Mapped[str] = mapped_column(String(16), default="active")  # active / ended
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="active"
+    )  # active / ended
     end_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    pending_end_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    frozen_last_message_id: Mapped[int | None] = mapped_column(
+        Integer,
+        nullable=True,
+    )
     # 三种结束原因：max_rounds / complete / manual
 
     messages: Mapped[list["Message"]] = relationship(
@@ -85,6 +118,172 @@ class Message(Base):
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
 
 
+class ChatRequestRecord(Base):
+    """Durable idempotency ledger for one child chat submission.
+
+    ``base_last_message_id`` is the claim-time transcript boundary.  It is
+    deliberately kept after success/failure so a later service can reject an
+    AI result whose conversation changed while the request was leased.
+    """
+
+    __tablename__ = "chat_requests"
+
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    child_id: Mapped[int] = mapped_column(
+        ForeignKey("children.id"),
+        nullable=False,
+    )
+    conversation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("conversations.id"),
+        nullable=True,
+    )
+    base_last_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id"),
+        nullable=True,
+    )
+    child_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id"),
+        nullable=True,
+    )
+    diary_message_id: Mapped[int | None] = mapped_column(
+        ForeignKey("messages.id"),
+        nullable=True,
+    )
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="processing",
+        index=True,
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        index=True,
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+class AnalysisJob(Base):
+    """One durable, leaseable analysis job for a frozen conversation."""
+
+    __tablename__ = "analysis_jobs"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", name="uq_analysis_job_conversation"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    conversation_id: Mapped[int] = mapped_column(
+        ForeignKey("conversations.id"),
+        nullable=False,
+    )
+    frozen_last_message_id: Mapped[int] = mapped_column(
+        ForeignKey("messages.id"),
+        nullable=False,
+    )
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="pending",
+        index=True,
+    )
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    available_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        index=True,
+    )
+    lease_owner: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime,
+        nullable=True,
+        index=True,
+    )
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
+class RosterRequest(Base):
+    """Durable idempotency ledger for manual and automatic roster writes."""
+
+    __tablename__ = "roster_requests"
+
+    request_id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    payload_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    status: Mapped[str] = mapped_column(
+        String(16),
+        nullable=False,
+        default="processing",
+        index=True,
+    )
+    response_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime,
+        nullable=False,
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+    )
+
+
 class FeedingLog(Base):
     __tablename__ = "feeding_logs"
 
@@ -99,6 +298,9 @@ class FeedingLog(Base):
 
 class EmotionLog(Base):
     __tablename__ = "emotion_logs"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", name="uq_emotion_conversation"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"))
@@ -111,6 +313,9 @@ class EmotionLog(Base):
 
 class InsightNote(Base):
     __tablename__ = "insight_notes"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", name="uq_insight_conversation"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"))
@@ -132,6 +337,9 @@ class AssessmentDimension(Base):
 
 class Assessment(Base):
     __tablename__ = "assessments"
+    __table_args__ = (
+        UniqueConstraint("conversation_id", name="uq_assessment_conversation"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"))
@@ -146,6 +354,13 @@ class Assessment(Base):
 
 class AssessmentScore(Base):
     __tablename__ = "assessment_scores"
+    __table_args__ = (
+        UniqueConstraint(
+            "assessment_id",
+            "dimension_id",
+            name="uq_assessment_dimension",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     assessment_id: Mapped[int] = mapped_column(ForeignKey("assessments.id"))
