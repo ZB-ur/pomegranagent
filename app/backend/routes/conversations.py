@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
+from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends
@@ -22,6 +23,7 @@ from ..services.chat import (
     record_chat_failure,
 )
 from ..services.completion import complete_conversation
+from ..services.reviews import get_review_detail, list_review_queue, save_review
 
 
 logger = logging.getLogger("duck_diary.chat")
@@ -111,6 +113,48 @@ def retry_conversation_analysis(
     return retry_analysis(
         db,
         conversation_id,
+        now=datetime.now(timezone.utc),
+    )
+
+
+@router.get(
+    "/api/conversations",
+    response_model=list[schemas.ConversationQueueItem],
+)
+def review_queue(
+    queue: Literal["pending", "processing", "failed"],
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+) -> list[schemas.ConversationQueueItem]:
+    return list_review_queue(db, queue=queue)
+
+
+@router.get(
+    "/api/conversations/{conversation_id}",
+    response_model=schemas.ConversationDetail,
+)
+def review_detail(
+    conversation_id: int,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+) -> schemas.ConversationDetail:
+    return get_review_detail(db, conversation_id=conversation_id)
+
+
+@router.put(
+    "/api/conversations/{conversation_id}/review",
+    response_model=schemas.ReviewResponse,
+)
+def put_review(
+    conversation_id: int,
+    payload: schemas.ReviewRequest,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+) -> schemas.ReviewResponse:
+    return save_review(
+        db,
+        conversation_id=conversation_id,
+        payload=payload,
         now=datetime.now(timezone.utc),
     )
 

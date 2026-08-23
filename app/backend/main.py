@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from . import ai_engine, auth, models, schemas
 from .analysis_worker import AnalysisWorker
-from .api_errors import install_api_error_handling
+from .api_errors import APIError, install_api_error_handling
 from .auth import require_teacher_session
 from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
 from .http_boundary import install_same_origin_boundary
@@ -303,65 +303,6 @@ def update_dimension(
     return {"ok": True}
 
 
-# ---------------- 会话 ---------------- 
-@app.get("/api/conversations")
-def list_conversations(
-    child_id: int | None = None,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    q = select(models.Conversation).order_by(models.Conversation.id.desc())
-    if child_id:
-        q = q.where(models.Conversation.child_id == child_id)
-    rows = db.scalars(q).all()
-    return [
-        {
-            "id": c.id, "child_id": c.child_id, "date": c.date,
-            "status": c.status, "end_reason": c.end_reason,
-            "started_at": c.started_at.isoformat() if c.started_at else None,
-        }
-        for c in rows
-    ]
-
-
-@app.get("/api/conversations/{conv_id}")
-def get_conversation(
-    conv_id: int,
-    db: Session = Depends(get_db),
-    _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
-    conv = db.get(models.Conversation, conv_id)
-    if not conv:
-        raise HTTPException(404, "会话不存在")
-    messages = [
-        {"id": m.id, "role": m.role, "text": m.text}
-        for m in sorted(conv.messages, key=lambda x: x.id)
-    ]
-    feeding = [
-        {"id": f.id, "category": f.category, "content": f.content, "duck_id": f.duck_id}
-        for f in db.scalars(select(models.FeedingLog).where(models.FeedingLog.conversation_id == conv_id)).all()
-    ]
-    emotion = db.scalar(select(models.EmotionLog).where(models.EmotionLog.conversation_id == conv_id))
-    insight = db.scalar(select(models.InsightNote).where(models.InsightNote.conversation_id == conv_id))
-    assessment = db.scalar(select(models.Assessment).where(models.Assessment.conversation_id == conv_id))
-    scores = []
-    if assessment:
-        for s in db.scalars(select(models.AssessmentScore).where(models.AssessmentScore.assessment_id == assessment.id)).all():
-            dim = db.get(models.AssessmentDimension, s.dimension_id)
-            scores.append({"dimension_id": s.dimension_id, "dimension_name": dim.name if dim else "", "score": s.score, "reason": s.reason})
-
-    return {
-        "id": conv.id, "child_id": conv.child_id, "date": conv.date,
-        "status": conv.status, "end_reason": conv.end_reason,
-        "messages": messages, "feeding_logs": feeding,
-        "emotion": {"emotion": emotion.emotion, "intensity": emotion.intensity, "note": emotion.note} if emotion else None,
-        "insight": insight.content if insight else None,
-        "assessment": {
-            "id": assessment.id, "status": assessment.status, "overall": assessment.overall, "scores": scores,
-        } if assessment else None,
-    }
-
-
 # ---------------- 提炼与评估 ----------------
 @app.post("/api/conversations/{conv_id}/finalize")
 def finalize(conv_id: int, db: Session = Depends(get_db)):
@@ -443,59 +384,18 @@ def list_assessments(
 @app.post("/api/assessments/{assessment_id}/confirm")
 def confirm_assessment(
     assessment_id: int,
-    payload: schemas.AssessmentConfirm,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ):
-    assessment = db.get(models.Assessment, assessment_id)
-    if not assessment:
-        raise HTTPException(404, "评估不存在")
-    if payload.scores:
-        for dim_id, patch in payload.scores.items():
-            row = db.scalar(select(models.AssessmentScore).where(
-                models.AssessmentScore.assessment_id == assessment_id,
-                models.AssessmentScore.dimension_id == dim_id,
-            ))
-            if row:
-                if patch.score is not None:
-                    row.score = patch.score
-                if patch.reason is not None:
-                    row.reason = patch.reason
-    assessment.status = "confirmed"
-    # 重算 overall
-    scores = db.scalars(select(models.AssessmentScore).where(models.AssessmentScore.assessment_id == assessment_id)).all()
-    if scores:
-        assessment.overall = round(sum(s.score for s in scores) / len(scores), 2)
-    db.commit()
-    return {"ok": True, "overall": assessment.overall}
+    raise APIError(410, "LEGACY_ENDPOINT_REMOVED", "旧审阅接口已下线")
 
 
 # ---------------- 流水/情绪修正 ----------------
 @app.patch("/api/conversations/{conv_id}/logs")
 def patch_logs(
     conv_id: int,
-    payload: dict,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ):
-    if "feeding_logs" in payload:
-        for item in payload["feeding_logs"]:
-            row = db.get(models.FeedingLog, item.get("id"))
-            if row:
-                if "category" in item:
-                    row.category = item["category"]
-                if "content" in item:
-                    row.content = item["content"]
-    if "emotion" in payload:
-        emo = payload["emotion"]
-        row = db.scalar(select(models.EmotionLog).where(models.EmotionLog.conversation_id == conv_id))
-        if row:
-            if "emotion" in emo:
-                row.emotion = emo["emotion"]
-            if "intensity" in emo:
-                row.intensity = emo["intensity"]
-    db.commit()
-    return {"ok": True}
+    raise APIError(410, "LEGACY_ENDPOINT_REMOVED", "旧审阅接口已下线")
 
 
 # ---------------- 小鸭档案 ----------------
