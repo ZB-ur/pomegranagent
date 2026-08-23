@@ -108,10 +108,13 @@ request kept constructing browser fallback state.
 
 - Product timings are constants: 5,000 ms cold start and 15,000 ms browser
   maximum. Callers cannot shorten either; fakes control clock advancement.
-- Native `AbortController` is accepted as an injected dependency (and the
-  platform-native constructor is used when available). The Edge loader receives
-  a genuine `AbortSignal`; a missing/invalid controller bypasses Edge safely
-  into fallback without throwing. Edge and browser controllers remain distinct.
+- With an injected native `AbortController`, the Edge loader receives a genuine
+  native `AbortSignal`. A structurally conforming cross-realm or polyfill
+  controller is accepted through the `{aborted,addEventListener,
+  removeEventListener}` protocol without claiming it is an instance of this
+  realm's native signal. Missing or structurally incomplete controllers bypass
+  Edge safely into fallback without throwing. Edge and browser controllers
+  remain distinct.
 - Cleanup invocation absorbs both synchronous throws and thenable rejections,
   including `clearTimer`, abort, pause, URL revocation, browser cancellation,
   and synthesis cancellation. Main loader/audio/browser promises still use
@@ -132,8 +135,10 @@ request kept constructing browser fallback state.
 
 - `a02ccf5 feat(child): guarantee TTS fallback and settlement` was the initial
   Task 2 delivery.
-- `f315967 fix(child): harden TTS cleanup and timing contracts` was the first
-  independent-review repair.
+- `f315967 fix(child): harden TTS cleanup and timing contracts` was the
+  cleanup/timing repair.
+- `4b38f59 fix(child): preserve TTS terminal lifecycle ordering` was the
+  terminal-lifecycle and signal-validation repair.
 - The second review added three focused regressions against `f315967`; the
   strict suite was RED with 29 passing tests and 3 failures. They proved that
   invalid input wrongly outranked terminal disposal, an invalid second speak
@@ -148,9 +153,10 @@ request kept constructing browser fallback state.
   creates neither timer nor loader work.
 - A controller is considered usable only when `abort` is callable and its
   signal has boolean `aborted` plus callable `addEventListener` and
-  `removeEventListener`. This is structural rather than realm-specific, so a
-  standard injected native controller continues to provide a real
-  `AbortSignal` without imposing a local `instanceof` rule.
+  `removeEventListener`. An injected native controller gives the loader a
+  genuine native `AbortSignal`; a cross-realm/polyfill controller is accepted
+  only for that structural protocol and is not described as a native-instance
+  match. Only structurally incomplete controllers bypass Edge.
 - Missing controller constructors use the
   `abort-controller-unavailable` fallback. Constructor failures and malformed
   abort/signal structures use `abort-controller-invalid`; both bypass Edge
@@ -158,3 +164,9 @@ request kept constructing browser fallback state.
 - The second-review focused strict suite ran twice with 32 passing tests and
   0 failures; the full child Node suite has 60 passing tests and 0 failures.
   Syntax checks and diff check also pass before the follow-up commit.
+
+## Evidence wording correction
+
+This final change is report-only: controller and test code are unchanged, so
+the fresh 32/32 focused and 60/60 full-child evidence above is retained rather
+than rerun for documentation wording alone.
