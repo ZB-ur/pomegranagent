@@ -35,18 +35,18 @@ def test_valid_incoming_request_id_is_echoed(client):
     assert response.headers["x-request-id"] == "acceptance-123"
 
 
-def test_cors_preflight_echoes_valid_request_id(client):
+def test_same_origin_options_echoes_valid_request_id_without_cors_header(client):
     response = client.options(
         "/api/health",
         headers={
-            "Origin": "https://teacher.example",
+            "Origin": "http://testserver",
             "Access-Control-Request-Method": "GET",
             "X-Request-ID": "preflight-123",
         },
     )
 
-    assert response.status_code == 200
     assert response.headers["x-request-id"] == "preflight-123"
+    assert "access-control-allow-origin" not in response.headers
 
 
 def test_invalid_incoming_request_id_is_replaced_with_valid_generated_id(client):

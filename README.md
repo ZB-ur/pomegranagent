@@ -30,7 +30,7 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env      # 填入真实 DEEPSEEK_API_KEY
-./run.sh                  # 或 uvicorn app.backend.main:app --port 8000
+./run.sh                  # 或 uvicorn app.backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 ### Windows
@@ -41,7 +41,7 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
 copy .env.example .env    # 填入真实 DEEPSEEK_API_KEY
-run.bat                   # 双击，或 uvicorn app.backend.main:app --port 8000
+run.bat                   # 双击，或 uvicorn app.backend.main:app --host 127.0.0.1 --port 8000
 ```
 
 启动后浏览器访问：
@@ -50,6 +50,8 @@ run.bat                   # 双击，或 uvicorn app.backend.main:app --port 800
 - **教师端**：http://localhost:8000/teacher.html
 
 > 首次启动自动插入示例数据（5 幼儿 / 3 小鸭 / 排班），便于开箱演示。
+>
+> 服务仅监听本机回环地址 `127.0.0.1`；刻意不支持局域网或公网访问。
 
 ### 重新创建示例数据
 

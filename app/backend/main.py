@@ -7,7 +7,6 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
-from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
@@ -16,6 +15,7 @@ from sqlalchemy.orm import Session
 from . import ai_engine, models, schemas
 from .api_errors import install_api_error_handling
 from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
+from .http_boundary import install_same_origin_boundary
 from .versioning import VERSION_FILE, load_runtime_version
 
 RUNTIME_VERSION = load_runtime_version()
@@ -47,13 +47,8 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="鸭鸭日记本", version="1.0.0", lifespan=lifespan)
 app.state.analysis_worker_status_provider = lambda: "not_started"
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
 install_api_error_handling(app)
+install_same_origin_boundary(app)
 
 
 @app.get("/api/health", response_model=schemas.HealthResponse)
