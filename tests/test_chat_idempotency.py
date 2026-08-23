@@ -11,6 +11,8 @@ from sqlalchemy import func, select, update
 from app.backend import ai_engine, models, schemas
 from app.backend.api_errors import APIError
 from app.backend.database import SessionLocal
+from app.backend.routes import conversations as conversation_routes
+from app.backend.services import chat as chat_service
 from app.backend.services.chat import (
     claim_chat_request,
     commit_chat_success,
@@ -612,3 +614,156 @@ def test_active_conversation_recovery_is_child_scoped_and_orders_transcript(
     assert ended_response.json() == {"conversation": None}
     _error(inactive, status=404, code="CHILD_NOT_FOUND")
     _error(missing, status=404, code="CHILD_NOT_FOUND")
+
+
+def test_interleaved_expired_reclaim_allows_only_one_new_lease_owner(
+    db_session,
+    child_factory,
+):
+    """Catches stale ORM observations overwriting another session's new lease."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    clock = datetime.utcnow()
+    db_session.add(
+        models.ChatRequestRecord(
+            request_id=str(payload.request_id),
+            child_id=child.id,
+            conversation_id=conversation.id,
+            payload_hash=payload_hash(payload),
+            status="processing",
+            attempt_count=1,
+            lease_owner="c" * 64,
+            lease_expires_at=clock - timedelta(seconds=1),
+        )
+    )
+    db_session.commit()
+
+    with SessionLocal() as first_session, SessionLocal() as second_session:
+        first_observation = chat_service._request_record(first_session, str(payload.request_id))
+        second_observation = chat_service._request_record(second_session, str(payload.request_id))
+        assert first_observation is not None
+        assert second_observation is not None
+
+        winner = chat_service._claim_from_existing(
+            first_session,
+            first_observation,
+            expected_hash=payload_hash(payload),
+            now=clock,
+            lease_seconds=45,
+        )
+        with pytest.raises(APIError) as loser:
+            chat_service._claim_from_existing(
+                second_session,
+                second_observation,
+                expected_hash=payload_hash(payload),
+                now=clock,
+                lease_seconds=45,
+            )
+
+    assert loser.value.code == "REQUEST_IN_PROGRESS"
+    assert loser.value.retryable is True
+    db_session.expire_all()
+    current = db_session.get(models.ChatRequestRecord, str(payload.request_id))
+    assert current.status == "processing"
+    assert current.attempt_count == 2
+    assert current.lease_owner == winner.lease_owner
+    assert db_session.scalar(select(func.count(models.Message.id))) == 0
+
+
+@pytest.mark.parametrize("fault_target", ["context", "commit"])
+def test_internal_chat_fault_marks_current_claim_failed_and_allows_retry(
+    client,
+    db_session,
+    child_factory,
+    fake_chat_ai,
+    monkeypatch,
+    fault_target,
+):
+    """Catches internal context/commit faults that leave a request processing until lease expiry."""
+    child = child_factory()
+    body = _chat_payload(child_id=child.id)
+    if fault_target == "context":
+        original = conversation_routes.build_chat_context
+
+        def fail_context(*args, **kwargs):
+            raise ValueError("provider-secret-must-not-leak")
+
+        monkeypatch.setattr(conversation_routes, "build_chat_context", fail_context)
+    else:
+        original = conversation_routes.commit_chat_success
+
+        def fail_commit(*args, **kwargs):
+            raise ValueError("provider-secret-must-not-leak")
+
+        monkeypatch.setattr(conversation_routes, "commit_chat_success", fail_commit)
+
+    failed = client.post("/api/chat", json=body)
+
+    _error(failed, status=500, code="INTERNAL_ERROR", retryable=True)
+    db_session.expire_all()
+    record = db_session.get(models.ChatRequestRecord, body["request_id"])
+    assert record.status == "failed"
+    assert record.last_error_code == "CHAT_INTERNAL_FAILED"
+    assert db_session.scalar(select(func.count(models.Message.id))) == 0
+
+    if fault_target == "context":
+        monkeypatch.setattr(conversation_routes, "build_chat_context", original)
+    else:
+        monkeypatch.setattr(conversation_routes, "commit_chat_success", original)
+    retried = client.post("/api/chat", json=body)
+
+    assert retried.status_code == 200
+    assert retried.json()["replayed"] is False
+    assert fake_chat_ai.call_count == (1 if fault_target == "context" else 2)
+    db_session.expire_all()
+    assert db_session.get(models.ChatRequestRecord, body["request_id"]).status == "succeeded"
+    assert db_session.scalar(select(func.count(models.Message.id))) == 2
+
+
+def test_fixed_max_round_commit_fault_marks_current_claim_failed_and_allows_retry(
+    client,
+    db_session,
+    child_factory,
+    fake_chat_ai,
+    monkeypatch,
+):
+    """Catches a fixed-close commit failure leaving its no-AI request processing."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    _message(db_session, conversation.id, "child", "我喂了小黄")
+    _message(db_session, conversation.id, "diary", "真棒！")
+    _message(db_session, conversation.id, "child", "我还换了水")
+    _message(db_session, conversation.id, "diary", "你真细心！")
+    body = _chat_payload(
+        child_id=child.id,
+        conversation_id=conversation.id,
+        max_rounds=3,
+    )
+    original = conversation_routes.commit_chat_success
+
+    def fail_commit(*args, **kwargs):
+        raise ValueError("provider-secret-must-not-leak")
+
+    monkeypatch.setattr(conversation_routes, "commit_chat_success", fail_commit)
+    failed = client.post("/api/chat", json=body)
+
+    _error(failed, status=500, code="INTERNAL_ERROR", retryable=True)
+    db_session.expire_all()
+    record = db_session.get(models.ChatRequestRecord, body["request_id"])
+    assert record.status == "failed"
+    assert record.last_error_code == "CHAT_INTERNAL_FAILED"
+    assert db_session.scalar(select(func.count(models.Message.id))) == 4
+
+    monkeypatch.setattr(conversation_routes, "commit_chat_success", original)
+    retried = client.post("/api/chat", json=body)
+
+    assert retried.status_code == 200
+    assert retried.json()["ended"] is True
+    assert retried.json()["end_reason"] == "max_rounds"
+    assert fake_chat_ai.call_count == 0
+    db_session.expire_all()
+    assert db_session.get(models.ChatRequestRecord, body["request_id"]).status == "succeeded"
+    assert db_session.scalar(select(func.count(models.Message.id))) == 6

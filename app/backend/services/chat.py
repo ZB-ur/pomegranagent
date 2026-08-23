@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Literal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -127,23 +127,53 @@ def _claim_from_existing(
     if record.status not in {"failed", "processing"}:
         raise _api_error(500, "INTERNAL_ERROR", retryable=True)
 
+    observed_attempt_count = record.attempt_count
     owner = _lease_owner()
-    record.status = "processing"
-    record.attempt_count += 1
-    record.available_at = now
-    record.lease_owner = owner
-    record.lease_expires_at = now + timedelta(seconds=lease_seconds)
-    record.last_error_code = None
-    record.last_error_message = None
-    record.finished_at = None
-    record.updated_at = now
+    reclaimed = db.execute(
+        update(models.ChatRequestRecord)
+        .where(
+            models.ChatRequestRecord.request_id == record.request_id,
+            models.ChatRequestRecord.payload_hash == expected_hash,
+            models.ChatRequestRecord.attempt_count == observed_attempt_count,
+            or_(
+                models.ChatRequestRecord.status == "failed",
+                and_(
+                    models.ChatRequestRecord.status == "processing",
+                    models.ChatRequestRecord.lease_expires_at <= now,
+                ),
+            ),
+        )
+        .values(
+            status="processing",
+            attempt_count=observed_attempt_count + 1,
+            available_at=now,
+            lease_owner=owner,
+            lease_expires_at=now + timedelta(seconds=lease_seconds),
+            last_error_code=None,
+            last_error_message=None,
+            finished_at=None,
+            updated_at=now,
+        )
+    )
+    if reclaimed.rowcount != 1:
+        db.rollback()
+        current = _request_record(db, record.request_id)
+        if current is None:
+            raise _api_error(500, "INTERNAL_ERROR", retryable=True)
+        return _claim_from_existing(
+            db,
+            current,
+            expected_hash=expected_hash,
+            now=now,
+            lease_seconds=lease_seconds,
+        )
     db.commit()
     return ChatClaim(
         request_id=record.request_id,
         conversation_id=record.conversation_id or 0,
         replay=None,
         lease_owner=owner,
-        attempt_count=record.attempt_count,
+        attempt_count=observed_attempt_count + 1,
     )
 
 

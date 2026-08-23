@@ -106,53 +106,67 @@ def chat(
         return claim.replay.model_copy(update={"replayed": True})
 
     try:
-        context = build_chat_context(db, claim, payload)
-    except APIError as exc:
-        record_chat_failure(db, claim=claim, code=exc.code, now=now)
-        raise
+        try:
+            context = build_chat_context(db, claim, payload)
+        except APIError as exc:
+            record_chat_failure(db, claim=claim, code=exc.code, now=now)
+            raise
 
-    # No transaction stays open while the external provider runs.
-    db.rollback()
-    if context.round >= payload.max_rounds:
+        # No transaction stays open while the external provider runs.
+        db.rollback()
+        if context.round >= payload.max_rounds:
+            return commit_chat_success(
+                db,
+                claim=claim,
+                payload=payload,
+                reply=FIXED_MAX_ROUNDS_REPLY,
+                ended=True,
+                end_reason="max_rounds",
+                now=datetime.utcnow(),
+            )
+
+        try:
+            result = ai_engine.chat_reply(
+                child=context.child,
+                recent_summary=context.recent_summary,
+                ducks_info=context.ducks_info,
+                history=list(context.history),
+                round_num=context.round,
+                max_rounds=payload.max_rounds,
+            )
+            reply, ended, end_reason = _validated_ai_reply(result)
+        except (httpx.HTTPError, TimeoutError, ConnectionError) as exc:
+            logger.warning(
+                "chat upstream failure request_id=%s error_type=%s",
+                claim.request_id,
+                type(exc).__name__,
+            )
+            record_chat_failure(
+                db,
+                claim=claim,
+                code="CHAT_UPSTREAM_FAILED",
+                now=datetime.utcnow(),
+            )
+            raise APIError(
+                503,
+                "CHAT_UPSTREAM_FAILED",
+                "对话服务暂时不可用，请稍后重试",
+                retryable=True,
+            )
+
         return commit_chat_success(
             db,
             claim=claim,
             payload=payload,
-            reply=FIXED_MAX_ROUNDS_REPLY,
-            ended=True,
-            end_reason="max_rounds",
+            reply=reply,
+            ended=ended,
+            end_reason=end_reason,
             now=datetime.utcnow(),
         )
-
-    try:
-        result = ai_engine.chat_reply(
-            child=context.child,
-            recent_summary=context.recent_summary,
-            ducks_info=context.ducks_info,
-            history=list(context.history),
-            round_num=context.round,
-            max_rounds=payload.max_rounds,
-        )
-        reply, ended, end_reason = _validated_ai_reply(result)
-    except (httpx.HTTPError, TimeoutError, ConnectionError) as exc:
-        logger.warning(
-            "chat upstream failure request_id=%s error_type=%s",
-            claim.request_id,
-            type(exc).__name__,
-        )
-        record_chat_failure(
-            db,
-            claim=claim,
-            code="CHAT_UPSTREAM_FAILED",
-            now=datetime.utcnow(),
-        )
-        raise APIError(
-            503,
-            "CHAT_UPSTREAM_FAILED",
-            "对话服务暂时不可用，请稍后重试",
-            retryable=True,
-        )
-    except Exception as exc:  # The message could contain provider secrets; log only its type.
+    except APIError:
+        raise
+    except Exception as exc:  # Exception messages can contain provider secrets; log only the type.
+        db.rollback()
         logger.error(
             "chat programming failure request_id=%s error_type=%s",
             claim.request_id,
@@ -170,13 +184,3 @@ def chat(
             "服务暂时不可用，请稍后重试",
             retryable=True,
         )
-
-    return commit_chat_success(
-        db,
-        claim=claim,
-        payload=payload,
-        reply=reply,
-        ended=ended,
-        end_reason=end_reason,
-        now=datetime.utcnow(),
-    )
