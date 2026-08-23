@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 import re
-from threading import Barrier, Thread
+from threading import Barrier, Event, Thread
 
 import pytest
 from sqlalchemy import select
@@ -738,6 +738,173 @@ def test_two_validated_sessions_have_one_revision_winner_and_one_clean_conflict(
     assert final.review is not None
     assert final.review.insight == winners[0].review.insight
     assert final.review.emotion.note == winners[0].review.emotion.note
+
+
+def _save_after_validation_pause(
+    conversation: models.Conversation,
+    payload: schemas.ReviewRequest,
+    *,
+    monkeypatch,
+) -> tuple[Event, Event, Thread, list[object]]:
+    """Start one real service save and pause it after its read validation rolls back."""
+    validated = Event()
+    release = Event()
+    outcomes: list[object] = []
+
+    def pause_after_validation() -> None:
+        validated.set()
+        assert release.wait(timeout=5)
+
+    def save_in_own_session() -> None:
+        with SessionLocal() as session:
+            try:
+                outcomes.append(reviews.save_review(
+                    session,
+                    conversation_id=conversation.id,
+                    payload=payload,
+                    now=NOW,
+                ))
+            except BaseException as error:
+                outcomes.append(error)
+
+    monkeypatch.setattr(reviews, "_after_review_validation_before_cas", pause_after_validation)
+    writer = Thread(target=save_in_own_session)
+    writer.start()
+    assert validated.wait(timeout=5)
+    return validated, release, writer, outcomes
+
+
+def test_post_cas_dimension_disable_revalidates_and_rolls_back_the_winning_revision(
+    db_session,
+    monkeypatch,
+):
+    """Catches a writer persisting a score after its initially enabled dimension is disabled."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    dimension = db_session.scalar(select(models.AssessmentDimension))
+    assert dimension is not None
+    payload = schemas.ReviewRequest.model_validate({
+        **_review_payload(conversation),
+        "scores": [{"dimension_id": dimension.id, "score": 4, "reason": "初始有效"}],
+    })
+    with SessionLocal() as fresh:
+        before = _snapshot_review(fresh, conversation.id)
+    _validated, release, writer, outcomes = _save_after_validation_pause(
+        conversation,
+        payload,
+        monkeypatch=monkeypatch,
+    )
+    with SessionLocal() as mutator:
+        current = mutator.get(models.AssessmentDimension, dimension.id)
+        assert current is not None
+        current.enabled = False
+        mutator.commit()
+    release.set()
+    writer.join(timeout=10)
+
+    assert not writer.is_alive()
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], APIError)
+    assert outcomes[0].code == "REVIEW_VALIDATION_FAILED"
+    assert set(outcomes[0].field_errors) == {"scores.0.dimension_id"}
+    with SessionLocal() as fresh:
+        assert _snapshot_review(fresh, conversation.id) == before
+
+
+@pytest.mark.parametrize("change", ["deactivate", "delete"])
+def test_post_cas_new_duck_change_revalidates_and_rolls_back_the_winning_revision(
+    db_session,
+    monkeypatch,
+    change,
+):
+    """Catches a writer retaining a new duck reference after it turns inactive or disappears."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    duck = models.Duck(name="CAS 小鸭", active=True)
+    db_session.add(duck)
+    db_session.commit()
+    payload = schemas.ReviewRequest.model_validate({
+        **_review_payload(conversation),
+        "feeding_logs": [{
+            "id": None,
+            "category": "观察",
+            "content": "初始有效的新流水",
+            "duck_id": duck.id,
+        }],
+    })
+    with SessionLocal() as fresh:
+        before = _snapshot_review(fresh, conversation.id)
+    _validated, release, writer, outcomes = _save_after_validation_pause(
+        conversation,
+        payload,
+        monkeypatch=monkeypatch,
+    )
+    with SessionLocal() as mutator:
+        current = mutator.get(models.Duck, duck.id)
+        assert current is not None
+        if change == "deactivate":
+            current.active = False
+        else:
+            mutator.delete(current)
+        mutator.commit()
+    release.set()
+    writer.join(timeout=10)
+
+    assert not writer.is_alive()
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], APIError)
+    assert outcomes[0].code == "REVIEW_VALIDATION_FAILED"
+    assert set(outcomes[0].field_errors) == {"feeding_logs.0.duck_id"}
+    with SessionLocal() as fresh:
+        assert _snapshot_review(fresh, conversation.id) == before
+
+
+def test_post_cas_reference_changes_accumulate_indexed_errors_without_a_partial_replacement(
+    db_session,
+    monkeypatch,
+):
+    """Catches post-CAS validation stopping at one changed reference and committing the rest."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    dimension = db_session.scalar(select(models.AssessmentDimension))
+    assert dimension is not None
+    duck = models.Duck(name="CAS 累积错误小鸭", active=True)
+    db_session.add(duck)
+    db_session.commit()
+    payload = schemas.ReviewRequest.model_validate({
+        **_review_payload(conversation),
+        "feeding_logs": [{
+            "id": None,
+            "category": "观察",
+            "content": "两个引用在初始验证时都有效",
+            "duck_id": duck.id,
+        }],
+        "scores": [{"dimension_id": dimension.id, "score": 4, "reason": "初始有效"}],
+    })
+    with SessionLocal() as fresh:
+        before = _snapshot_review(fresh, conversation.id)
+    _validated, release, writer, outcomes = _save_after_validation_pause(
+        conversation,
+        payload,
+        monkeypatch=monkeypatch,
+    )
+    with SessionLocal() as mutator:
+        current_dimension = mutator.get(models.AssessmentDimension, dimension.id)
+        current_duck = mutator.get(models.Duck, duck.id)
+        assert current_dimension is not None and current_duck is not None
+        current_dimension.enabled = False
+        current_duck.active = False
+        mutator.commit()
+    release.set()
+    writer.join(timeout=10)
+
+    assert not writer.is_alive()
+    assert len(outcomes) == 1
+    assert isinstance(outcomes[0], APIError)
+    assert outcomes[0].code == "REVIEW_VALIDATION_FAILED"
+    assert set(outcomes[0].field_errors) == {
+        "feeding_logs.0.duck_id",
+        "scores.0.dimension_id",
+    }
+    with SessionLocal() as fresh:
+        assert _snapshot_review(fresh, conversation.id) == before
 
 
 def _normalized_path(path: str) -> str:

@@ -22,7 +22,14 @@ _REVISION_MESSAGE = "审阅内容已经变化，请先恢复最新内容"
 class _ValidatedReview:
     assessment_id: int
     retained_feeding_ids: frozenset[int]
-    existing_feeding_ids: frozenset[int]
+
+
+@dataclass(frozen=True)
+class _ReviewReferenceRows:
+    existing_feeding_by_id: dict[int, models.FeedingLog]
+    ducks_by_id: dict[int, models.Duck]
+    dimensions_by_id: dict[int, models.AssessmentDimension]
+    enabled_dimension_ids: frozenset[int]
 
 
 def _utc_datetime(value: datetime) -> datetime:
@@ -361,6 +368,97 @@ def _after_review_validation_before_cas() -> None:
     """Deterministic test seam; production deliberately performs no work here."""
 
 
+def _load_review_reference_rows(
+    db: Session,
+    *,
+    conversation_id: int,
+    payload: schemas.ReviewRequest,
+) -> _ReviewReferenceRows:
+    """Load every mutable reference once for either pre- or post-CAS validation."""
+    existing_feeding_by_id = {
+        row.id: row
+        for row in db.scalars(
+            select(models.FeedingLog).where(
+                models.FeedingLog.conversation_id == conversation_id
+            )
+        )
+    }
+    requested_duck_ids = {
+        row.duck_id for row in payload.feeding_logs if row.duck_id is not None
+    }
+    ducks_by_id = {
+        duck.id: duck
+        for duck in db.scalars(
+            select(models.Duck).where(models.Duck.id.in_(requested_duck_ids))
+        )
+    } if requested_duck_ids else {}
+    requested_dimension_ids = {row.dimension_id for row in payload.scores}
+    dimensions_by_id = {
+        dimension.id: dimension
+        for dimension in db.scalars(
+            select(models.AssessmentDimension).where(
+                models.AssessmentDimension.id.in_(requested_dimension_ids)
+            )
+        )
+    } if requested_dimension_ids else {}
+    enabled_dimension_ids = frozenset(db.scalars(
+        select(models.AssessmentDimension.id).where(
+            models.AssessmentDimension.enabled.is_(True)
+        )
+    ))
+    return _ReviewReferenceRows(
+        existing_feeding_by_id=existing_feeding_by_id,
+        ducks_by_id=ducks_by_id,
+        dimensions_by_id=dimensions_by_id,
+        enabled_dimension_ids=enabled_dimension_ids,
+    )
+
+
+def _review_reference_errors(
+    payload: schemas.ReviewRequest,
+    *,
+    references: _ReviewReferenceRows,
+) -> tuple[frozenset[int], dict[str, list[str]]]:
+    """Classify all reference semantics without mutating ORM state."""
+    errors: dict[str, list[str]] = {}
+
+    def add_error(key: str, message: str) -> None:
+        errors.setdefault(key, []).append(message)
+
+    retained_ids: set[int] = set()
+    for index, feeding in enumerate(payload.feeding_logs):
+        existing = None
+        if feeding.id is not None:
+            existing = references.existing_feeding_by_id.get(feeding.id)
+            if feeding.id in retained_ids:
+                add_error(f"feeding_logs.{index}.id", "流水记录重复")
+            elif existing is None:
+                add_error(f"feeding_logs.{index}.id", "流水记录不属于当前会话")
+            else:
+                retained_ids.add(feeding.id)
+        if feeding.duck_id is not None:
+            duck = references.ducks_by_id.get(feeding.duck_id)
+            if duck is None:
+                add_error(f"feeding_logs.{index}.duck_id", "小鸭不存在")
+            elif not duck.active and not (
+                existing is not None and existing.duck_id == feeding.duck_id
+            ):
+                add_error(f"feeding_logs.{index}.duck_id", "小鸭已停用")
+
+    requested_score_ids = {score.dimension_id for score in payload.scores}
+    for index, score in enumerate(payload.scores):
+        dimension = references.dimensions_by_id.get(score.dimension_id)
+        if dimension is None:
+            add_error(f"scores.{index}.dimension_id", "评估维度不存在")
+        elif not dimension.enabled:
+            add_error(f"scores.{index}.dimension_id", "评估维度已停用")
+        if payload.action == "confirm" and not score.reason.strip():
+            add_error(f"scores.{index}.reason", "确认时需要填写评分理由")
+    if payload.action == "confirm" and requested_score_ids != references.enabled_dimension_ids:
+        add_error("scores", "确认时必须覆盖全部启用维度")
+    return frozenset(retained_ids), errors
+
+
 def _validate_review(
     db: Session,
     *,
@@ -392,74 +490,22 @@ def _validate_review(
         if assessment is None:
             db.rollback()
             raise _internal_error()
-        existing_feeding = db.scalars(
-            select(models.FeedingLog).where(
-                models.FeedingLog.conversation_id == conversation_id
-            )
-        ).all()
-        existing_by_id = {row.id: row for row in existing_feeding}
-        requested_duck_ids = {row.duck_id for row in payload.feeding_logs if row.duck_id is not None}
-        ducks_by_id = {
-            duck.id: duck
-            for duck in db.scalars(select(models.Duck).where(models.Duck.id.in_(requested_duck_ids)))
-        } if requested_duck_ids else {}
-        requested_dimension_ids = {row.dimension_id for row in payload.scores}
-        dimensions_by_id = {
-            dimension.id: dimension
-            for dimension in db.scalars(select(models.AssessmentDimension).where(
-                models.AssessmentDimension.id.in_(requested_dimension_ids)
-            ))
-        } if requested_dimension_ids else {}
-        enabled_dimension_ids = set(db.scalars(select(models.AssessmentDimension.id).where(
-            models.AssessmentDimension.enabled.is_(True)
-        )))
-
-        errors: dict[str, list[str]] = {}
-
-        def add_error(key: str, message: str) -> None:
-            errors.setdefault(key, []).append(message)
-
-        retained_ids: set[int] = set()
-        for index, feeding in enumerate(payload.feeding_logs):
-            existing = None
-            if feeding.id is not None:
-                existing = existing_by_id.get(feeding.id)
-                if feeding.id in retained_ids:
-                    add_error(f"feeding_logs.{index}.id", "流水记录重复")
-                elif existing is None:
-                    add_error(f"feeding_logs.{index}.id", "流水记录不属于当前会话")
-                else:
-                    retained_ids.add(feeding.id)
-            if feeding.duck_id is not None:
-                duck = ducks_by_id.get(feeding.duck_id)
-                if duck is None:
-                    add_error(f"feeding_logs.{index}.duck_id", "小鸭不存在")
-                elif not (
-                    existing is not None
-                    and existing.duck_id == feeding.duck_id
-                    and not duck.active
-                ) and not duck.active:
-                    add_error(f"feeding_logs.{index}.duck_id", "小鸭已停用")
-
-        requested_score_ids = {score.dimension_id for score in payload.scores}
-        for index, score in enumerate(payload.scores):
-            dimension = dimensions_by_id.get(score.dimension_id)
-            if dimension is None:
-                add_error(f"scores.{index}.dimension_id", "评估维度不存在")
-            elif not dimension.enabled:
-                add_error(f"scores.{index}.dimension_id", "评估维度已停用")
-            if payload.action == "confirm" and not score.reason.strip():
-                add_error(f"scores.{index}.reason", "确认时需要填写评分理由")
-        if payload.action == "confirm" and requested_score_ids != enabled_dimension_ids:
-            add_error("scores", "确认时必须覆盖全部启用维度")
+        references = _load_review_reference_rows(
+            db,
+            conversation_id=conversation_id,
+            payload=payload,
+        )
+        retained_ids, errors = _review_reference_errors(
+            payload,
+            references=references,
+        )
         if errors:
             db.rollback()
             raise _review_validation_error(errors)
 
     validated = _ValidatedReview(
         assessment_id=assessment.id,
-        retained_feeding_ids=frozenset(retained_ids),
-        existing_feeding_ids=frozenset(existing_by_id),
+        retained_feeding_ids=retained_ids,
     )
     # Do not upgrade this snapshot's read transaction into the writer.
     db.rollback()
@@ -505,11 +551,6 @@ def save_review(
         assessment = db.scalar(select(models.Assessment).where(
             models.Assessment.conversation_id == conversation_id
         ))
-        retained_rows = db.scalars(select(models.FeedingLog).where(
-            models.FeedingLog.conversation_id == conversation_id,
-            models.FeedingLog.id.in_(validated.retained_feeding_ids),
-        )).all() if validated.retained_feeding_ids else []
-        retained_by_id = {row.id: row for row in retained_rows}
         if (
             conversation is None
             or conversation.status != "ended"
@@ -518,9 +559,28 @@ def save_review(
             or job.frozen_last_message_id != conversation.frozen_last_message_id
             or assessment is None
             or assessment.id != validated.assessment_id
-            or set(retained_by_id) != set(validated.retained_feeding_ids)
         ):
             raise _internal_error()
+        with db.no_autoflush:
+            references = _load_review_reference_rows(
+                db,
+                conversation_id=conversation_id,
+                payload=payload,
+            )
+            retained_ids, errors = _review_reference_errors(
+                payload,
+                references=references,
+            )
+        if errors:
+            raise _review_validation_error(errors)
+        if retained_ids != validated.retained_feeding_ids:
+            raise _review_validation_error({
+                "feeding_logs": ["流水记录已经变化，请重新审阅"],
+            })
+        retained_by_id = {
+            feeding_id: references.existing_feeding_by_id[feeding_id]
+            for feeding_id in retained_ids
+        }
 
         for feeding in payload.feeding_logs:
             if feeding.id is None:
@@ -537,8 +597,9 @@ def save_review(
                 row.duck_id = feeding.duck_id
                 row.category = feeding.category
                 row.content = feeding.content
-        for existing_id in validated.existing_feeding_ids - validated.retained_feeding_ids:
-            db.delete(db.get(models.FeedingLog, existing_id))
+        for feeding_id, row in references.existing_feeding_by_id.items():
+            if feeding_id not in retained_ids:
+                db.delete(row)
 
         emotion = db.scalar(select(models.EmotionLog).where(
             models.EmotionLog.conversation_id == conversation_id

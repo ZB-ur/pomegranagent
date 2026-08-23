@@ -78,3 +78,37 @@ the task handoff after the staged diff is committed).
 Preserved unrelated dirty paths: `.workbuddy/memory/2026-08-22.md`,
 `docs/superpowers/specs/2026-08-23-interaction-stabilization-design.md`,
 `.superpowers/brainstorm/`, and `docs/superpowers/plans/`.
+
+## Post-review CAS reference-race correction
+
+Independent review found that the original post-CAS boundary checks did not
+fresh-read mutable requested ducks and dimensions. A separate session could
+therefore disable/delete a prevalidated reference after the read rollback and
+before the winner's CAS, allowing an invalid revision to commit.
+
+- RED: `./.venv/bin/pytest -q tests/test_review_atomicity.py -k "post_cas"`
+  produced **3 failed**. The writer incorrectly returned a successful
+  revision-3 response after a requested dimension was disabled or a new duck
+  was deactivated/deleted.
+- The shared `_load_review_reference_rows` / `_review_reference_errors` path
+  now runs before and after CAS. The post-CAS pass freshly checks requested
+  dimension existence/enabled state, requested duck existence/active state,
+  exact historical inactive-duck retention, and retained feeding ownership.
+  A post-CAS semantic error raises `REVIEW_VALIDATION_FAILED` inside the CAS
+  transaction, so its revision increment and every projected write roll back.
+- Deterministic independent-session tests pause at the validation/CAS seam;
+  they cover dimension disable, new-duck deactivation, new-duck deletion, and
+  simultaneous changes. Each asserts precise indexed field keys, one semantic
+  error response (not an ORM/Pydantic error), and an exact fresh-snapshot match
+  for revision, feeding/emotion/insight/assessment/overall/scores.
+
+```text
+./.venv/bin/pytest -q tests/test_review_atomicity.py                  27 passed
+./.venv/bin/pytest -q tests/test_review_atomicity.py                  27 passed
+./.venv/bin/pytest -q tests/test_review_atomicity.py -k "rollback or revision or post_cas"
+                                                                     6 passed, 21 deselected
+./.venv/bin/pytest -q tests/test_pipeline_models.py tests/test_chat_idempotency.py tests/test_conversation_completion.py tests/test_analysis_worker.py tests/test_roster_idempotency.py tests/test_review_atomicity.py
+                                                                    133 passed
+./.venv/bin/python -m py_compile app/backend/services/reviews.py    passed
+git diff --check                                                       passed
+```
