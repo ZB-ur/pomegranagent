@@ -210,6 +210,15 @@ test('bootstrapVersionGate and ready share one pending successful gate promise',
   const [bootstrapHealth, readyHealth] = await Promise.all([bootstrap, ready]);
   assert.strictEqual(bootstrapHealth, health);
   assert.strictEqual(readyHealth, health);
+  const settledBootstrap = harness.api.bootstrapVersionGate();
+  const settledReady = harness.api.ready();
+  assert.strictEqual(settledBootstrap, bootstrap);
+  assert.strictEqual(settledReady, bootstrap);
+  const [settledBootstrapHealth, settledReadyHealth] = await Promise.all([settledBootstrap, settledReady]);
+  assert.strictEqual(settledBootstrapHealth, health);
+  assert.strictEqual(settledReadyHealth, health);
+  assert.equal(calls.filter(path => path.startsWith('/version.json')).length, 1);
+  assert.equal(calls.filter(path => path === '/api/health').length, 1);
   assert.deepEqual(harness.stateWrites, ['ready']);
   assert.deepEqual(harness.dispatched.map(event => event.type), ['duck:runtime-ready']);
 });

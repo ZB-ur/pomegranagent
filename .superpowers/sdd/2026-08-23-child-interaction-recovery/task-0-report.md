@@ -42,3 +42,9 @@ node --unhandled-rejections=strict --test tests/frontend/shared/api-client.test.
 
 - Message: `fix: reuse the foundation version gate promise`
 - Files: `app/frontend/shared/api.js`, `tests/frontend/shared/api-client.test.mjs`, `.superpowers/sdd/2026-08-23-child-interaction-recovery/task-0-report.md`
+
+## Review remediation — settled success reuse
+
+Independent review identified a missing success-settlement proof. The direct-success regression now calls both `bootstrapVersionGate()` and `ready()` again after the initial gate has resolved. It asserts both calls remain strictly identical to the original Promise, resolve to the original health object, retain exactly one version and one health request, and do not add a ready state write or ready event.
+
+This is a black-box behavior check: clearing or replacing the successful cache would break strict Promise identity and the single-request/single-effect assertions. The existing implementation satisfies the frozen behavior, so the added proof was directly GREEN without changing `app/frontend/shared/api.js`.
