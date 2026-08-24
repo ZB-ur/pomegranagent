@@ -1,21 +1,41 @@
 from pathlib import Path
+import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_both_pages_load_shared_api_before_inline_application_code():
-    for filename in ("index.html", "teacher.html"):
-        html = (ROOT / "app" / "frontend" / filename).read_text(encoding="utf-8")
-        assert '<script src="/shared/api.js"></script>' in html
-        assert html.index('/shared/api.js') < html.rindex("<script>")
-        assert "DuckAPI.ready()" in html
+def test_child_shell_loads_foundation_before_the_single_browser_entry():
+    html = (ROOT / "app/frontend/index.html").read_text(encoding="utf-8")
+    assert '<link rel="stylesheet" href="/child/styles.css">' in html
+    assert '<main id="child-app" aria-busy="true" aria-labelledby="child-shell-title">' in html
+    assert html.index('/shared/api.js') < html.index('/shared/auth.js') < html.index('/child/browser.mjs')
+    assert '<script type="module" src="/child/browser.mjs"></script>' in html
+    assert '/child/app.mjs' not in html
+    assert not re.search(r'<script(?![^>]*\bsrc=)[^>]*>', html)
+
+
+def test_child_shell_has_no_legacy_or_direct_browser_behavior():
+    html = (ROOT / "app/frontend/index.html").read_text(encoding="utf-8")
+    forbidden = ('<style', 'fetch(', 'DuckAPI', 'DuckAuth', 'SpeechRecognition',
+                 'speechSynthesis', 'sessionStorage', '<input', '<textarea',
+                 'onclick=', 'id="stage"', 'id="root"', 'id="ptt"')
+    assert all(token not in html for token in forbidden)
+
+
+def test_teacher_page_keeps_the_foundation_runtime_gate():
+    html = (ROOT / "app/frontend/teacher.html").read_text(encoding="utf-8")
+    assert '<script src="/shared/api.js"></script>' in html
+    assert html.index('/shared/api.js') < html.index('/shared/auth.js') < html.rindex('<script')
+    assert "DuckAPI.ready()" in html
 
 
 def test_auth_adapter_loads_immediately_after_api_client_on_both_pages():
-    for filename in ("index.html", "teacher.html"):
-        html = (ROOT / "app" / "frontend" / filename).read_text(encoding="utf-8")
-        assert html.index('/shared/api.js') < html.index('/shared/auth.js') < html.rindex("<script>")
+    child_html = (ROOT / "app/frontend/index.html").read_text(encoding="utf-8")
+    assert child_html.index('/shared/api.js') < child_html.index('/shared/auth.js') < child_html.index('/child/browser.mjs')
+
+    teacher_html = (ROOT / "app/frontend/teacher.html").read_text(encoding="utf-8")
+    assert teacher_html.index('/shared/api.js') < teacher_html.index('/shared/auth.js') < teacher_html.rindex("<script>")
 
     source = (ROOT / "app" / "frontend" / "shared" / "auth.js").read_text(encoding="utf-8")
     for method, path in {
@@ -28,10 +48,11 @@ def test_auth_adapter_loads_immediately_after_api_client_on_both_pages():
         assert path in source
 
 
-def test_child_page_uses_the_empty_roster_message_without_calling_protected_children_api():
-    html = (ROOT / "app" / "frontend" / "index.html").read_text(encoding="utf-8")
-    assert "今天还未排班，请老师帮忙" in html
-    assert "DuckAPI.request('/api/children')" not in html
+def test_child_empty_roster_copy_is_owned_by_the_semantic_view():
+    html = (ROOT / "app/frontend/index.html").read_text(encoding="utf-8")
+    view = (ROOT / "app/frontend/child/view.mjs").read_text(encoding="utf-8")
+    assert "今天还未排班，请老师帮忙" in view
+    assert "/api/children" not in html
 
 
 def test_pages_do_not_call_fetch_directly():
