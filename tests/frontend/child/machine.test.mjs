@@ -153,15 +153,22 @@ test('every explicitly legal transition accepts its documented source', () => {
     [createInitialSnapshot({ value: 'loading_roster' }), { type: 'ROSTER_LOADED', children: [child()] }, 'selecting_child'],
     [createInitialSnapshot({ value: 'loading_roster' }), { type: 'ROSTER_FAILED', error: error() }, 'recovery'],
     [createInitialSnapshot({ value: 'loading_roster' }), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
+    [createInitialSnapshot({ value: 'selecting_child', roster: [child()] }), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [createInitialSnapshot({ value: 'selecting_child', roster: [child()] }), { type: 'CHILD_SELECTED', childId: 7 }, 'opening'],
+    [createInitialSnapshot({ value: 'opening', child: child() }), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [createInitialSnapshot({ value: 'opening' }), { type: 'TTS_SETTLED' }, 'ready'],
+    [createInitialSnapshot({ value: 'ready', child: child() }), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [createInitialSnapshot({ value: 'ready' }), { type: 'RECORD_TOGGLE' }, 'listening'],
+    [createInitialSnapshot({ value: 'listening', child: child() }), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [createInitialSnapshot({ value: 'listening' }), { type: 'RECORD_TOGGLE' }, 'listening'],
     [createInitialSnapshot({ value: 'listening' }), { type: 'SPEECH_EMPTY' }, 'ready'],
     [createInitialSnapshot({ value: 'listening' }), { type: 'SPEECH_FINAL', draft: draft() }, 'submitting'],
+    [submittingSnapshot(), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [submittingSnapshot(), { type: 'SUBMIT_SUCCEEDED', result: chatResult({ ended: false, end_reason: null }) }, 'speaking'],
     [submittingSnapshot(), { type: 'SUBMIT_FAILED', error: error() }, 'submission_failed'],
+    [createInitialSnapshot({ value: 'submission_failed', child: child(), draft: draft(), error: error() }), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [createInitialSnapshot({ value: 'submission_failed', child: child(), draft: draft(), error: error() }), { type: 'RETRY_SUBMIT' }, 'submitting'],
+    [createInitialSnapshot({ value: 'speaking', child: child() }), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [createInitialSnapshot({ value: 'speaking', shouldComplete: false }), { type: 'TTS_SETTLED' }, 'ready'],
     [createInitialSnapshot({
       value: 'speaking', shouldComplete: true, conversationId: 9, lastMessageId: 42,
@@ -170,6 +177,8 @@ test('every explicitly legal transition accepts its documented source', () => {
     [savingSnapshot(), { type: 'COMPLETE_SUCCEEDED', result: completeResult() }, 'completed'],
     [savingSnapshot(), { type: 'COMPLETE_FAILED', error: error() }, 'recovery'],
     [savingSnapshot(), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
+    [completedSnapshot(), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
+    [createInitialSnapshot({ value: 'recovery', child: child(), error: error() }), { type: 'BEGIN_RECOVERY', error: error({ code: 'SPEECH_FAILED' }) }, 'recovery'],
     [createInitialSnapshot({ value: 'recovery' }), { type: 'RECOVERY_RESOLVED', snapshot: recoverySnapshot }, 'ready'],
     [createInitialSnapshot({ value: 'recovery' }), { type: 'TEACHER_UNLOCKED' }, 'recovery'],
     [createInitialSnapshot({ value: 'recovery' }), { type: 'RESET' }, 'welcome'],
@@ -180,6 +189,21 @@ test('every explicitly legal transition accepts its documented source', () => {
     const next = transition(snapshot, event);
     assert.equal(next.value, expected, `${snapshot.value}:${event.type}`);
     assert.equal(assertSnapshot(next), next, `${snapshot.value}:${event.type}`);
+    assert.equal(Object.isFrozen(next), true, `${snapshot.value}:${event.type}`);
+  }
+});
+
+test('BEGIN_RECOVERY rejects every source outside the post-START recovery matrix', () => {
+  const legalSources = new Set([
+    'loading_roster', 'selecting_child', 'opening', 'ready', 'listening', 'submitting',
+    'speaking', 'submission_failed', 'saving_conversation', 'completed', 'recovery',
+  ]);
+
+  for (const state of STATES) {
+    if (legalSources.has(state)) continue;
+    const snapshot = createInitialSnapshot({ value: state });
+    assert.throws(() => transition(snapshot, { type: 'BEGIN_RECOVERY', error: error() }),
+      new RegExp(`Illegal transition ${state}:BEGIN_RECOVERY`));
   }
 });
 
@@ -189,7 +213,7 @@ test('rejects representative illegal state and event pairs', () => {
     [createInitialSnapshot({ value: 'ready' }), { type: 'SPEECH_FINAL', draft: draft() }],
     [createInitialSnapshot({ value: 'submission_failed', child: child(), draft: draft(), error: error({ retryable: false }) }), { type: 'RETRY_SUBMIT' }],
     [completedSnapshot(), { type: 'TEACHER_UNLOCKED' }],
-    [createInitialSnapshot({ value: 'recovery' }), { type: 'BEGIN_RECOVERY' }],
+    [createInitialSnapshot(), { type: 'BEGIN_RECOVERY' }],
   ]) {
     assert.throws(() => transition(snapshot, event), /Illegal transition/);
   }

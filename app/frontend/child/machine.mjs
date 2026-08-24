@@ -84,6 +84,9 @@ export function transition(snapshot, event) {
     case 'loading_roster:BEGIN_RECOVERY':
       return enterRecovery(snapshot, event.error);
 
+    case 'selecting_child:BEGIN_RECOVERY':
+      return enterRecovery(snapshot, event.error);
+
     case 'selecting_child:CHILD_SELECTED': {
       const childId = positiveInteger(event.childId, 'childId');
       const selected = snapshot.roster.find(item => item.id === childId);
@@ -93,11 +96,20 @@ export function transition(snapshot, event) {
       return replace(snapshot, { value: 'opening', child: selected, error: null });
     }
 
+    case 'opening:BEGIN_RECOVERY':
+      return enterRecovery(snapshot, event.error);
+
     case 'opening:TTS_SETTLED':
       return replace(snapshot, { value: 'ready' });
 
+    case 'ready:BEGIN_RECOVERY':
+      return enterRecovery(snapshot, event.error);
+
     case 'ready:RECORD_TOGGLE':
       return replace(snapshot, { value: 'listening', stopRequested: false, error: null });
+
+    case 'listening:BEGIN_RECOVERY':
+      return enterRecovery(snapshot, event.error);
 
     case 'listening:RECORD_TOGGLE':
       return replace(snapshot, { stopRequested: true });
@@ -112,17 +124,26 @@ export function transition(snapshot, event) {
         error: null,
       });
 
+    case 'submitting:BEGIN_RECOVERY':
+      return enterRecovery(snapshot, event.error);
+
     case 'submitting:SUBMIT_SUCCEEDED':
       return acceptSubmission(snapshot, event.result);
 
     case 'submitting:SUBMIT_FAILED':
       return failSubmission(snapshot, event.error);
 
+    case 'submission_failed:BEGIN_RECOVERY':
+      return enterRecovery(snapshot, event.error);
+
     case 'submission_failed:RETRY_SUBMIT':
       if (snapshot.error?.retryable !== true || snapshot.draft === null) {
         throw illegalTransition(snapshot, event);
       }
       return replace(snapshot, { value: 'submitting', error: null });
+
+    case 'speaking:BEGIN_RECOVERY':
+      return enterRecovery(snapshot, event.error);
 
     case 'speaking:TTS_SETTLED':
       return replace(snapshot, {
@@ -137,6 +158,12 @@ export function transition(snapshot, event) {
       return enterRecovery(snapshot, event.error);
 
     case 'saving_conversation:BEGIN_RECOVERY':
+      return enterRecovery(snapshot, event.error);
+
+    case 'completed:BEGIN_RECOVERY':
+      return enterRecovery(snapshot, event.error);
+
+    case 'recovery:BEGIN_RECOVERY':
       return enterRecovery(snapshot, event.error);
 
     case 'recovery:RECOVERY_RESOLVED':

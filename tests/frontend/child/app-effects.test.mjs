@@ -1,0 +1,2564 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import * as rawMachine from '../../../app/frontend/child/machine.mjs';
+import {
+  STATES,
+  assertSnapshot,
+  controlsFor,
+  createInitialSnapshot,
+  transition,
+} from '../../../app/frontend/child/machine.mjs';
+import { createDraft, mergeRecovery } from '../../../app/frontend/child/session-store.mjs';
+import { bootstrapBrowserChildApp, createChildApp } from '../../../app/frontend/child/app.mjs';
+
+const MACHINE_FACADE = Object.freeze({
+  STATES,
+  assertSnapshot,
+  controlsFor,
+  createInitialSnapshot,
+  transition,
+});
+
+test('module exposes exactly the approved child orchestration factories', async () => {
+  const module = await import('../../../app/frontend/child/app.mjs');
+  assert.deepEqual(Object.keys(module).sort(), [
+    'bootstrapBrowserChildApp',
+    'createChildApp',
+  ]);
+});
+
+function createFixture() {
+  const calls = {
+    api: [],
+    speechFactory: 0,
+    speechStart: 0,
+    speechStop: 0,
+    speechDispose: 0,
+    store: [],
+    tts: [],
+    view: [],
+  };
+  const controllers = [];
+  let recognitionReads = 0;
+  let speechOnEvent = null;
+  const speech = {
+    start() { calls.speechStart += 1; },
+    stop() { calls.speechStop += 1; },
+    dispose() { calls.speechDispose += 1; },
+    isListening() { return false; },
+  };
+  Object.defineProperty(speech, 'recognition', {
+    enumerable: true,
+    get() {
+      recognitionReads += 1;
+      return null;
+    },
+  });
+  const api = {
+    ready() { calls.api.push('ready'); return Promise.resolve(); },
+    getTodayRoster() { calls.api.push('roster'); return Promise.resolve([]); },
+    getActiveConversation(childId) { calls.api.push(['active', childId]); return Promise.resolve({ conversation: null }); },
+    chat(input, signal) { calls.api.push(['chat', input, signal]); return Promise.resolve(null); },
+    complete(conversationId, lastMessageId, signal) {
+      calls.api.push(['complete', conversationId, lastMessageId, signal]);
+      return Promise.resolve(null);
+    },
+    teacherStatus() { calls.api.push('teacherStatus'); return Promise.resolve(null); },
+    teacherSetup() { calls.api.push('teacherSetup'); return Promise.resolve(null); },
+    teacherUnlock() { calls.api.push('teacherUnlock'); return Promise.resolve(null); },
+    teacherLock() { calls.api.push('teacherLock'); return Promise.resolve(null); },
+    tts() { calls.api.push('tts'); return Promise.resolve(null); },
+  };
+  const store = {
+    load() { calls.store.push('load'); return null; },
+    save(snapshot) { calls.store.push(['save', snapshot]); },
+    clear() { calls.store.push('clear'); },
+  };
+  const tts = {
+    speak(text) { calls.tts.push(['speak', text]); return Promise.resolve({ mode: 'text', reason: 'test' }); },
+    cancel(reason) { calls.tts.push(['cancel', reason]); },
+    dispose() { calls.tts.push(['dispose']); },
+  };
+  const view = {
+    render(snapshot) { calls.view.push(['render', snapshot]); },
+    announce(text) { calls.view.push(['announce', text]); },
+    focus(selector) { calls.view.push(['focus', selector]); return false; },
+    destroy() { calls.view.push(['destroy']); },
+  };
+  class FakeAbortController {
+    constructor() {
+      this.signal = {};
+      this.abortCalls = 0;
+      controllers.push(this);
+    }
+
+    abort() { this.abortCalls += 1; }
+  }
+  const deps = {
+    api,
+    machine: MACHINE_FACADE,
+    store,
+    createDraft,
+    mergeRecovery,
+    createSpeech({ onEvent }) {
+      calls.speechFactory += 1;
+      assert.equal(typeof onEvent, 'function');
+      speechOnEvent = onEvent;
+      return speech;
+    },
+    tts,
+    view,
+    keyboard: {
+      isInteractiveTarget() { return false; },
+      isDialogActive() { return false; },
+    },
+    uuid() { return '00000000-0000-4000-8000-000000000007'; },
+    now() { return '2026-08-23T00:00:00.000Z'; },
+    AbortController: FakeAbortController,
+  };
+  return {
+    calls,
+    controllers,
+    deps,
+    get recognitionReads() { return recognitionReads; },
+    emitSpeech(event) { speechOnEvent?.(event); },
+    speech,
+  };
+}
+
+function createBootstrapFixture() {
+  const child = createFixture();
+  const calls = {
+    order: [],
+    bootstrapAPI: 0,
+    maintenance: [],
+    storeFactory: 0,
+    ttsFactory: 0,
+    viewFactory: 0,
+  };
+  const deps = {
+    bootstrapAPI() {
+      calls.bootstrapAPI += 1;
+      calls.order.push('api');
+      return Promise.resolve(child.deps.api);
+    },
+    onMaintenanceFailure(code) {
+      calls.maintenance.push(code);
+    },
+    createStore() {
+      calls.storeFactory += 1;
+      calls.order.push('store');
+      return child.deps.store;
+    },
+    createTTS(api) {
+      calls.ttsFactory += 1;
+      calls.order.push('tts');
+      assert.notEqual(api, child.deps.api);
+      assert.deepEqual(Reflect.ownKeys(api).sort(), [
+        'chat', 'complete', 'getActiveConversation', 'getTodayRoster', 'ready', 'teacherLock',
+        'teacherSetup', 'teacherStatus', 'teacherUnlock', 'tts',
+      ]);
+      return child.deps.tts;
+    },
+    createView(root, actions, dom) {
+      calls.viewFactory += 1;
+      calls.order.push('view');
+      assert.equal(root, deps.root);
+      assert.equal(dom, deps.dom);
+      assert.equal(actions.onOpenTeacherHelp, null);
+      return child.deps.view;
+    },
+    root: {},
+    dom: {},
+    machine: MACHINE_FACADE,
+    createDraft,
+    mergeRecovery,
+    createSpeech: child.deps.createSpeech,
+    keyboard: child.deps.keyboard,
+    uuid: child.deps.uuid,
+    now: child.deps.now,
+    AbortController: child.deps.AbortController,
+  };
+  return { child, calls, deps };
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function destroyBeforeControllerWork(fixture, targetIndex, getApp) {
+  let created = 0;
+  fixture.deps.AbortController = class DestroyingAbortController {
+    constructor() {
+      this.signal = {};
+      this.abortCalls = 0;
+      fixture.controllers.push(this);
+      created += 1;
+      if (created === targetIndex) {
+        Promise.resolve().then(() => getApp()?.destroy());
+      }
+    }
+
+    abort() { this.abortCalls += 1; }
+  };
+  return () => created;
+}
+
+async function flushMicrotasks() {
+  for (let count = 0; count < 8; count += 1) await Promise.resolve();
+}
+
+function childRecord(id = 7, name = '小雨') {
+  return { id, name, nickname: null, avatar: null };
+}
+
+function chatResult(overrides = {}) {
+  return {
+    request_id: '00000000-0000-4000-8000-000000000007',
+    conversation_id: 9,
+    child_message_id: 41,
+    diary_message_id: 42,
+    reply: '真棒！',
+    round: 1,
+    ended: false,
+    end_reason: null,
+    replayed: false,
+    ...overrides,
+  };
+}
+
+function completeResult(overrides = {}) {
+  return {
+    conversation_id: 9,
+    conversation_saved: true,
+    status: 'completed',
+    completed_at: '2026-08-23T00:01:00.000Z',
+    message_count: 2,
+    last_message_id: 42,
+    analysis_job_id: 3,
+    analysis_status: 'pending',
+    replayed: false,
+    ...overrides,
+  };
+}
+
+function pendingCompletionRecord() {
+  return {
+    version: 1,
+    child: childRecord(),
+    conversation_id: 9,
+    revision: null,
+    last_message_id: 42,
+    state: 'saving_conversation',
+    messages: [
+      { id: 41, role: 'child', text: '我给小鸭换了水' },
+      { id: 42, role: 'diary', text: '真棒！' },
+    ],
+    draft: null,
+    should_complete: true,
+    failure: null,
+    updated_at: '2026-08-23T00:00:01.000Z',
+  };
+}
+
+function activeConversation() {
+  return {
+    id: 9,
+    child_id: 7,
+    status: 'active',
+    revision: 1,
+    round: 1,
+    last_message_id: 42,
+    messages: [
+      { id: 41, role: 'child', text: '我给小鸭换了水' },
+      { id: 42, role: 'diary', text: '真棒！' },
+    ],
+  };
+}
+
+function localDraftRecord() {
+  return {
+    version: 1,
+    child: childRecord(),
+    conversation_id: null,
+    revision: null,
+    last_message_id: null,
+    state: 'submission_failed',
+    messages: [],
+    draft: {
+      text: '我给小鸭换了水',
+      request_id: '00000000-0000-4000-8000-000000000007',
+      created_at: '2026-08-23T00:00:00.000Z',
+    },
+    should_complete: false,
+    failure: { code: 'LOCAL_DRAFT_NOT_CONFIRMED', retryable: true },
+    updated_at: '2026-08-23T00:00:01.000Z',
+  };
+}
+
+function localReadyRecord() {
+  return {
+    version: 1,
+    child: childRecord(),
+    conversation_id: null,
+    revision: null,
+    last_message_id: null,
+    state: 'ready',
+    messages: [],
+    draft: null,
+    should_complete: false,
+    failure: null,
+    updated_at: '2026-08-23T00:00:01.000Z',
+  };
+}
+
+test('createChildApp accepts only trap-safe exact plain dependency facades before effects', () => {
+  const valid = createFixture();
+  const app = createChildApp(valid.deps);
+  assert.equal(typeof app.getSnapshot, 'function');
+
+  const cases = [
+    ['missing required root key', (() => {
+      const fixture = createFixture();
+      delete fixture.deps.now;
+      return fixture;
+    })()],
+    ['extra nested API key', (() => {
+      const fixture = createFixture();
+      fixture.deps.api.extra = () => {};
+      return fixture;
+    })()],
+    ['symbol root key', (() => {
+      const fixture = createFixture();
+      fixture.deps[Symbol('extra')] = true;
+      return fixture;
+    })()],
+    ['accessor root key', (() => {
+      const fixture = createFixture();
+      const value = fixture.deps.api;
+      Object.defineProperty(fixture.deps, 'api', { enumerable: true, get() { return value; } });
+      return fixture;
+    })()],
+    ['ownKeys proxy fault', (() => {
+      const fixture = createFixture();
+      const original = fixture.deps;
+      fixture.deps = new Proxy(original, { ownKeys() { throw new Error('ownKeys trap'); } });
+      return fixture;
+    })()],
+    ['raw ESM machine namespace', (() => {
+      const fixture = createFixture();
+      fixture.deps.machine = rawMachine;
+      return fixture;
+    })()],
+  ];
+
+  for (const [name, fixture] of cases) {
+    const raw = new Error(`${name} raw dependency failure`);
+    let thrown = null;
+    try {
+      createChildApp(fixture.deps);
+    } catch (error) {
+      thrown = error;
+    }
+    assert.equal(thrown instanceof TypeError, true, name);
+    assert.notEqual(thrown, raw, name);
+    assert.equal(Object.hasOwn(thrown, 'cause'), false, name);
+    assert.deepEqual(fixture.calls.api, [], name);
+    assert.deepEqual(fixture.calls.store, [], name);
+    assert.deepEqual(fixture.calls.tts, [], name);
+    assert.deepEqual(fixture.calls.view, [], name);
+    assert.equal(fixture.calls.speechFactory, 0, name);
+  }
+});
+
+test('createChildApp constructs one speech controller then renders only fresh welcome', () => {
+  const fixture = createFixture();
+  const app = createChildApp(fixture.deps);
+
+  assert.equal(fixture.calls.speechFactory, 1);
+  assert.equal(fixture.recognitionReads, 0);
+  assert.deepEqual(fixture.calls.api, []);
+  assert.deepEqual(fixture.calls.store, []);
+  assert.deepEqual(fixture.calls.tts, []);
+  assert.equal(fixture.calls.view.length, 1);
+  assert.equal(fixture.calls.view[0][0], 'render');
+  assert.equal(fixture.calls.view[0][1].value, 'welcome');
+  assert.equal(Object.isFrozen(app.getSnapshot()), true);
+});
+
+test('a synchronous speech-factory callback before lifecycle setup is queued without a TDZ construction failure', () => {
+  const fixture = createFixture();
+  fixture.deps.createSpeech = ({ onEvent }) => {
+    fixture.calls.speechFactory += 1;
+    onEvent({ type: 'final', text: 'factory-time speech must be inert' });
+    return fixture.speech;
+  };
+
+  const app = createChildApp(fixture.deps);
+  assert.equal(app.getSnapshot().value, 'welcome');
+  assert.equal(fixture.calls.speechFactory, 1);
+  assert.deepEqual(fixture.calls.api, []);
+  assert.deepEqual(fixture.calls.store, []);
+  assert.equal(fixture.calls.view.filter(([kind]) => kind === 'render').length, 1);
+});
+
+test('malformed speech and initial welcome rendering fail without transferring caller-owned view or TTS', () => {
+  const malformed = createFixture();
+  malformed.deps.createSpeech = () => ({
+    start() {}, stop() {}, dispose() {}, isListening() {},
+  });
+  assert.throws(() => createChildApp(malformed.deps), error => {
+    assert.equal(error instanceof TypeError, true);
+    assert.equal(Object.hasOwn(error, 'cause'), false);
+    return true;
+  });
+  assert.equal(malformed.calls.speechFactory, 0);
+  assert.deepEqual(malformed.calls.view, []);
+  assert.deepEqual(malformed.calls.tts, []);
+  assert.deepEqual(malformed.calls.store, []);
+
+  const renderFailure = createFixture();
+  renderFailure.deps.view.render = () => { throw new Error('render raw'); };
+  assert.throws(() => createChildApp(renderFailure.deps), error => {
+    assert.equal(error instanceof TypeError, true);
+    assert.equal(Object.hasOwn(error, 'cause'), false);
+    return true;
+  });
+  assert.equal(renderFailure.calls.speechFactory, 1);
+  assert.equal(renderFailure.calls.speechDispose, 1);
+  assert.deepEqual(renderFailure.calls.api, []);
+  assert.deepEqual(renderFailure.calls.store, []);
+  assert.deepEqual(renderFailure.calls.tts, []);
+});
+
+test('child app exposes the frozen lifecycle surface and destruction is an idempotent no-op boundary', async () => {
+  const fixture = createFixture();
+  const app = createChildApp(fixture.deps);
+  const beforeDestroy = app.getSnapshot();
+
+  assert.deepEqual(Reflect.ownKeys(app).sort(), [
+    'destroy', 'getSnapshot', 'handleGlobalKeydown', 'initialize', 'recordToggle', 'reset',
+    'retry', 'selectChild', 'start',
+  ]);
+  assert.equal(Object.isFrozen(app), true);
+  assert.equal(Object.isFrozen(beforeDestroy), true);
+  assert.equal(await app.initialize(), undefined);
+  assert.equal(await app.selectChild(7), undefined);
+  assert.equal(app.recordToggle(), undefined);
+  assert.equal(await app.retry(), undefined);
+  assert.equal(app.reset(), undefined);
+  assert.equal(app.handleGlobalKeydown({ code: 'Space' }), false);
+  assert.deepEqual(fixture.calls.api, ['ready']);
+  assert.deepEqual(fixture.calls.store, ['load']);
+
+  assert.equal(app.destroy(), undefined);
+  assert.equal(app.destroy(), undefined);
+  assert.equal(fixture.calls.speechDispose, 1);
+  assert.deepEqual(fixture.calls.tts, [['dispose']]);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind === 'destroy'), [['destroy']]);
+
+  assert.equal(await app.initialize(), undefined);
+  assert.equal(await app.start(), undefined);
+  assert.equal(await app.selectChild(7), undefined);
+  assert.equal(app.recordToggle(), undefined);
+  assert.equal(await app.retry(), undefined);
+  assert.equal(app.reset(), undefined);
+  assert.equal(app.handleGlobalKeydown({ code: 'Space' }), false);
+  assert.equal(app.getSnapshot(), beforeDestroy);
+  assert.equal(fixture.calls.speechStart, 0);
+  assert.equal(fixture.calls.speechStop, 0);
+  assert.deepEqual(fixture.calls.api, ['ready']);
+  assert.deepEqual(fixture.calls.store, ['load']);
+});
+
+test('bootstrap gate rejection reports fixed maintenance copy before any child resource factory', async () => {
+  const fixture = createBootstrapFixture();
+  fixture.deps.bootstrapAPI = () => {
+    fixture.calls.bootstrapAPI += 1;
+    return Promise.reject({ code: 'VERSION_MISMATCH', message: 'do not leak' });
+  };
+
+  assert.equal(await bootstrapBrowserChildApp(fixture.deps), null);
+  assert.equal(fixture.calls.bootstrapAPI, 1);
+  assert.deepEqual(fixture.calls.maintenance, ['VERSION_MISMATCH']);
+  assert.equal(fixture.calls.storeFactory, 0);
+  assert.equal(fixture.calls.ttsFactory, 0);
+  assert.equal(fixture.calls.viewFactory, 0);
+  assert.equal(fixture.child.calls.speechFactory, 0);
+  assert.deepEqual(fixture.child.calls.store, []);
+  assert.deepEqual(fixture.child.calls.api, []);
+});
+
+test('bootstrap composes a preflight API facade in gate-first factory order', async () => {
+  const fixture = createBootstrapFixture();
+  fixture.child.deps.api.ready = () => {
+    fixture.calls.order.push('source-ready');
+    fixture.child.calls.api.push('ready');
+    return Promise.resolve();
+  };
+
+  const app = await bootstrapBrowserChildApp(fixture.deps);
+
+  assert.equal(typeof app.start, 'function');
+  assert.deepEqual(fixture.calls.order, ['api', 'source-ready', 'store', 'tts', 'view']);
+  assert.deepEqual(fixture.child.calls.api, ['ready']);
+  assert.equal(fixture.calls.storeFactory, 1);
+  assert.equal(fixture.calls.ttsFactory, 1);
+  assert.equal(fixture.calls.viewFactory, 1);
+  assert.equal(fixture.child.calls.speechFactory, 1);
+  assert.equal(fixture.child.calls.view.filter(([kind]) => kind === 'render').length, 1);
+  assert.equal(app.getSnapshot().value, 'welcome');
+});
+
+test('a post-gate speech construction failure cleans created view and TTS exactly once before rejecting fresh', async () => {
+  const fixture = createBootstrapFixture();
+  fixture.deps.createSpeech = () => { throw new Error('private speech failure'); };
+
+  await assert.rejects(() => bootstrapBrowserChildApp(fixture.deps), error => {
+    assert.equal(error instanceof TypeError, true);
+    assert.equal(Object.hasOwn(error, 'cause'), false);
+    return true;
+  });
+  assert.deepEqual(fixture.calls.order, ['api', 'store', 'tts', 'view']);
+  assert.deepEqual(fixture.child.calls.tts, [['dispose']]);
+  assert.deepEqual(fixture.child.calls.view.filter(([kind]) => kind === 'destroy'), [['destroy']]);
+  assert.deepEqual(fixture.child.calls.store, []);
+});
+
+test('a reentrant bootstrap call from bootstrapAPI cannot create a second factory chain', async () => {
+  const fixture = createBootstrapFixture();
+  let nested = null;
+  fixture.deps.bootstrapAPI = () => {
+    fixture.calls.bootstrapAPI += 1;
+    if (nested === null) nested = bootstrapBrowserChildApp(fixture.deps);
+    return Promise.resolve(fixture.child.deps.api);
+  };
+
+  const app = await bootstrapBrowserChildApp(fixture.deps);
+  assert.equal(typeof app.start, 'function');
+  assert.equal(await nested, null);
+  assert.equal(fixture.calls.bootstrapAPI, 1);
+  assert.equal(fixture.calls.storeFactory, 1);
+  assert.equal(fixture.calls.ttsFactory, 1);
+  assert.equal(fixture.calls.viewFactory, 1);
+});
+
+test('initialize caches readiness, awaits it before one local load, and leaves an absent record at welcome', async () => {
+  const fixture = createFixture();
+  const ready = deferred();
+  fixture.deps.api.ready = () => {
+    fixture.calls.api.push('ready');
+    return ready.promise;
+  };
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return null;
+  };
+  const app = createChildApp(fixture.deps);
+
+  const first = app.initialize();
+  const second = app.initialize();
+  assert.equal(first, second);
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.api, ['ready']);
+  assert.deepEqual(fixture.calls.store, []);
+
+  ready.resolve();
+  assert.equal(await first, undefined);
+  assert.deepEqual(fixture.calls.store, ['load']);
+  assert.equal(app.getSnapshot().value, 'welcome');
+  assert.deepEqual(fixture.calls.api, ['ready']);
+  assert.deepEqual(fixture.calls.tts, []);
+  assert.equal(fixture.calls.speechStart, 0);
+});
+
+test('a failed readiness gate leaves welcome rendered once and makes later start inert', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.ready = () => {
+    fixture.calls.api.push('ready');
+    return Promise.reject({ code: 'HEALTH_UNAVAILABLE', message: 'private' });
+  };
+  const app = createChildApp(fixture.deps);
+
+  assert.equal(await app.initialize(), undefined);
+  assert.equal(await app.start(), undefined);
+  assert.deepEqual(fixture.calls.api, ['ready']);
+  assert.deepEqual(fixture.calls.store, []);
+  assert.equal(fixture.calls.view.filter(([kind]) => kind === 'render').length, 1);
+  assert.equal(app.getSnapshot().value, 'welcome');
+});
+
+test('a valid local child record bridges through nonpersisting recovery before its child-scoped active read', async () => {
+  const fixture = createFixture();
+  const local = localDraftRecord();
+  const active = deferred();
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return local;
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return active.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  const initialized = app.initialize();
+
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.api, ['ready', ['active', 7]]);
+  assert.equal(fixture.calls.api.includes('roster'), false);
+  assert.deepEqual(fixture.calls.store, ['load']);
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.equal(local.draft.request_id, '00000000-0000-4000-8000-000000000007');
+
+  active.resolve({ conversation: null });
+  assert.equal(await initialized, undefined);
+  assert.equal(app.getSnapshot().value, 'submission_failed');
+  assert.equal(app.getSnapshot().draft.request_id, local.draft.request_id);
+  assert.equal(fixture.calls.store.length, 2);
+  assert.equal(fixture.calls.store[1][0], 'save');
+  assert.equal(fixture.calls.store[1][1].value, 'submission_failed');
+});
+
+test('start leaves no durable loading record and persists direct empty-roster selection only after the roster read', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([]);
+  };
+  const app = createChildApp(fixture.deps);
+
+  await app.initialize();
+  assert.equal(app.getSnapshot().value, 'welcome');
+  assert.equal(await app.start(), undefined);
+  assert.equal(app.getSnapshot().value, 'selecting_child');
+  assert.deepEqual(fixture.calls.api, ['ready', 'roster']);
+  assert.deepEqual(fixture.calls.store.map(item => Array.isArray(item) ? [item[0], item[1].value] : item), [
+    'load',
+    ['save', 'selecting_child'],
+  ]);
+});
+
+test('a one-child no-local roster waits for its active read before persisted roster selection', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([childRecord()]);
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: null });
+  };
+  const app = createChildApp(fixture.deps);
+
+  await app.initialize();
+  assert.equal(await app.start(), undefined);
+  assert.equal(app.getSnapshot().value, 'selecting_child');
+  assert.deepEqual(fixture.calls.api, ['ready', 'roster', ['active', 7]]);
+  assert.equal(fixture.calls.store.filter(item => Array.isArray(item) && item[0] === 'save').length, 1);
+});
+
+test('selectChild persists selection before one exact greeting TTS and settles current opening to ready', async () => {
+  const fixture = createFixture();
+  const spoken = deferred();
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([childRecord()]);
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: null });
+  };
+  fixture.deps.tts.speak = text => {
+    fixture.calls.tts.push(['speak', text]);
+    return spoken.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+
+  const selecting = app.selectChild(7);
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'opening');
+  assert.equal(fixture.calls.store.at(-1)[0], 'save');
+  assert.equal(fixture.calls.store.at(-1)[1].value, 'opening');
+  assert.deepEqual(fixture.calls.tts, [[
+    'speak',
+    '你好呀，小雨！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～',
+  ]]);
+
+  spoken.resolve({ mode: 'text', reason: 'fallback' });
+  assert.equal(await selecting, undefined);
+  assert.equal(app.getSnapshot().value, 'ready');
+  assert.equal(fixture.calls.store.at(-1)[1].value, 'ready');
+});
+
+test('two record toggles in one tick persist listening then stop the already-registered speech run exactly once', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  assert.equal(app.getSnapshot().value, 'ready');
+
+  assert.equal(app.recordToggle(), undefined);
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(fixture.calls.speechStart, 1);
+  assert.equal(fixture.calls.speechStop, 0);
+  assert.equal(fixture.calls.store.at(-1)[1].stopRequested, false);
+
+  assert.equal(app.recordToggle(), undefined);
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().stopRequested, true);
+  assert.equal(fixture.calls.speechStop, 1);
+  assert.equal(fixture.calls.store.at(-1)[1].stopRequested, true);
+
+  app.recordToggle();
+  assert.equal(fixture.calls.speechStop, 1);
+});
+
+test('a synchronous final from speech.start drains after the registered start boundary and launches one chat', async () => {
+  const fixture = createFixture();
+  const chat = deferred();
+  fixture.speech.start = () => {
+    fixture.calls.speechStart += 1;
+    fixture.emitSpeech({ type: 'final', text: '同步语音' });
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return chat.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  app.recordToggle();
+  assert.equal(fixture.calls.speechStart, 1);
+  assert.equal(app.getSnapshot().value, 'submitting');
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+  await flushMicrotasks();
+  assert.equal(fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'chat').length, 1);
+});
+
+test('current speech partials only announce, empty settles ready, and errors enter sanitized recovery', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  const savesBeforePartial = fixture.calls.store.filter(item => Array.isArray(item) && item[0] === 'save').length;
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'partial', text: '我在给小鸭换水' });
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.deepEqual(fixture.calls.view.at(-1), ['announce', '我在给小鸭换水']);
+  assert.equal(fixture.calls.store.filter(item => Array.isArray(item) && item[0] === 'save').length, savesBeforePartial + 1);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+
+  fixture.emitSpeech({ type: 'empty' });
+  assert.equal(app.getSnapshot().value, 'ready');
+  assert.equal(fixture.calls.store.at(-1)[1].value, 'ready');
+
+  app.recordToggle();
+  fixture.emitSpeech({
+    type: 'error',
+    error: {
+      code: 'MIC_PERMISSION_DENIED',
+      retryable: true,
+      message: 'do not expose this',
+      cause: { private: true },
+    },
+  });
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, {
+    code: 'MIC_PERMISSION_DENIED',
+    retryable: false,
+  });
+  assert.equal(Object.hasOwn(app.getSnapshot().error, 'message'), false);
+  assert.equal(Object.hasOwn(app.getSnapshot().error, 'cause'), false);
+});
+
+test('a throwing partial announcement is absorbed without ending the current listening run', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.view.announce = () => { throw new Error('private announce failure'); };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+
+  fixture.emitSpeech({ type: 'partial', text: 'still listening' });
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().stopRequested, false);
+  assert.equal(fixture.calls.speechStop, 0);
+});
+
+test('a current final creates one canonical draft, persists submitting, then launches one exact chat', async () => {
+  const fixture = createFixture();
+  const chat = deferred();
+  let draftCalls = 0;
+  const originalCreateDraft = fixture.deps.createDraft;
+  fixture.deps.createDraft = (...args) => {
+    draftCalls += 1;
+    return originalCreateDraft(...args);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return chat.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '  我给小鸭换了水  ' });
+  fixture.emitSpeech({ type: 'final', text: 'duplicate must be inert' });
+
+  assert.equal(app.getSnapshot().value, 'submitting');
+  assert.deepEqual(app.getSnapshot().draft, {
+    text: '我给小鸭换了水',
+    request_id: '00000000-0000-4000-8000-000000000007',
+    created_at: '2026-08-23T00:00:00.000Z',
+  });
+  assert.equal(draftCalls, 1);
+  assert.equal(fixture.calls.store.at(-1)[1].value, 'submitting');
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+
+  await flushMicrotasks();
+  const chatCalls = fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'chat');
+  assert.equal(chatCalls.length, 1);
+  assert.deepEqual(chatCalls[0][1], {
+    request_id: '00000000-0000-4000-8000-000000000007',
+    child_id: 7,
+    text: '我给小鸭换了水',
+    conversation_id: null,
+    max_rounds: 3,
+  });
+  assert.equal(chatCalls[0][2], fixture.controllers.at(-1).signal);
+});
+
+test('a malformed draft result is treated as DRAFT_CREATION_FAILED without launching chat', async () => {
+  const fixture = createFixture();
+  fixture.deps.createDraft = () => ({ text: '', request_id: 'bad', created_at: 'bad' });
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, {
+    code: 'DRAFT_CREATION_FAILED',
+    retryable: false,
+  });
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+});
+
+test('a persisted successful chat starts one reply TTS and its settlement advances speaking to ready', async () => {
+  const fixture = createFixture();
+  const chat = deferred();
+  const replySpeech = deferred();
+  const order = [];
+  const save = fixture.deps.store.save;
+  fixture.deps.store.save = snapshot => {
+    order.push(`save:${snapshot.value}`);
+    return save(snapshot);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return chat.promise;
+  };
+  fixture.deps.tts.speak = text => {
+    fixture.calls.tts.push(['speak', text]);
+    order.push(`speak:${text}`);
+    return text === '真棒！' ? replySpeech.promise : Promise.resolve({ mode: 'text' });
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  chat.resolve(chatResult());
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'speaking');
+  assert.equal(order.indexOf('save:speaking') < order.indexOf('speak:真棒！'), true);
+  assert.equal(fixture.calls.tts.filter(([kind, text]) => kind === 'speak' && text === '真棒！').length, 1);
+
+  replySpeech.resolve({ mode: 'text', reason: 'fallback' });
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'ready');
+  assert.equal(fixture.calls.store.at(-1)[1].value, 'ready');
+});
+
+test('a speaking-state save failure starts no reply TTS and remains LOCAL_STORAGE_FAILED recovery', async () => {
+  const fixture = createFixture();
+  const save = fixture.deps.store.save;
+  fixture.deps.store.save = snapshot => {
+    if (snapshot.value === 'speaking') throw new Error('private speaking write failure');
+    return save(snapshot);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return Promise.resolve(chatResult());
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, {
+    code: 'LOCAL_STORAGE_FAILED',
+    retryable: false,
+  });
+  assert.equal(fixture.calls.tts.some(([kind, text]) => kind === 'speak' && text === '真棒！'), false);
+});
+
+test('a retryable chat failure normalizes REQUEST_IN_PROGRESS and retries the exact persisted draft once', async () => {
+  const fixture = createFixture();
+  const firstChat = deferred();
+  const secondChat = deferred();
+  let chatAttempt = 0;
+  let draftCalls = 0;
+  const originalCreateDraft = fixture.deps.createDraft;
+  fixture.deps.createDraft = (...args) => {
+    draftCalls += 1;
+    return originalCreateDraft(...args);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    const result = chatAttempt === 0 ? firstChat.promise : secondChat.promise;
+    chatAttempt += 1;
+    return result;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  firstChat.reject({ code: 'REQUEST_IN_PROGRESS', retryable: false, message: 'private' });
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'submission_failed');
+  assert.deepEqual(app.getSnapshot().error, { code: 'REQUEST_IN_PROGRESS', retryable: true });
+  const preservedDraft = app.getSnapshot().draft;
+  assert.equal(draftCalls, 1);
+
+  const retried = app.retry();
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'submitting');
+  assert.equal(draftCalls, 1);
+  const chatCalls = fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'chat');
+  assert.equal(chatCalls.length, 2);
+  assert.deepEqual(chatCalls[1][1], chatCalls[0][1]);
+  assert.deepEqual(app.getSnapshot().draft, preservedDraft);
+
+  secondChat.resolve(chatResult());
+  assert.equal(await retried, undefined);
+});
+
+test('chat failures force approved retryability and ignore hostile error accessors', async () => {
+  let accessorReads = 0;
+  const hostileAccessor = {};
+  Object.defineProperties(hostileAccessor, {
+    code: {
+      get() {
+        accessorReads += 1;
+        throw new Error('private code getter');
+      },
+    },
+    retryable: {
+      get() {
+        accessorReads += 1;
+        return true;
+      },
+    },
+  });
+  const hostileProxy = new Proxy({}, {
+    getOwnPropertyDescriptor() {
+      throw new TypeError('private descriptor trap');
+    },
+  });
+  const rows = [
+    [{ code: 'IDEMPOTENCY_CONFLICT', retryable: true, message: 'private' },
+      { code: 'IDEMPOTENCY_CONFLICT', retryable: false }],
+    [{ code: 'MIC_PERMISSION_DENIED', retryable: true, cause: { private: true } },
+      { code: 'MIC_PERMISSION_DENIED', retryable: false }],
+    [hostileAccessor, { code: 'NETWORK_ERROR', retryable: false }],
+    [hostileProxy, { code: 'NETWORK_ERROR', retryable: false }],
+  ];
+
+  for (const [failure, expected] of rows) {
+    const fixture = createFixture();
+    fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+    fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+    fixture.deps.api.chat = () => Promise.reject(failure);
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    await app.start();
+    await app.selectChild(7);
+    app.recordToggle();
+    fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+    await flushMicrotasks();
+
+    assert.equal(app.getSnapshot().value, 'recovery');
+    assert.deepEqual(app.getSnapshot().error, expected);
+    assert.equal(Object.hasOwn(app.getSnapshot().error, 'message'), false);
+    assert.equal(Object.hasOwn(app.getSnapshot().error, 'cause'), false);
+  }
+  assert.equal(accessorReads, 0);
+});
+
+test('a replayed acknowledgement dedupes existing message IDs without a new UUID', async () => {
+  const fixture = createFixture();
+  let draftCalls = 0;
+  const originalCreateDraft = fixture.deps.createDraft;
+  fixture.deps.createDraft = (...args) => {
+    draftCalls += 1;
+    return originalCreateDraft(...args);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = () => Promise.resolve(chatResult({ replayed: draftCalls > 1 }));
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    app.recordToggle();
+    fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+    await flushMicrotasks();
+    assert.equal(app.getSnapshot().value, 'ready');
+  }
+
+  assert.equal(draftCalls, 2);
+  assert.deepEqual(app.getSnapshot().messages, [
+    { id: 41, role: 'child', text: '我给小鸭换了水' },
+    { id: 42, role: 'diary', text: '真棒！' },
+  ]);
+});
+
+test('a replay conflicting with acknowledged history becomes CHAT_RESPONSE_CONFLICT without reply TTS', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = () => Promise.resolve(chatResult({ replayed: true }));
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  const replyTTSBeforeConflict = fixture.calls.tts.filter(([kind, text]) => kind === 'speak' && text === '真棒！').length;
+
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '这次内容不同' });
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, {
+    code: 'CHAT_RESPONSE_CONFLICT',
+    retryable: false,
+  });
+  assert.equal(fixture.calls.tts.filter(([kind, text]) => kind === 'speak' && text === '真棒！').length,
+    replyTTSBeforeConflict);
+});
+
+test('an ended reply persists saving_conversation before one exact completion request and accepts its boundary', async () => {
+  const fixture = createFixture();
+  const completion = deferred();
+  const order = [];
+  const save = fixture.deps.store.save;
+  fixture.deps.store.save = snapshot => {
+    order.push(`save:${snapshot.value}`);
+    return save(snapshot);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  };
+  fixture.deps.api.complete = (conversationId, lastMessageId, signal) => {
+    fixture.calls.api.push(['complete', conversationId, lastMessageId, signal]);
+    order.push('complete');
+    return completion.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'saving_conversation');
+  const completionCalls = fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'complete');
+  assert.equal(completionCalls.length, 1);
+  assert.deepEqual(completionCalls[0].slice(0, 3), ['complete', 9, 42]);
+  assert.equal(typeof completionCalls[0][3], 'object');
+  assert.equal(order.indexOf('save:saving_conversation') < order.indexOf('complete'), true);
+
+  completion.resolve(completeResult());
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'completed');
+  assert.equal(fixture.calls.store.at(-1)[1].value, 'completed');
+});
+
+test('a completed-save failure remains the no-write LOCAL_STORAGE_FAILED recovery and does not relabel the response', async () => {
+  const fixture = createFixture();
+  const completion = deferred();
+  const save = fixture.deps.store.save;
+  fixture.deps.store.save = snapshot => {
+    if (snapshot.value === 'completed') throw new Error('private completed write failure');
+    return save(snapshot);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  };
+  fixture.deps.api.complete = () => completion.promise;
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'saving_conversation');
+
+  completion.resolve(completeResult());
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, {
+    code: 'LOCAL_STORAGE_FAILED',
+    retryable: false,
+  });
+  assert.equal(fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save'
+    && call[1].value === 'completed').length, 0);
+});
+
+test('an invalid completion response enters COMPLETE_RESPONSE_INVALID while preserving the completion boundary', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = () => Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  fixture.deps.api.complete = () => Promise.resolve(completeResult({ message_count: 3 }));
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, {
+    code: 'COMPLETE_RESPONSE_INVALID',
+    retryable: false,
+  });
+  assert.equal(app.getSnapshot().conversationId, 9);
+  assert.equal(app.getSnapshot().lastMessageId, 42);
+  assert.equal(app.getSnapshot().messages.length, 2);
+  assert.equal(app.getSnapshot().shouldComplete, true);
+});
+
+test('an ordinary completion failure preserves IDs and messages with only a sanitized recovery error', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = () => Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  fixture.deps.api.complete = () => Promise.reject({
+    code: 'UPSTREAM_TIMEOUT',
+    retryable: true,
+    message: 'private completion failure',
+    cause: { private: true },
+  });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, {
+    code: 'UPSTREAM_TIMEOUT',
+    retryable: true,
+  });
+  assert.equal(app.getSnapshot().conversationId, 9);
+  assert.equal(app.getSnapshot().lastMessageId, 42);
+  assert.deepEqual(app.getSnapshot().messages, [
+    { id: 41, role: 'child', text: '我给小鸭换了水' },
+    { id: 42, role: 'diary', text: '真棒！' },
+  ]);
+  assert.equal(app.getSnapshot().shouldComplete, true);
+});
+
+test('CONVERSATION_CHANGED rereads the durable completion boundary through a fresh child recovery read', async () => {
+  const fixture = createFixture();
+  const completion = deferred();
+  const rereadActive = deferred();
+  let loadCount = 0;
+  let activeCount = 0;
+  let completionCount = 0;
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    loadCount += 1;
+    return loadCount === 1 ? null : pendingCompletionRecord();
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    activeCount += 1;
+    return activeCount === 1
+      ? Promise.resolve({ conversation: null })
+      : rereadActive.promise;
+  };
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  };
+  fixture.deps.api.complete = (conversationId, lastMessageId, signal) => {
+    fixture.calls.api.push(['complete', conversationId, lastMessageId, signal]);
+    completionCount += 1;
+    return completionCount === 1 ? completion.promise : Promise.resolve(completeResult());
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'saving_conversation');
+
+  completion.reject({ code: 'CONVERSATION_CHANGED', retryable: true, message: 'private' });
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(fixture.calls.store.filter(call => call === 'load'), ['load', 'load']);
+  assert.deepEqual(fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'active'), [
+    ['active', 7],
+    ['active', 7],
+  ]);
+  assert.equal(fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'chat').length, 1);
+  assert.equal(fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save').at(-1)[1].value, 'saving_conversation');
+
+  rereadActive.resolve({ conversation: activeConversation() });
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'completed');
+});
+
+test('a late changed-conversation recovery load after destruction cannot launch its active read', async () => {
+  const fixture = createFixture();
+  const completion = deferred();
+  const recoveredLoad = deferred();
+  let loadCount = 0;
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    loadCount += 1;
+    return loadCount === 1 ? null : recoveredLoad.promise;
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: null });
+  };
+  fixture.deps.api.chat = () => Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  fixture.deps.api.complete = () => completion.promise;
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  completion.reject({ code: 'CONVERSATION_CHANGED', retryable: true });
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.store.filter(call => call === 'load'), ['load', 'load']);
+  const activeCallsBeforeDestroy = fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'active').length;
+
+  app.destroy();
+  recoveredLoad.resolve(pendingCompletionRecord());
+  await flushMicrotasks();
+  assert.equal(fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'active').length, activeCallsBeforeDestroy);
+  assert.equal(app.getSnapshot().value, 'recovery');
+});
+
+test('reset from recovery clears before the nonpersisting welcome transition', async () => {
+  const fixture = createFixture();
+  const order = [];
+  const clear = fixture.deps.store.clear;
+  const render = fixture.deps.view.render;
+  fixture.deps.store.clear = () => {
+    order.push('clear');
+    return clear();
+  };
+  fixture.deps.view.render = snapshot => {
+    order.push(`render:${snapshot.value}`);
+    return render(snapshot);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'error', error: { code: 'SPEECH_FAILED', retryable: true } });
+  assert.equal(app.getSnapshot().value, 'recovery');
+
+  assert.equal(app.reset(), undefined);
+  assert.equal(app.getSnapshot().value, 'welcome');
+  assert.equal(order.indexOf('clear') < order.lastIndexOf('render:welcome'), true);
+  assert.equal(fixture.calls.store.at(-1), 'clear');
+  assert.equal(fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save').at(-1)[1].value, 'recovery');
+});
+
+test('a valid noninteractive global Space prevents once and delegates one record start', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  let preventCalls = 0;
+  const event = {
+    code: 'Space',
+    repeat: false,
+    defaultPrevented: false,
+    target: {},
+    preventDefault() { preventCalls += 1; },
+  };
+
+  assert.equal(app.handleGlobalKeydown(event), true);
+  assert.equal(preventCalls, 1);
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(fixture.calls.speechStart, 1);
+});
+
+test('the next accepted global Space requests one manual stop and rejected Space variants do nothing', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  const accepted = () => ({
+    code: 'Space', repeat: false, defaultPrevented: false, target: {}, prevented: 0,
+    preventDefault() { this.prevented += 1; },
+  });
+
+  const first = accepted();
+  assert.equal(app.handleGlobalKeydown(first), true);
+  const second = accepted();
+  assert.equal(app.handleGlobalKeydown(second), true);
+  assert.equal(second.prevented, 1);
+  assert.equal(fixture.calls.speechStop, 1);
+  assert.equal(app.getSnapshot().stopRequested, true);
+
+  for (const event of [
+    { code: 'Enter', repeat: false, defaultPrevented: false, target: {}, preventDefault() { throw new Error('must not call'); } },
+    { code: 'Space', repeat: true, defaultPrevented: false, target: {}, preventDefault() { throw new Error('must not call'); } },
+    { code: 'Space', repeat: false, defaultPrevented: true, target: {}, preventDefault() { throw new Error('must not call'); } },
+  ]) {
+    assert.equal(app.handleGlobalKeydown(event), false);
+  }
+  assert.equal(fixture.calls.speechStop, 1);
+});
+
+test('a hostile controls result cannot escape or accept a global Space action', async () => {
+  const fixture = createFixture();
+  fixture.deps.machine = {
+    ...MACHINE_FACADE,
+    controlsFor() {
+      return Object.defineProperty({}, 'recordDisabled', {
+        enumerable: true,
+        get() { throw new Error('private controls getter'); },
+      });
+    },
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  let preventCalls = 0;
+  const event = {
+    code: 'Space', repeat: false, defaultPrevented: false, target: {},
+    preventDefault() { preventCalls += 1; },
+  };
+
+  assert.equal(app.handleGlobalKeydown(event), false);
+  assert.equal(preventCalls, 0);
+  assert.equal(fixture.calls.speechStart, 0);
+});
+
+test('destroy cancels an already-registered roster entry before its invocation microtask', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([]);
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+
+  const starting = app.start();
+  await Promise.resolve();
+  assert.equal(fixture.controllers.length, 1);
+  assert.equal(app.destroy(), undefined);
+  assert.equal(fixture.controllers[0].abortCalls, 1);
+  assert.equal(await starting, undefined);
+  await flushMicrotasks();
+
+  assert.equal(fixture.calls.api.includes('roster'), false);
+  assert.equal(app.getSnapshot().value, 'loading_roster');
+});
+
+test('destroy cancels a registered active read before its invocation microtask', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const controllerCount = destroyBeforeControllerWork(fixture, 2, () => app);
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([childRecord()]);
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: null });
+  };
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  assert.equal(await app.start(), undefined);
+  await flushMicrotasks();
+
+  assert.equal(controllerCount(), 2);
+  assert.equal(fixture.controllers[1].abortCalls, 1);
+  assert.deepEqual(fixture.calls.api, ['ready', 'roster']);
+  assert.equal(app.getSnapshot().value, 'loading_roster');
+});
+
+test('destroy cancels a registered greeting TTS before speak invocation', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const controllerCount = destroyBeforeControllerWork(fixture, 3, () => app);
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  assert.equal(await app.selectChild(7), undefined);
+  await flushMicrotasks();
+
+  assert.equal(controllerCount(), 3);
+  assert.equal(fixture.controllers[2].abortCalls, 1);
+  assert.equal(fixture.calls.tts.some(([kind]) => kind === 'speak'), false);
+  assert.equal(app.getSnapshot().value, 'opening');
+});
+
+test('destroy cancels a registered chat before API invocation', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const controllerCount = destroyBeforeControllerWork(fixture, 5, () => app);
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+
+  assert.equal(controllerCount(), 5);
+  assert.equal(fixture.controllers[4].abortCalls, 1);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+  assert.equal(app.getSnapshot().value, 'submitting');
+});
+
+test('destroy cancels a registered reply TTS before speak invocation', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const controllerCount = destroyBeforeControllerWork(fixture, 6, () => app);
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return Promise.resolve(chatResult());
+  };
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+
+  assert.equal(controllerCount(), 6);
+  assert.equal(fixture.controllers[5].abortCalls, 1);
+  assert.equal(fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'chat').length, 1);
+  assert.equal(fixture.calls.tts.filter(([kind, text]) => kind === 'speak' && text === '真棒！').length, 0);
+  assert.equal(app.getSnapshot().value, 'speaking');
+});
+
+test('destroy cancels registered completion before API invocation', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const controllerCount = destroyBeforeControllerWork(fixture, 7, () => app);
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = () => Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.equal(controllerCount(), 7);
+  assert.equal(fixture.controllers[6].abortCalls, 1);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'complete'), false);
+  assert.equal(app.getSnapshot().value, 'saving_conversation');
+});
+
+test('destroy cancels registered changed-conversation recovery before its reload invocation', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const controllerCount = destroyBeforeControllerWork(fixture, 8, () => app);
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  };
+  fixture.deps.api.complete = (conversationId, lastMessageId, signal) => {
+    fixture.calls.api.push(['complete', conversationId, lastMessageId, signal]);
+    return Promise.reject({ code: 'CONVERSATION_CHANGED', retryable: true });
+  };
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  await flushMicrotasks();
+
+  assert.equal(controllerCount(), 8);
+  assert.equal(fixture.controllers[7].abortCalls, 1);
+  assert.equal(fixture.calls.store.filter(call => call === 'load').length, 1);
+  assert.equal(app.getSnapshot().value, 'recovery');
+});
+
+test('a late roster fulfillment after destruction is inert', async () => {
+  const fixture = createFixture();
+  const roster = deferred();
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return roster.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  const starting = app.start();
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.api, ['ready', 'roster']);
+  const writesBeforeDestroy = fixture.calls.store.length;
+
+  app.destroy();
+  roster.resolve([]);
+  assert.equal(await starting, undefined);
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'loading_roster');
+  assert.equal(fixture.calls.store.length, writesBeforeDestroy);
+});
+
+test('a late active-conversation fulfillment after destruction is inert', async () => {
+  const fixture = createFixture();
+  const active = deferred();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return active.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  const starting = app.start();
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.api, ['ready', ['active', 7]]);
+  const writesBeforeDestroy = fixture.calls.store.length;
+
+  app.destroy();
+  active.resolve({ conversation: null });
+  assert.equal(await starting, undefined);
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'loading_roster');
+  assert.equal(fixture.calls.store.length, writesBeforeDestroy);
+});
+
+test('a late chat fulfillment after destruction is inert and cannot launch reply TTS', async () => {
+  const fixture = createFixture();
+  const chat = deferred();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = (input, signal) => {
+    fixture.calls.api.push(['chat', input, signal]);
+    return chat.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'submitting');
+  const savesAtDestroy = fixture.calls.store.length;
+
+  app.destroy();
+  chat.resolve(chatResult());
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'submitting');
+  assert.equal(fixture.calls.store.length, savesAtDestroy);
+  assert.equal(fixture.calls.tts.filter(([kind, text]) => kind === 'speak' && text === '真棒！').length, 0);
+});
+
+test('a late greeting TTS settlement after destruction is inert', async () => {
+  const fixture = createFixture();
+  const greeting = deferred();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.tts.speak = text => {
+    fixture.calls.tts.push(['speak', text]);
+    return greeting.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  const selecting = app.selectChild(7);
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'opening');
+  const savesAtDestroy = fixture.calls.store.length;
+
+  app.destroy();
+  greeting.resolve({ mode: 'text' });
+  assert.equal(await selecting, undefined);
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'opening');
+  assert.equal(fixture.calls.store.length, savesAtDestroy);
+});
+
+test('a late completion fulfillment after destruction is inert', async () => {
+  const fixture = createFixture();
+  const completion = deferred();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = () => Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  fixture.deps.api.complete = () => completion.promise;
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'saving_conversation');
+  const savesAtDestroy = fixture.calls.store.length;
+
+  app.destroy();
+  completion.resolve(completeResult());
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'saving_conversation');
+  assert.equal(fixture.calls.store.length, savesAtDestroy);
+});
+
+test('a late speech final after destruction is inert', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  assert.equal(app.getSnapshot().value, 'listening');
+  const savesAtDestroy = fixture.calls.store.length;
+
+  app.destroy();
+  fixture.emitSpeech({ type: 'final', text: 'late and inert' });
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(fixture.calls.store.length, savesAtDestroy);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+});
+
+test('a recovery loading-roster outcome paired with keep never resolves or persists the loading copy', async () => {
+  const fixture = createFixture();
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return localReadyRecord();
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: null });
+  };
+  fixture.deps.mergeRecovery = () => Object.freeze({
+    snapshot: createInitialSnapshot({ value: 'loading_roster' }),
+    storageAction: 'keep',
+  });
+  const app = createChildApp(fixture.deps);
+
+  await app.initialize();
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, {
+    code: 'RECOVERY_RESULT_INVALID',
+    retryable: false,
+  });
+  assert.deepEqual(fixture.calls.store, ['load']);
+  assert.equal(fixture.calls.view.filter(([kind, snapshot]) => kind === 'render' && snapshot.value === 'loading_roster').length, 1);
+});
+
+test('a clear recovery outcome clears before resolving then performs one fresh no-local roster continuation', async () => {
+  const fixture = createFixture();
+  const order = [];
+  const clear = fixture.deps.store.clear;
+  const save = fixture.deps.store.save;
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return localReadyRecord();
+  };
+  fixture.deps.store.clear = () => {
+    order.push('clear');
+    return clear();
+  };
+  fixture.deps.store.save = snapshot => {
+    order.push(`save:${snapshot.value}`);
+    return save(snapshot);
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: null });
+  };
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([]);
+  };
+  const app = createChildApp(fixture.deps);
+
+  await app.initialize();
+  assert.equal(app.getSnapshot().value, 'selecting_child');
+  assert.deepEqual(fixture.calls.api, ['ready', ['active', 7], 'roster']);
+  assert.equal(order.indexOf('clear') < order.indexOf('save:loading_roster'), true);
+  assert.equal(order.filter(item => item === 'clear').length, 1);
+});
+
+test('a roster controller construction failure enters sanitized recovery before any roster invocation', async () => {
+  const fixture = createFixture();
+  fixture.deps.AbortController = class BrokenAbortController {
+    constructor() { throw new Error('private controller failure'); }
+  };
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([]);
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+
+  assert.equal(await app.start(), undefined);
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, {
+    code: 'EFFECT_CONTROLLER_FAILED',
+    retryable: false,
+  });
+  assert.equal(fixture.calls.api.includes('roster'), false);
+});
+
+test('hostile controller signal and abort properties fail closed before effect invocation', async () => {
+  const rows = [
+    class ThrowingSignalController {
+      get signal() { throw new TypeError('private signal getter'); }
+      abort() {}
+    },
+    class ThrowingAbortController {
+      constructor() { this.signal = {}; }
+      get abort() { throw new Error('private abort getter'); }
+    },
+    class NonCallableAbortController {
+      constructor() {
+        this.signal = {};
+        this.abort = null;
+      }
+    },
+  ];
+
+  for (const AbortController of rows) {
+    const fixture = createFixture();
+    fixture.deps.AbortController = AbortController;
+    fixture.deps.api.getTodayRoster = () => {
+      fixture.calls.api.push('roster');
+      return Promise.resolve([]);
+    };
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    assert.equal(await app.start(), undefined);
+    assert.equal(app.getSnapshot().value, 'recovery');
+    assert.deepEqual(app.getSnapshot().error, {
+      code: 'EFFECT_CONTROLLER_FAILED',
+      retryable: false,
+    });
+    assert.equal(fixture.calls.api.includes('roster'), false);
+  }
+});
+
+test('a hostile abort thenable is consumed once without an unhandled rejection', async () => {
+  const fixture = createFixture();
+  const roster = deferred();
+  let abortCalls = 0;
+  fixture.deps.AbortController = class HostileAbortController {
+    constructor() { this.signal = {}; }
+    abort() {
+      abortCalls += 1;
+      return Object.defineProperty({}, 'then', {
+        get() { throw new Error('private abort then getter'); },
+      });
+    }
+  };
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return roster.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  const starting = app.start();
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.api, ['ready', 'roster']);
+
+  assert.doesNotThrow(() => app.destroy());
+  assert.equal(abortCalls, 1);
+  roster.resolve([]);
+  assert.equal(await starting, undefined);
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'loading_roster');
+});
+
+test('destroy during a deferred initialize gate leaves its later continuation fully inert', async () => {
+  const fixture = createFixture();
+  const ready = deferred();
+  fixture.deps.api.ready = () => {
+    fixture.calls.api.push('ready');
+    return ready.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  const initialized = app.initialize();
+  await Promise.resolve();
+  assert.deepEqual(fixture.calls.api, ['ready']);
+  app.destroy();
+
+  ready.resolve();
+  assert.equal(await initialized, undefined);
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.store, []);
+  assert.equal(fixture.calls.view.filter(([kind]) => kind === 'render').length, 1);
+  assert.equal(app.getSnapshot().value, 'welcome');
+});
+
+test('a reentrant store.load callback cannot start a roster while initialization is still in its call boundary', async () => {
+  const fixture = createFixture();
+  let app = null;
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    app.start();
+    return null;
+  };
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([]);
+  };
+  app = createChildApp(fixture.deps);
+
+  await app.initialize();
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'welcome');
+  assert.equal(fixture.calls.api.includes('roster'), false);
+});
+
+test('a reentrant destroy during an external callback is deferred as a no-op until the boundary releases', async () => {
+  const fixture = createFixture();
+  let app = null;
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    app.destroy();
+    return null;
+  };
+  app = createChildApp(fixture.deps);
+
+  await app.initialize();
+  assert.equal(app.getSnapshot().value, 'welcome');
+  assert.equal(fixture.calls.speechDispose, 0);
+  assert.equal(fixture.calls.tts.some(([kind]) => kind === 'dispose'), false);
+  assert.equal(await app.start(), undefined);
+  assert.equal(fixture.calls.api.includes('roster'), true);
+});
+
+test('a save-failure cancellation keeps an abort callback from reentering a new speech run', async () => {
+  const fixture = createFixture();
+  const greeting = deferred();
+  let app = null;
+  let failReadyOnce = true;
+  let abortCalls = 0;
+  const save = fixture.deps.store.save;
+  fixture.deps.store.save = snapshot => {
+    if (snapshot.value === 'ready' && failReadyOnce) {
+      failReadyOnce = false;
+      throw new Error('private save failure');
+    }
+    return save(snapshot);
+  };
+  fixture.deps.AbortController = class ReentrantAbortController {
+    constructor() { this.signal = {}; }
+    abort() { abortCalls += 1; app?.recordToggle(); }
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.tts.speak = text => {
+    fixture.calls.tts.push(['speak', text]);
+    return greeting.promise;
+  };
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  const selecting = app.selectChild(7);
+  await flushMicrotasks();
+
+  greeting.resolve({ mode: 'text' });
+  assert.equal(await selecting, undefined);
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.equal(abortCalls, 1);
+  assert.equal(fixture.calls.speechStart, 0);
+  assert.equal(fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save'
+    && call[1].value === 'listening').length, 0);
+});
+
+test('a render callback cannot reentrantly select a child from the selecting transition', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const render = fixture.deps.view.render;
+  fixture.deps.view.render = snapshot => {
+    render(snapshot);
+    if (snapshot.value === 'selecting_child') app?.selectChild(7);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  app = createChildApp(fixture.deps);
+
+  await app.initialize();
+  await app.start();
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'selecting_child');
+  assert.equal(fixture.calls.tts.filter(([kind]) => kind === 'speak').length, 0);
+  assert.equal(fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save'
+    && call[1].value === 'selecting_child').length, 1);
+});
+
+test('an ordinary render failure enters no-write VIEW_RENDER_FAILED recovery before roster work', async () => {
+  const fixture = createFixture();
+  const render = fixture.deps.view.render;
+  fixture.deps.view.render = snapshot => {
+    if (snapshot.value === 'loading_roster') throw new Error('private render failure');
+    render(snapshot);
+  };
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([]);
+  };
+  const app = createChildApp(fixture.deps);
+
+  await app.initialize();
+  await app.start();
+
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, { code: 'VIEW_RENDER_FAILED', retryable: false });
+  assert.equal(fixture.calls.api.includes('roster'), false);
+  assert.equal(fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save').length, 0);
+});
+
+test('a RESET welcome render failure restores the prior recovery snapshot before no-write recovery', async () => {
+  const fixture = createFixture();
+  let failWelcome = false;
+  const render = fixture.deps.view.render;
+  fixture.deps.view.render = snapshot => {
+    if (failWelcome && snapshot.value === 'welcome') throw new Error('private reset render failure');
+    render(snapshot);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'error', error: { code: 'SPEECH_FAILED', retryable: true } });
+  assert.equal(app.getSnapshot().value, 'recovery');
+  const savesBeforeReset = fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save').length;
+  failWelcome = true;
+
+  assert.equal(app.reset(), undefined);
+
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, { code: 'VIEW_RENDER_FAILED', retryable: false });
+  assert.equal(fixture.calls.store.filter(call => call === 'clear').length, 1);
+  assert.equal(fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save').length, savesBeforeReset);
+});
+
+test('failure to save TTS_SETTLED into saving_conversation invokes complete zero times', async () => {
+  const fixture = createFixture();
+  const reply = deferred();
+  const save = fixture.deps.store.save;
+  fixture.deps.store.save = snapshot => {
+    if (snapshot.value === 'saving_conversation') throw new Error('private saving transition failure');
+    return save(snapshot);
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  fixture.deps.api.chat = () => Promise.resolve(chatResult({ ended: true, end_reason: 'complete' }));
+  fixture.deps.tts.speak = text => {
+    fixture.calls.tts.push(['speak', text]);
+    return text === '真棒！' ? reply.promise : Promise.resolve({ mode: 'text' });
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'speaking');
+
+  reply.resolve({ mode: 'audio' });
+  await flushMicrotasks();
+
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.deepEqual(app.getSnapshot().error, { code: 'LOCAL_STORAGE_FAILED', retryable: false });
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'complete'), false);
+});
+
+test('a pending completion reload starts exactly one replay-safe complete and no chat or TTS', async () => {
+  const fixture = createFixture();
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return pendingCompletionRecord();
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: activeConversation() });
+  };
+  fixture.deps.api.complete = (conversationId, lastMessageId, signal) => {
+    fixture.calls.api.push(['complete', conversationId, lastMessageId, signal]);
+    return Promise.resolve(completeResult({ replayed: true }));
+  };
+  const app = createChildApp(fixture.deps);
+
+  await app.initialize();
+  await flushMicrotasks();
+
+  const completions = fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'complete');
+  assert.equal(completions.length, 1);
+  assert.equal(completions[0][1], 9);
+  assert.equal(completions[0][2], 42);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+  assert.equal(fixture.calls.tts.filter(([kind]) => kind === 'speak').length, 0);
+  assert.equal(app.getSnapshot().value, 'completed');
+});
+
+test('an active-controller failure merges a valid local draft without an empty bridge write', async () => {
+  const fixture = createFixture();
+  const local = localDraftRecord();
+  const before = JSON.stringify(local);
+  let remoteRead = null;
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return local;
+  };
+  fixture.deps.mergeRecovery = (localRecord, remote) => {
+    remoteRead = remote;
+    return mergeRecovery(localRecord, remote);
+  };
+  fixture.deps.AbortController = class BrokenAbortController {
+    constructor() { throw new Error('private active controller failure'); }
+  };
+  fixture.deps.api.getActiveConversation = () => {
+    fixture.calls.api.push(['active', 7]);
+    return Promise.resolve({ conversation: null });
+  };
+  const app = createChildApp(fixture.deps);
+
+  await app.initialize();
+
+  assert.equal(JSON.stringify(local), before);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'active'), false);
+  assert.deepEqual(remoteRead, {
+    kind: 'failure',
+    queriedChild: childRecord(),
+    error: { code: 'EFFECT_CONTROLLER_FAILED', retryable: false },
+  });
+  const saves = fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save');
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0][1].draft.request_id, local.draft.request_id);
+  assert.equal(app.getSnapshot().draft.request_id, local.draft.request_id);
+});
+
+test('a roster-controller failure merges valid childless local data without clearing or empty overwrite', async () => {
+  const fixture = createFixture();
+  const local = { ...localReadyRecord(), child: null };
+  const before = JSON.stringify(local);
+  let remoteRead = null;
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return local;
+  };
+  fixture.deps.mergeRecovery = (localRecord, remote) => {
+    remoteRead = remote;
+    return mergeRecovery(localRecord, remote);
+  };
+  fixture.deps.AbortController = class BrokenAbortController {
+    constructor() { throw new Error('private roster controller failure'); }
+  };
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([]);
+  };
+  const app = createChildApp(fixture.deps);
+
+  await app.initialize();
+
+  assert.equal(JSON.stringify(local), before);
+  assert.equal(fixture.calls.api.includes('roster'), false);
+  assert.deepEqual(remoteRead, {
+    kind: 'failure',
+    queriedChild: null,
+    error: { code: 'EFFECT_CONTROLLER_FAILED', retryable: false },
+  });
+  assert.equal(fixture.calls.store.filter(call => call === 'clear').length, 0);
+  const saves = fixture.calls.store.filter(call => Array.isArray(call) && call[0] === 'save');
+  assert.equal(saves.length, 1);
+  assert.equal(saves[0][1].value, 'recovery');
+  assert.equal(app.getSnapshot().value, 'recovery');
+});
+
+test('save and announce callbacks cannot reentrantly toggle recording', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const save = fixture.deps.store.save;
+  fixture.deps.store.save = snapshot => {
+    app?.recordToggle();
+    return save(snapshot);
+  };
+  fixture.deps.view.announce = text => {
+    fixture.calls.view.push(['announce', text]);
+    app?.recordToggle();
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  assert.equal(fixture.calls.speechStart, 0);
+  app.recordToggle();
+  assert.equal(fixture.calls.speechStart, 1);
+  fixture.emitSpeech({ type: 'partial', text: '我正在说' });
+
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().stopRequested, false);
+  assert.equal(fixture.calls.speechStop, 0);
+  assert.deepEqual(fixture.calls.view.at(-1), ['announce', '我正在说']);
+});
+
+test('a reset clear callback cannot recurse into reset or start another roster effect', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const clear = fixture.deps.store.clear;
+  fixture.deps.store.clear = () => {
+    app?.reset();
+    app?.start();
+    return clear();
+  };
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([childRecord()]);
+  };
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'error', error: { code: 'SPEECH_FAILED', retryable: true } });
+  const rosterCalls = fixture.calls.api.filter(call => call === 'roster').length;
+
+  app.reset();
+  await flushMicrotasks();
+
+  assert.equal(fixture.calls.store.filter(call => call === 'clear').length, 1);
+  assert.equal(fixture.calls.api.filter(call => call === 'roster').length, rosterCalls);
+  assert.equal(app.getSnapshot().value, 'welcome');
+});
+
+test('a recovery clear callback cannot recurse before its fresh roster continuation', async () => {
+  const fixture = createFixture();
+  let app = null;
+  const clear = fixture.deps.store.clear;
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return localReadyRecord();
+  };
+  fixture.deps.store.clear = () => {
+    app?.reset();
+    app?.start();
+    return clear();
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: null });
+  };
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([]);
+  };
+  app = createChildApp(fixture.deps);
+
+  await app.initialize();
+
+  assert.equal(fixture.calls.store.filter(call => call === 'clear').length, 1);
+  assert.equal(fixture.calls.api.filter(call => call === 'roster').length, 1);
+  assert.deepEqual(fixture.calls.api, ['ready', ['active', 7], 'roster']);
+  assert.equal(app.getSnapshot().value, 'selecting_child');
+});
+
+test('speech start and manual stop callbacks cannot reentrantly toggle the current generation', async () => {
+  const fixture = createFixture();
+  let app = null;
+  fixture.speech.start = () => {
+    fixture.calls.speechStart += 1;
+    app?.recordToggle();
+  };
+  fixture.speech.stop = () => {
+    fixture.calls.speechStop += 1;
+    app?.recordToggle();
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  app.recordToggle();
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().stopRequested, false);
+  assert.equal(fixture.calls.speechStart, 1);
+  assert.equal(fixture.calls.speechStop, 0);
+
+  app.recordToggle();
+  assert.equal(app.getSnapshot().stopRequested, true);
+  assert.equal(fixture.calls.speechStop, 1);
+});
+
+test('destroy-time speech and view callbacks cannot reenter or launch another effect', async () => {
+  const fixture = createFixture();
+  let app = null;
+  fixture.speech.stop = () => {
+    fixture.calls.speechStop += 1;
+    app?.recordToggle();
+  };
+  fixture.speech.dispose = () => {
+    fixture.calls.speechDispose += 1;
+    app?.start();
+  };
+  fixture.deps.tts.dispose = () => {
+    fixture.calls.tts.push(['dispose']);
+    app?.start();
+  };
+  fixture.deps.view.destroy = () => {
+    fixture.calls.view.push(['destroy']);
+    app?.start();
+  };
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([childRecord()]);
+  };
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  const rosterCalls = fixture.calls.api.filter(call => call === 'roster').length;
+
+  app.destroy();
+  await flushMicrotasks();
+
+  assert.equal(fixture.calls.speechStop, 1);
+  assert.equal(fixture.calls.speechDispose, 1);
+  assert.equal(fixture.calls.tts.filter(([kind]) => kind === 'dispose').length, 1);
+  assert.equal(fixture.calls.view.filter(([kind]) => kind === 'destroy').length, 1);
+  assert.equal(fixture.calls.api.filter(call => call === 'roster').length, rosterCalls);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+});
+
+test('destroy-time TTS cancel and dispose callbacks cannot reenter the pending greeting', async () => {
+  const fixture = createFixture();
+  const greeting = deferred();
+  let app = null;
+  fixture.deps.tts.speak = text => {
+    fixture.calls.tts.push(['speak', text]);
+    return greeting.promise;
+  };
+  fixture.deps.tts.cancel = reason => {
+    fixture.calls.tts.push(['cancel', reason]);
+    app?.recordToggle();
+  };
+  fixture.deps.tts.dispose = () => {
+    fixture.calls.tts.push(['dispose']);
+    app?.start();
+  };
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  const selecting = app.selectChild(7);
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'opening');
+
+  app.destroy();
+  greeting.resolve({ mode: 'text' });
+  await selecting;
+  await flushMicrotasks();
+
+  assert.equal(fixture.calls.tts.filter(([kind]) => kind === 'cancel').length, 1);
+  assert.equal(fixture.calls.tts.filter(([kind]) => kind === 'dispose').length, 1);
+  assert.equal(fixture.calls.speechStart, 0);
+  assert.equal(app.getSnapshot().value, 'opening');
+});
+
+test('destroy consumes rejecting cleanup thenables from speech, TTS, and view exactly once', async () => {
+  const fixture = createFixture();
+  const thenCalls = { speech: 0, tts: 0, view: 0 };
+  const rejectingThenable = key => ({
+    then(resolve, reject) {
+      thenCalls[key] += 1;
+      reject(new Error(`private ${key} cleanup rejection`));
+    },
+  });
+  fixture.speech.dispose = () => rejectingThenable('speech');
+  fixture.deps.tts.dispose = () => rejectingThenable('tts');
+  fixture.deps.view.destroy = () => rejectingThenable('view');
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+
+  assert.doesNotThrow(() => app.destroy());
+  await flushMicrotasks();
+
+  assert.deepEqual(thenCalls, { speech: 1, tts: 1, view: 1 });
+});
+
+test('global Space is inert in welcome, loading, and recovery without preventing default', async () => {
+  const fixture = createFixture();
+  const roster = deferred();
+  fixture.deps.api.getTodayRoster = () => roster.promise;
+  const app = createChildApp(fixture.deps);
+  const makeSpace = () => ({
+    code: 'Space', repeat: false, defaultPrevented: false, target: {}, prevented: 0,
+    preventDefault() { this.prevented += 1; },
+  });
+
+  const welcomeSpace = makeSpace();
+  assert.equal(app.handleGlobalKeydown(welcomeSpace), false);
+  assert.equal(welcomeSpace.prevented, 0);
+
+  await app.initialize();
+  const starting = app.start();
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'loading_roster');
+  const loadingSpace = makeSpace();
+  assert.equal(app.handleGlobalKeydown(loadingSpace), false);
+  assert.equal(loadingSpace.prevented, 0);
+
+  roster.reject({ code: 'NETWORK_ERROR', retryable: true });
+  await starting;
+  await flushMicrotasks();
+  assert.equal(app.getSnapshot().value, 'recovery');
+  const recoverySpace = makeSpace();
+  assert.equal(app.handleGlobalKeydown(recoverySpace), false);
+  assert.equal(recoverySpace.prevented, 0);
+  assert.equal(fixture.calls.speechStart, 0);
+});
+
+test('global Space behind an interactive target or active dialog is never accepted', async () => {
+  for (const blockedBy of ['interactive', 'dialog']) {
+    const fixture = createFixture();
+    fixture.deps.keyboard.isInteractiveTarget = () => blockedBy === 'interactive';
+    fixture.deps.keyboard.isDialogActive = () => blockedBy === 'dialog';
+    fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+    fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    await app.start();
+    await app.selectChild(7);
+    const event = {
+      code: 'Space', repeat: false, defaultPrevented: false, target: {}, prevented: 0,
+      preventDefault() { this.prevented += 1; },
+    };
+
+    assert.equal(app.handleGlobalKeydown(event), false, blockedBy);
+    assert.equal(event.prevented, 0, blockedBy);
+    assert.equal(fixture.calls.speechStart, 0, blockedBy);
+  }
+});
+
+test('destroy after store.load invocation makes its deferred local continuation fully inert', async () => {
+  const fixture = createFixture();
+  const loaded = deferred();
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return loaded.promise;
+  };
+  const app = createChildApp(fixture.deps);
+  const initialized = app.initialize();
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.api, ['ready']);
+  assert.deepEqual(fixture.calls.store, ['load']);
+  const rendersBeforeDestroy = fixture.calls.view.filter(([kind]) => kind === 'render').length;
+
+  app.destroy();
+  loaded.resolve(localDraftRecord());
+  await initialized;
+  await flushMicrotasks();
+
+  assert.deepEqual(fixture.calls.store, ['load']);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'active'), false);
+  assert.equal(fixture.calls.view.filter(([kind]) => kind === 'render').length, rendersBeforeDestroy);
+  assert.equal(app.getSnapshot().value, 'welcome');
+});
+
+test('roster scan dedupes children and resolves the zero, one, and multiple-active boundaries', async () => {
+  const secondChild = childRecord(8, '小云');
+
+  {
+    const fixture = createFixture();
+    fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord(), childRecord(), secondChild]);
+    fixture.deps.api.getActiveConversation = childId => {
+      fixture.calls.api.push(['active', childId]);
+      return Promise.resolve({ conversation: null });
+    };
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    await app.start();
+    assert.equal(app.getSnapshot().value, 'selecting_child');
+    assert.deepEqual(app.getSnapshot().roster.map(child => child.id), [7, 8]);
+    assert.deepEqual(fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'active')
+      .map(call => call[1]).sort(), [7, 8]);
+  }
+
+  {
+    const fixture = createFixture();
+    fixture.deps.api.getTodayRoster = () => Promise.resolve([
+      childRecord(), secondChild, childRecord(9, '小岚'),
+    ]);
+    fixture.deps.api.getActiveConversation = childId => {
+      fixture.calls.api.push(['active', childId]);
+      return Promise.resolve({ conversation: null });
+    };
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    await app.start();
+    assert.equal(app.getSnapshot().value, 'recovery');
+    assert.deepEqual(app.getSnapshot().error, { code: 'ROSTER_CARDINALITY_INVALID', retryable: false });
+    assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'active'), false);
+  }
+
+  {
+    const fixture = createFixture();
+    fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord(), secondChild]);
+    fixture.deps.api.getActiveConversation = childId => Promise.resolve({
+      conversation: { ...activeConversation(), id: childId + 2, child_id: childId },
+    });
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    await app.start();
+    assert.equal(app.getSnapshot().value, 'recovery');
+    assert.deepEqual(app.getSnapshot().error, { code: 'MULTIPLE_ACTIVE_CONVERSATIONS', retryable: false });
+  }
+
+  {
+    const fixture = createFixture();
+    fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord(), secondChild]);
+    fixture.deps.api.getActiveConversation = childId => Promise.resolve({
+      conversation: childId === 8
+        ? { ...activeConversation(), id: 10, child_id: 8 }
+        : null,
+    });
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    await app.start();
+    assert.equal(app.getSnapshot().value, 'ready');
+    assert.equal(app.getSnapshot().child.id, 8);
+    assert.equal(app.getSnapshot().conversationId, 10);
+    assert.equal(fixture.calls.tts.filter(([kind]) => kind === 'speak').length, 0);
+  }
+});
