@@ -166,8 +166,8 @@ function encodeSnapshot(snapshot) {
 const UPDATED_AT_PLACEHOLDER = '2000-01-01T00:00:00.000Z';
 
 function decodeRecord(raw) {
-  if (!isValidRecordShape(raw)) return null;
   try {
+    if (!isValidRecordShape(raw)) return null;
     const snapshot = snapshotFromLocal(raw);
     assertSnapshot(snapshot);
     return deepFreeze({
@@ -196,7 +196,7 @@ function isValidRecordShape(value) {
     || !isNullablePositiveInteger(value.conversation_id)
     || !isNullableNonnegativeInteger(value.revision)
     || !isNullablePositiveInteger(value.last_message_id)
-    || !Array.isArray(value.messages)
+    || !isPlainDataArray(value.messages)
     || !value.messages.every(item => isMessage(item, true))
     || !isNullableDraft(value.draft, true)
     || typeof value.should_complete !== 'boolean'
@@ -217,39 +217,43 @@ function isValidRecordShape(value) {
 }
 
 function normalizeRemoteRead(value) {
-  if (!isRecord(value)) throw new TypeError('remote read must be an object');
-  if (value.kind === 'success') {
-    if (!hasExactOwnKeys(value, ['kind', 'queriedChild', 'active'])
-      || !isNullableChild(value.queriedChild, true)
-      || !hasExactOwnKeys(value.active, ['conversation'])) {
-      throw new TypeError('invalid successful remote read');
+  try {
+    if (!isPlainDataRecord(value)) throw new TypeError('remote read must be an object');
+    if (value.kind === 'success') {
+      if (!hasExactOwnKeys(value, ['kind', 'queriedChild', 'active'])
+        || !isNullableChild(value.queriedChild, true)
+        || !hasExactOwnKeys(value.active, ['conversation'])) {
+        throw new TypeError('invalid successful remote read');
+      }
+      const conversation = value.active.conversation;
+      if (conversation !== null && !isActiveConversation(conversation, true)) {
+        throw new TypeError('invalid active conversation');
+      }
+      if (conversation !== null && (value.queriedChild === null || conversation.child_id !== value.queriedChild.id)) {
+        throw new TypeError('active conversation child does not match queried child');
+      }
+      return {
+        kind: 'success',
+        queriedChild: value.queriedChild === null ? null : copyChild(value.queriedChild),
+        active: { conversation: conversation === null ? null : copyActiveConversation(conversation) },
+      };
     }
-    const conversation = value.active.conversation;
-    if (conversation !== null && !isActiveConversation(conversation, true)) {
-      throw new TypeError('invalid active conversation');
+    if (value.kind === 'failure') {
+      if (!hasExactOwnKeys(value, ['kind', 'queriedChild', 'error'])
+        || !isNullableChild(value.queriedChild, true)
+        || !isRemoteFailure(value.error)) {
+        throw new TypeError('invalid failed remote read');
+      }
+      return {
+        kind: 'failure',
+        queriedChild: value.queriedChild === null ? null : copyChild(value.queriedChild),
+        error: copyRemoteFailure(value.error),
+      };
     }
-    if (conversation !== null && (value.queriedChild === null || conversation.child_id !== value.queriedChild.id)) {
-      throw new TypeError('active conversation child does not match queried child');
-    }
-    return {
-      kind: 'success',
-      queriedChild: value.queriedChild === null ? null : copyChild(value.queriedChild),
-      active: { conversation: conversation === null ? null : copyActiveConversation(conversation) },
-    };
+    throw new TypeError('remote read kind must be success or failure');
+  } catch {
+    throw new TypeError('invalid remote read');
   }
-  if (value.kind === 'failure') {
-    if (!hasExactOwnKeys(value, ['kind', 'queriedChild', 'error'])
-      || !isNullableChild(value.queriedChild, true)
-      || !isRemoteFailure(value.error)) {
-      throw new TypeError('invalid failed remote read');
-    }
-    return {
-      kind: 'failure',
-      queriedChild: value.queriedChild === null ? null : copyChild(value.queriedChild),
-      error: copyRemoteFailure(value.error),
-    };
-  }
-  throw new TypeError('remote read kind must be success or failure');
 }
 
 function snapshotFromActive(value, queriedChild, active, overrides = {}) {
@@ -373,7 +377,7 @@ function isActiveConversation(value, strict) {
     || !isNonnegativeInteger(value.revision)
     || !isNonnegativeInteger(value.round)
     || !isNullablePositiveInteger(value.last_message_id)
-    || !Array.isArray(value.messages)
+    || !(strict ? isPlainDataArray(value.messages) : Array.isArray(value.messages))
     || !value.messages.every(message => isMessage(message, strict))) {
     return false;
   }
@@ -434,9 +438,9 @@ function isFailure(value, strict) {
 }
 
 function isRemoteFailure(value) {
-  if (!isRecord(value)) return false;
-  const keys = Object.keys(value);
-  if (Reflect.ownKeys(value).length !== keys.length
+  if (!isPlainDataRecord(value)) return false;
+  const keys = Reflect.ownKeys(value);
+  if (keys.some(key => typeof key !== 'string')
     || !keys.every(key => key === 'code' || key === 'retryable' || key === 'message')
     || !Object.hasOwn(value, 'code')
     || !Object.hasOwn(value, 'retryable')
@@ -447,7 +451,7 @@ function isRemoteFailure(value) {
 }
 
 function hasExactOwnKeys(value, keys) {
-  if (!isRecord(value)) return false;
+  if (!isPlainDataRecord(value)) return false;
   const ownKeys = Reflect.ownKeys(value);
   return ownKeys.length === keys.length
     && ownKeys.every(key => typeof key === 'string' && keys.includes(key));
@@ -455,6 +459,42 @@ function hasExactOwnKeys(value, keys) {
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
+}
+
+function isPlainDataRecord(value) {
+  if (!isRecord(value) || Object.getPrototypeOf(value) !== Object.prototype) return false;
+  for (const key of Reflect.ownKeys(value)) {
+    if (typeof key !== 'string') return false;
+    const descriptor = Object.getOwnPropertyDescriptor(value, key);
+    if (!isEnumerableDataDescriptor(descriptor)) return false;
+  }
+  return true;
+}
+
+function isPlainDataArray(value) {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return false;
+  const lengthDescriptor = Object.getOwnPropertyDescriptor(value, 'length');
+  if (!isDataDescriptor(lengthDescriptor) || lengthDescriptor.enumerable !== false
+    || !Number.isSafeInteger(lengthDescriptor.value) || lengthDescriptor.value < 0) {
+    return false;
+  }
+  const ownKeys = Reflect.ownKeys(value);
+  if (ownKeys.length !== lengthDescriptor.value + 1) return false;
+  for (let index = 0; index < lengthDescriptor.value; index += 1) {
+    const key = String(index);
+    if (!ownKeys.includes(key) || !isEnumerableDataDescriptor(Object.getOwnPropertyDescriptor(value, key))) {
+      return false;
+    }
+  }
+  return ownKeys.every(key => key === 'length' || (typeof key === 'string' && /^(0|[1-9][0-9]*)$/.test(key)));
+}
+
+function isEnumerableDataDescriptor(descriptor) {
+  return isDataDescriptor(descriptor) && descriptor.enumerable === true;
+}
+
+function isDataDescriptor(descriptor) {
+  return descriptor !== undefined && Object.hasOwn(descriptor, 'value');
 }
 
 function isPositiveInteger(value) {

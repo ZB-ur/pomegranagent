@@ -548,3 +548,68 @@ test('merge treats malformed local data as missing but rejects malformed strict 
   ];
   for (const remote of invalidRemote) assert.throws(() => mergeRecovery(null, remote), TypeError);
 });
+
+test('merge treats accessor, proxy, and custom-prototype local records as missing without leaking traps', () => {
+  const localGetterError = new Error('local getter trap');
+  const localOwnKeysError = new Error('local ownKeys trap');
+  const localGetError = new Error('local get trap');
+  const localPrototypeError = new Error('local getPrototypeOf trap');
+  const accessor = recordForDraft();
+  Object.defineProperty(accessor, 'version', {
+    enumerable: true,
+    get() { throw localGetterError; },
+  });
+  const nonThrowingAccessor = recordForDraft();
+  Object.defineProperty(nonThrowingAccessor, 'version', {
+    enumerable: true,
+    get() { return 1; },
+  });
+  const customPrototype = Object.assign(Object.create({ inherited: true }), recordForDraft());
+  const cases = [
+    accessor,
+    nonThrowingAccessor,
+    customPrototype,
+    new Proxy(recordForDraft(), { ownKeys() { throw localOwnKeysError; } }),
+    new Proxy(recordForDraft(), { get() { throw localGetError; } }),
+    new Proxy(recordForDraft(), { getPrototypeOf() { throw localPrototypeError; } }),
+  ];
+
+  for (const local of cases) {
+    const merged = outcome(mergeRecovery(local, success(null, null)), 'loading_roster', 'clear');
+    assert.equal(merged.child, null);
+  }
+});
+
+test('merge converts accessor, proxy, and custom-prototype remote unions into TypeError', () => {
+  const remoteGetterError = new Error('remote getter trap');
+  const remoteOwnKeysError = new Error('remote ownKeys trap');
+  const remoteGetError = new Error('remote get trap');
+  const remotePrototypeError = new Error('remote getPrototypeOf trap');
+  const accessor = success(null, null);
+  Object.defineProperty(accessor, 'kind', {
+    enumerable: true,
+    get() { throw remoteGetterError; },
+  });
+  const nonThrowingAccessor = success(null, null);
+  Object.defineProperty(nonThrowingAccessor, 'kind', {
+    enumerable: true,
+    get() { return 'success'; },
+  });
+  const customPrototype = Object.assign(Object.create({ inherited: true }), success(null, null));
+  const cases = [
+    [accessor, remoteGetterError],
+    [nonThrowingAccessor, null],
+    [customPrototype, null],
+    [new Proxy(success(null, null), { ownKeys() { throw remoteOwnKeysError; } }), remoteOwnKeysError],
+    [new Proxy(success(null, null), { get() { throw remoteGetError; } }), remoteGetError],
+    [new Proxy(success(null, null), { getPrototypeOf() { throw remotePrototypeError; } }), remotePrototypeError],
+  ];
+
+  for (const [remote, leaked] of cases) {
+    assert.throws(() => mergeRecovery(null, remote), error => {
+      assert.ok(error instanceof TypeError);
+      assert.notEqual(error, leaked);
+      return true;
+    });
+  }
+});

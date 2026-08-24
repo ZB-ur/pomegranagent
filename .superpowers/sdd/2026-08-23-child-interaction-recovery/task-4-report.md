@@ -42,8 +42,8 @@ Every merge outcome exposes only `{snapshot,storageAction}`, passes `assertSnaps
 ## Final verification to accompany commit
 
 ```text
-node --unhandled-rejections=strict --test tests/frontend/child/session-store.test.mjs  # 23 pass
-node --unhandled-rejections=strict --test tests/frontend/child/*.test.mjs             # 100 pass
+node --unhandled-rejections=strict --test tests/frontend/child/session-store.test.mjs  # 25 pass
+node --unhandled-rejections=strict --test tests/frontend/child/*.test.mjs             # 102 pass
 node --check app/frontend/child/session-store.mjs
 node --check tests/frontend/child/session-store.test.mjs
 git diff --check
@@ -51,3 +51,11 @@ git show --check
 ```
 
 Residual risk: Task 7 must consume the documented `storageAction` before its reducer-legal recovery resolution and catch the intentionally propagated storage exceptions; no composition surface is owned or changed by Task 4.
+
+## Decoder-hardening correction
+
+Independent review found that pre-copy shape reads could invoke an accessor or Proxy trap before the local decoder's catch boundary, and the remote tagged-union normalizer could leak that arbitrary error instead of its required `TypeError`.
+
+- RED: the new focused regression run had `23/25` pass and two expected failures. A local throwing `version` getter leaked `Error: local getter trap`; a remote getter/proxy case failed because it was not a normalized `TypeError`.
+- GREEN: `decodeRecord()` now encloses every local structural read in its malformed-as-null boundary. Strict record and array validators require the normal `Object.prototype`/`Array.prototype` plus own enumerable data descriptors (frozen valid data remains acceptable). Remote tagged-union normalization encloses all structural reads and maps arbitrary trap errors to a fresh `TypeError`.
+- Regression matrix: local and remote root accessor (throwing and nonthrowing), `ownKeys`, `get`, and `getPrototypeOf` Proxy traps, plus custom-prototype objects. Local rows resolve as missing with `clear`; remote rows reject as `TypeError` without leaking the trap object.
