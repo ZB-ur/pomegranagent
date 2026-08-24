@@ -296,6 +296,109 @@ test('suppresses disabled, forged, detached, text, and unknown action targets an
   assert.deepEqual(calls, []);
 });
 
+test('keeps mutated current buttons with prototype action names inert without throwing', () => {
+  const calls = [];
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions({ onStart: () => calls.push('start') }), fake.dom);
+  view.render(snapshotFor('welcome'));
+  const start = byId(fake.root, 'start-button');
+  for (const token of ['toString', 'constructor', '__proto__']) {
+    start.setAttribute('data-child-action', token);
+    assert.doesNotThrow(() => dispatchClick(fake.root, start));
+  }
+  assert.deepEqual(calls, []);
+});
+
+test('rejects action and DOM accessor descriptors before invoking their getters', () => {
+  const fake = createFakeDOM();
+  const actionSeam = actions();
+  let actionGetterCalls = 0;
+  Object.defineProperty(actionSeam, 'onStart', {
+    enumerable: true,
+    get() {
+      actionGetterCalls += 1;
+      throw new Error('action getter must stay unread');
+    },
+  });
+  assert.throws(() => createChildView(fake.root, actionSeam, fake.dom), TypeError);
+  assert.equal(actionGetterCalls, 0);
+
+  const domSeam = { ...fake.dom };
+  let domGetterCalls = 0;
+  Object.defineProperty(domSeam, 'createElement', {
+    enumerable: true,
+    get() {
+      domGetterCalls += 1;
+      return fake.dom.createElement;
+    },
+  });
+  assert.throws(() => createChildView(fake.root, actions(), domSeam), TypeError);
+  assert.equal(domGetterCalls, 0);
+});
+
+test('normalizes own-key and descriptor proxy trap failures to fresh TypeError values', () => {
+  const fake = createFakeDOM();
+  const ownKeysError = new Error('ownKeys trap');
+  const ownKeysProxy = new Proxy(actions(), {
+    ownKeys() {
+      throw ownKeysError;
+    },
+  });
+  let thrown;
+  try {
+    createChildView(fake.root, ownKeysProxy, fake.dom);
+  } catch (error) {
+    thrown = error;
+  }
+  assert.equal(thrown instanceof TypeError, true);
+  assert.notEqual(thrown, ownKeysError);
+
+  const ownKeysTypeError = new TypeError('ownKeys TypeError trap');
+  const ownKeysTypeProxy = new Proxy(actions(), {
+    ownKeys() {
+      throw ownKeysTypeError;
+    },
+  });
+  thrown = undefined;
+  try {
+    createChildView(fake.root, ownKeysTypeProxy, fake.dom);
+  } catch (error) {
+    thrown = error;
+  }
+  assert.equal(thrown instanceof TypeError, true);
+  assert.notEqual(thrown, ownKeysTypeError);
+
+  const descriptorError = new Error('descriptor trap');
+  const descriptorProxy = new Proxy(actions(), {
+    getOwnPropertyDescriptor() {
+      throw descriptorError;
+    },
+  });
+  thrown = undefined;
+  try {
+    createChildView(fake.root, descriptorProxy, fake.dom);
+  } catch (error) {
+    thrown = error;
+  }
+  assert.equal(thrown instanceof TypeError, true);
+  assert.notEqual(thrown, descriptorError);
+
+  const domDescriptorError = new Error('DOM descriptor trap');
+  const domDescriptorProxy = new Proxy(fake.dom, {
+    getOwnPropertyDescriptor() {
+      throw domDescriptorError;
+    },
+  });
+  thrown = undefined;
+  try {
+    createChildView(fake.root, actions(), domDescriptorProxy);
+  } catch (error) {
+    thrown = error;
+  }
+  assert.equal(thrown instanceof TypeError, true);
+  assert.notEqual(thrown, domDescriptorError);
+});
+
 test('renders all twelve states with unique semantic frame, exact status, and focus policy', () => {
   const rows = [
     ['welcome', '准备好后，请按开始', 'start-button'],

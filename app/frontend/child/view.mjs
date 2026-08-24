@@ -38,14 +38,14 @@ const ERROR_COPY = new Map([
   ['ROSTER_CARDINALITY_INVALID', '今天的值日名单需要老师确认'],
 ]);
 const RECOVERY_FALLBACK = '这次对话需要老师检查后再继续';
-const ACTION_TOKEN_TO_KEY = Object.freeze({
+const ACTION_TOKEN_TO_KEY = Object.freeze(Object.assign(Object.create(null), {
   start: 'onStart',
   'select-child': 'onSelectChild',
   'record-toggle': 'onRecordToggle',
   retry: 'onRetry',
   reset: 'onReset',
   'open-teacher-help': 'onOpenTeacherHelp',
-});
+}));
 
 export function createChildView(root, actions, dom) {
   assertRoot(root);
@@ -344,10 +344,11 @@ export function createChildView(root, actions, dom) {
     if (actionElement === null || !currentActionables.has(actionElement)) return;
     if (!contains(root, actionElement) || !isNativeButton(actionElement) || actionElement.disabled === true) return;
     const token = safeGetAttribute(actionElement, 'data-child-action');
+    if (!Object.hasOwn(ACTION_TOKEN_TO_KEY, token)) return;
     const actionKey = ACTION_TOKEN_TO_KEY[token];
-    if (actionKey === undefined) return;
+    if (!Object.hasOwn(actionCallbacks, actionKey)) return;
     const callback = actionCallbacks[actionKey];
-    if (callback === null) return;
+    if (typeof callback !== 'function') return;
     if (token === 'select-child') {
       const childId = canonicalChildId(safeGetAttribute(actionElement, 'data-child-id'));
       if (childId === null) return;
@@ -406,10 +407,10 @@ export function createChildView(root, actions, dom) {
 }
 
 function validateActions(actions) {
-  assertExactOwnKeys(actions, ACTION_KEYS, 'actions');
-  const callbacks = {};
+  const values = exactOwnDataValues(actions, ACTION_KEYS, 'actions');
+  const callbacks = Object.create(null);
   for (const key of ACTION_KEYS) {
-    const value = readProperty(actions, key, 'actions');
+    const value = values[key];
     if (key === 'onOpenTeacherHelp') {
       if (value !== null && typeof value !== 'function') throw new TypeError('onOpenTeacherHelp must be a function or null');
     } else if (typeof value !== 'function') {
@@ -421,10 +422,10 @@ function validateActions(actions) {
 }
 
 function validateDom(dom) {
-  assertExactOwnKeys(dom, DOM_KEYS, 'dom');
-  const api = {};
+  const values = exactOwnDataValues(dom, DOM_KEYS, 'dom');
+  const api = Object.create(null);
   for (const key of DOM_KEYS) {
-    const value = readProperty(dom, key, 'dom');
+    const value = values[key];
     if (typeof value !== 'function') throw new TypeError(`dom.${key} must be a function`);
     api[key] = value;
   }
@@ -471,7 +472,7 @@ function assertTextNode(node) {
   }
 }
 
-function assertExactOwnKeys(value, expectedKeys, name) {
+function exactOwnDataValues(value, expectedKeys, name) {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
     throw new TypeError(`${name} must be an object`);
   }
@@ -479,19 +480,25 @@ function assertExactOwnKeys(value, expectedKeys, name) {
   try {
     keys = Reflect.ownKeys(value);
   } catch (error) {
-    throw asTypeError(error);
+    throw freshTypeError(`${name} own keys could not be read`, error);
   }
   if (keys.length !== expectedKeys.length || keys.some(key => typeof key !== 'string' || !expectedKeys.includes(key))) {
     throw new TypeError(`${name} must have exactly the required keys`);
   }
-}
-
-function readProperty(object, key, name) {
-  try {
-    return object[key];
-  } catch (error) {
-    throw new TypeError(`${name}.${key} could not be read`, { cause: error });
+  const values = Object.create(null);
+  for (const key of expectedKeys) {
+    let descriptor;
+    try {
+      descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+    } catch (error) {
+      throw freshTypeError(`${name}.${key} descriptor could not be read`, error);
+    }
+    if (descriptor === undefined || !Object.hasOwn(descriptor, 'value')) {
+      throw new TypeError(`${name}.${key} must be an own data property`);
+    }
+    values[key] = descriptor.value;
   }
+  return Object.freeze(values);
 }
 
 function hasCallable(object, key) {
@@ -630,4 +637,8 @@ function focusTargetFor(snapshot, controls, helpIsUnavailable) {
 
 function asTypeError(error) {
   return error instanceof TypeError ? error : new TypeError('child view DOM seam failed', { cause: error });
+}
+
+function freshTypeError(message, cause) {
+  return new TypeError(message, { cause });
 }

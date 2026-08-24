@@ -22,6 +22,8 @@
 
 3. After the standalone scoped styles were added, the focused strict matrix passed twice at `13/13`. It covers exact export/return seams, strict root/action/dom validation, one delegated listener and current-render identity fence, all twelve state frames/status/focus targets, empty roster, log/speaker/draft semantics, defensive retry routing, text-only dynamic content, fixed error mapping, null teacher-help boundary, focus epoch/destroy behavior, and static CSS safety requirements.
 
+4. Independent review then found two construction-boundary defects. New RED coverage first proved that mutating a current rendered native button to `data-child-action="toString"`, `"constructor"`, or `"__proto__"` called a prototype value and threw; the token map is now null-prototype, own-key-gated, and callable-gated. It also proved own action/DOM accessors were invoked during construction and proxy `ownKeys`/descriptor trap errors could escape. Construction now reads exact own keys, then validates each own data descriptor before reading its value; accessors are rejected without invocation and all reflection-trap errors are wrapped in fresh `TypeError` values. The first raw-`TypeError` ownKeys RED specifically rejected the original error object, confirming no exception identity leaked.
+
 ## Delivered contract
 
 - `createChildView(root, actions, dom)` imports only `STATES`, `assertSnapshot`, and `controlsFor` from the machine. It reads no browser global and creates no network/storage/speech/timer/HTML-string effect.
@@ -34,9 +36,9 @@
 ## Final verification
 
 ```text
-node --unhandled-rejections=strict --test tests/frontend/child/view.test.mjs  # 13 pass
-node --unhandled-rejections=strict --test tests/frontend/child/view.test.mjs  # 13 pass
-node --unhandled-rejections=strict --test tests/frontend/child/*.test.mjs     # 155 pass
+node --unhandled-rejections=strict --test tests/frontend/child/view.test.mjs  # 16 pass
+node --unhandled-rejections=strict --test tests/frontend/child/view.test.mjs  # 16 pass
+node --unhandled-rejections=strict --test tests/frontend/child/*.test.mjs     # 158 pass
 node --check app/frontend/child/view.mjs
 node --check tests/frontend/child/view.test.mjs
 git diff --check
