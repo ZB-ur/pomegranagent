@@ -87,6 +87,10 @@ function errorEvent(code, retryable) {
   return { type: 'error', error: { code, retryable } };
 }
 
+async function settleMicrotasks() {
+  for (let turn = 0; turn < 6; turn += 1) await Promise.resolve();
+}
+
 test('exports only the controller factory and returns the exact frozen surface', async () => {
   const module = await import('../../../app/frontend/child/speech.mjs');
   assert.deepEqual(Object.keys(module), ['createSpeechController']);
@@ -993,6 +997,20 @@ test('cleanup thenables keep a terminal generation suppressed through synchronou
         });
       },
     },
+    {
+      name: 'resolved direct microtask start',
+      then(resolve) {
+        resolve();
+        queueMicrotask(() => this.controller.start());
+      },
+    },
+    {
+      name: 'rejected direct microtask start',
+      then(_resolve, reject) {
+        reject(new Error('cleanup rejected'));
+        queueMicrotask(() => this.controller.start());
+      },
+    },
   ];
   for (const scenario of cases) {
     const clock = fakeClock();
@@ -1056,4 +1074,224 @@ test('timer dependency then getter failures are current SPEECH_FAILED paths rath
   assert.equal(instances[0].stopCount, 1);
   assert.deepEqual(clearEvents, [errorEvent('SPEECH_FAILED', true)]);
   assert.equal(clear.recognition, null);
+});
+
+test('a raw recognizer returned after constructor disposal is aborted exactly once without setup', () => {
+  const clock = fakeClock();
+  const events = [];
+  const instances = [];
+  let controller;
+  class Recognition {
+    constructor() {
+      instances.push(this);
+      controller.dispose();
+    }
+
+    set lang(value) { this.configuration = [...(this.configuration ?? []), ['lang', value]]; }
+    set interimResults(value) { this.configuration = [...(this.configuration ?? []), ['interimResults', value]]; }
+    set continuous(value) { this.configuration = [...(this.configuration ?? []), ['continuous', value]]; }
+    start() { this.startCount = (this.startCount ?? 0) + 1; }
+    stop() { this.stopCount = (this.stopCount ?? 0) + 1; }
+    abort() { this.abortCount = (this.abortCount ?? 0) + 1; }
+  }
+  controller = createSpeechController({
+    Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+
+  assert.doesNotThrow(() => controller.start());
+  assert.equal(instances.length, 1);
+  assert.equal(instances[0].abortCount, 1);
+  assert.equal(instances[0].stopCount ?? 0, 0);
+  assert.equal(instances[0].startCount ?? 0, 0);
+  assert.deepEqual(instances[0].configuration ?? [], []);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.equal(clock.pending(), 0);
+  assert.deepEqual(events, []);
+  controller.start();
+  assert.equal(instances.length, 1);
+});
+
+test('terminal clearTimer cleanup keeps a hostile old stop getter in the suppression critical section', () => {
+  const events = [];
+  const instances = [];
+  let controller;
+  class Recognition {
+    constructor() { instances.push(this); }
+    start() { this.startCount = (this.startCount ?? 0) + 1; }
+    abort() { this.abortCount = (this.abortCount ?? 0) + 1; }
+    get stop() {
+      this.stopGetterCount = (this.stopGetterCount ?? 0) + 1;
+      controller.start();
+      return () => { this.stopCallCount = (this.stopCallCount ?? 0) + 1; };
+    }
+  }
+  controller = createSpeechController({
+    Recognition,
+    onEvent: event => events.push(event),
+    setTimer: () => 17,
+    clearTimer() { throw new Error('clear failure'); },
+  });
+  controller.start();
+  const old = instances[0];
+  assert.doesNotThrow(() => controller.stop());
+
+  assert.equal(old.stopGetterCount, 1);
+  assert.equal(old.stopCallCount, 1);
+  assert.equal(instances.length, 1);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
+});
+
+test('a rejected recognition-start thenable terminalizes the captured run', async () => {
+  const clock = fakeClock();
+  const events = [];
+  const { Recognition, instances } = recognitionClass({
+    start() { return Promise.reject(new Error('start rejected')); },
+  });
+  const controller = createSpeechController({
+    Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+
+  assert.doesNotThrow(() => controller.start());
+  await settleMicrotasks();
+  assert.equal(instances[0].startCount, 1);
+  assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.equal(clock.pending(), 0);
+});
+
+test('a rejected setTimer thenable terminalizes the initial arm', async () => {
+  const events = [];
+  const { Recognition, instances } = recognitionClass();
+  const controller = createSpeechController({
+    Recognition,
+    onEvent: event => events.push(event),
+    setTimer: () => Promise.reject(new Error('set rejected')),
+    clearTimer: () => {},
+  });
+
+  assert.doesNotThrow(() => controller.start());
+  await settleMicrotasks();
+  assert.equal(instances[0].abortCount, 1);
+  assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+});
+
+test('a rejected clearTimer thenable terminalizes the captured stopping run', async () => {
+  const events = [];
+  const { Recognition, instances } = recognitionClass();
+  const controller = createSpeechController({
+    Recognition,
+    onEvent: event => events.push(event),
+    setTimer: () => 23,
+    clearTimer: () => Promise.reject(new Error('clear rejected')),
+  });
+  controller.start();
+  assert.doesNotThrow(() => controller.stop());
+  await settleMicrotasks();
+
+  assert.equal(instances[0].stopCount, 1);
+  assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+});
+
+test('a rejected recognition-stop thenable terminalizes the captured stopping run', async () => {
+  const clock = fakeClock();
+  const events = [];
+  const { Recognition, instances } = recognitionClass({
+    stop() { return Promise.reject(new Error('stop rejected')); },
+  });
+  const controller = createSpeechController({
+    Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  controller.start();
+  assert.doesNotThrow(() => controller.stop());
+  await settleMicrotasks();
+
+  assert.equal(instances[0].stopCount, 1);
+  assert.equal(instances[0].abortCount, 1);
+  assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.equal(clock.pending(), 0);
+});
+
+test('a rejected recognition-abort thenable falls back to exactly one cleanup stop', async () => {
+  const clock = fakeClock();
+  const events = [];
+  const { Recognition, instances } = recognitionClass({
+    abort() { return Promise.reject(new Error('abort rejected')); },
+  });
+  const controller = createSpeechController({
+    Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  controller.start();
+  assert.doesNotThrow(() => controller.dispose());
+  await settleMicrotasks();
+
+  assert.equal(instances[0].abortCount, 1);
+  assert.equal(instances[0].stopCount, 1);
+  assert.deepEqual(events, []);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.equal(clock.pending(), 0);
+});
+
+test('a never-settling cleanup thenable fences only its consuming microtask', async () => {
+  const clock = fakeClock();
+  const events = [];
+  const { Recognition, instances } = recognitionClass({
+    abort() { return { then() {} }; },
+  });
+  const controller = createSpeechController({
+    Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  controller.start();
+  const old = instances[0];
+  controller.stop('superseded');
+  await Promise.resolve();
+  controller.start();
+
+  assert.equal(old.abortCount, 1);
+  assert.equal(instances.length, 2);
+  assert.equal(controller.recognition, instances[1]);
+  assert.equal(controller.isListening(), true);
+  assert.equal(clock.pending(), 1);
+  assert.deepEqual(events, []);
+});
+
+test('a cleanup then getter trap fences its directly queued reentry before falling back', async () => {
+  const clock = fakeClock();
+  const events = [];
+  const { Recognition, instances } = recognitionClass({
+    abort() {
+      return Object.defineProperty({}, 'then', {
+        get() {
+          queueMicrotask(() => controller.start());
+          throw new Error('then getter trap');
+        },
+      });
+    },
+  });
+  const controller = createSpeechController({
+    Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  controller.start();
+  controller.stop('superseded');
+  await settleMicrotasks();
+
+  assert.equal(instances.length, 1);
+  assert.equal(instances[0].abortCount, 1);
+  assert.equal(instances[0].stopCount, 1);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.equal(clock.pending(), 0);
+  assert.deepEqual(events, []);
+  controller.start();
+  assert.equal(instances.length, 2);
 });

@@ -54,6 +54,7 @@ export function createSpeechController(deps) {
       timer: null,
       timerFailure: false,
       cleanupStarted: false,
+      cleanupFallbackStarted: false,
       stopAttempted: false,
     };
     current = run;
@@ -66,8 +67,11 @@ export function createSpeechController(deps) {
       return;
     }
 
-    if (!isListeningRun(run)) return;
     run.recognition = recognition;
+    if (!isListeningRun(run)) {
+      cleanupWithSuppression(run, false);
+      return;
+    }
     if (!assignRecognition(run, 'onresult', event => handleResult(run, event))) return;
     if (!assignRecognition(run, 'onspeechend', () => handleSpeechEnd(run))) return;
     if (!assignRecognition(run, 'onerror', event => handleError(run, event))) return;
@@ -104,7 +108,11 @@ export function createSpeechController(deps) {
       return false;
     }
     try {
-      consumeThenable(startMethod.call(run.recognition), false);
+      consumeThenable(startMethod.call(run.recognition), {
+        onRejected(error) {
+          if (isCurrent(run)) terminal(run, syncErrorEvent(error), { cleanupRecognition: false });
+        },
+      });
     } catch (error) {
       if (isCurrent(run)) terminal(run, syncErrorEvent(error), { cleanupRecognition: false });
       return false;
@@ -235,7 +243,11 @@ export function createSpeechController(deps) {
     let handle;
     try {
       handle = setTimer(() => timerFired(run, handle), SILENCE_MS);
-      consumeThenable(handle, false);
+      consumeThenable(handle, {
+        onRejected() {
+          if (isCurrent(run)) fail(run, true);
+        },
+      });
     } catch {
       if (run.timer === SCHEDULING) run.timer = null;
       if (isCurrent(run)) fail(run, true);
@@ -257,7 +269,11 @@ export function createSpeechController(deps) {
 
   function clearReturnedHandle(run, handle) {
     try {
-      consumeThenable(clearTimer(handle), false);
+      consumeThenable(clearTimer(handle), {
+        onRejected() {
+          if (isCurrent(run)) fail(run, true);
+        },
+      });
     } catch {
       if (isCurrent(run)) fail(run, true);
     }
@@ -277,6 +293,20 @@ export function createSpeechController(deps) {
   }
 
   function stopRecognition(run, terminalCleanup) {
+    if (terminalCleanup) {
+      const previous = suppressing;
+      suppressing = true;
+      try {
+        stopRecognitionAtBoundary(run, true);
+      } finally {
+        suppressing = previous;
+      }
+      return;
+    }
+    stopRecognitionAtBoundary(run, false);
+  }
+
+  function stopRecognitionAtBoundary(run, terminalCleanup) {
     const recognition = run.recognition;
     let stopMethod;
     try {
@@ -292,7 +322,11 @@ export function createSpeechController(deps) {
     }
     run.stopAttempted = true;
     try {
-      consumeThenable(stopMethod.call(recognition), false);
+      consumeThenable(stopMethod.call(recognition), {
+        onRejected() {
+          handleStopFailure(run, terminalCleanup);
+        },
+      });
     } catch (error) {
       handleStopFailure(run, terminalCleanup);
     }
@@ -311,14 +345,24 @@ export function createSpeechController(deps) {
     run.timer = null;
     if (handle === null || handle === SCHEDULING) return true;
     try {
-      consumeThenable(clearTimer(handle), false);
-      return true;
+      let rejected = false;
+      consumeThenable(clearTimer(handle), {
+        onRejected() {
+          rejected = true;
+          timerFailure(run, reportFailure, cleanupRecognition);
+        },
+      });
+      return !rejected;
     } catch {
-      if (reportFailure && isCurrent(run)) {
-        run.timerFailure = true;
-        fail(run, cleanupRecognition);
-      }
+      timerFailure(run, reportFailure, cleanupRecognition);
       return false;
+    }
+  }
+
+  function timerFailure(run, reportFailure, cleanupRecognition) {
+    if (reportFailure && isCurrent(run)) {
+      run.timerFailure = true;
+      fail(run, cleanupRecognition);
     }
   }
 
@@ -367,41 +411,108 @@ export function createSpeechController(deps) {
 
   function cleanup(run, stopAlreadyAttempted) {
     if (run.cleanupStarted) return;
-    run.cleanupStarted = true;
     const recognition = run.recognition;
+    if (recognition === null) return;
+    run.cleanupStarted = true;
+    let abort;
     try {
-      const abort = recognition.abort;
-      if (typeof abort === 'function') {
-        try {
-          consumeThenable(abort.call(recognition), true);
-          return;
-        } catch {}
-      }
-    } catch {}
-    if (stopAlreadyAttempted) return;
+      abort = recognition.abort;
+    } catch {
+      cleanupFallbackStop(run, stopAlreadyAttempted);
+      return;
+    }
+    if (typeof abort !== 'function') {
+      cleanupFallbackStop(run, stopAlreadyAttempted);
+      return;
+    }
     try {
-      const stop = recognition.stop;
-      if (typeof stop === 'function') consumeThenable(stop.call(recognition), true);
+      consumeThenable(abort.call(recognition), {
+        keepCleanupFence: true,
+        onRejected() {
+          cleanupFallbackStopWithSuppression(run, stopAlreadyAttempted);
+        },
+      });
+    } catch {
+      cleanupFallbackStop(run, stopAlreadyAttempted);
+    }
+  }
+
+  function cleanupFallbackStopWithSuppression(run, stopAlreadyAttempted) {
+    const previous = suppressing;
+    suppressing = true;
+    try {
+      cleanupFallbackStop(run, stopAlreadyAttempted);
+    } finally {
+      suppressing = previous;
+    }
+  }
+
+  function cleanupFallbackStop(run, stopAlreadyAttempted) {
+    if (stopAlreadyAttempted || run.cleanupFallbackStarted) return;
+    run.cleanupFallbackStarted = true;
+    const recognition = run.recognition;
+    let stop;
+    try {
+      stop = recognition.stop;
+    } catch {
+      return;
+    }
+    if (typeof stop !== 'function') return;
+    try {
+      consumeThenable(stop.call(recognition), { keepCleanupFence: true });
     } catch {}
   }
 
-  function consumeThenable(value, keepCleanupBarrier) {
+  function consumeThenable(value, { keepCleanupFence = false, onRejected = () => {} } = {}) {
     if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
-    const then = value.then;
-    if (typeof then !== 'function') return;
+    let fenceOpen = false;
+    let fenceReleaseScheduled = false;
+    const closeFence = () => {
+      if (!fenceOpen) return;
+      fenceOpen = false;
+      cleanupThenables -= 1;
+    };
+    const releaseFenceSoon = () => {
+      if (!fenceOpen || fenceReleaseScheduled) return;
+      fenceReleaseScheduled = true;
+      try {
+        Promise.resolve().then(closeFence).catch(closeFence);
+      } catch {
+        closeFence();
+      }
+    };
+    if (keepCleanupFence) {
+      fenceOpen = true;
+      cleanupThenables += 1;
+    }
+    let then;
+    try {
+      then = value.then;
+    } catch (error) {
+      try {
+        onRejected(error);
+      } catch {}
+      releaseFenceSoon();
+      return;
+    }
+    if (typeof then !== 'function') {
+      releaseFenceSoon();
+      return;
+    }
     let settled = false;
-    if (keepCleanupBarrier) cleanupThenables += 1;
-    const settle = () => {
+    const settle = (rejected, error) => {
       if (settled) return;
       settled = true;
-      if (keepCleanupBarrier) cleanupThenables -= 1;
+      try {
+        if (rejected) onRejected(error);
+      } catch {}
     };
     try {
-      then.call(value, settle, settle);
+      then.call(value, () => settle(false), error => settle(true, error));
     } catch (error) {
-      settle();
-      throw error;
+      settle(true, error);
     }
+    releaseFenceSoon();
   }
 
   return Object.freeze({
