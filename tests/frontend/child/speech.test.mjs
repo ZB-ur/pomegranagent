@@ -1315,6 +1315,17 @@ test('an invalid synchronous timer handle fences hostile clearTimer reentry befo
       },
     },
     {
+      name: 'clearTimer noncallable then getter',
+      clearTimer(controller) {
+        return Object.defineProperty({}, 'then', {
+          get() {
+            queueMicrotask(() => controller.start());
+            return undefined;
+          },
+        });
+      },
+    },
+    {
       name: 'clearTimer then call',
       clearTimer(controller) {
         return {
@@ -1402,6 +1413,38 @@ test('a natural terminal clearTimer fences its directly queued replacement only 
   assert.equal(instances.length, 2);
   assert.equal(controller.recognition, instances[1]);
   assert.equal(controller.isListening(), true);
+});
+
+test('a natural terminal clearTimer fences a noncallable then getter before its queued replacement runs', async () => {
+  const events = [];
+  const instances = [];
+  let controller;
+  class Recognition {
+    constructor() { instances.push(this); }
+    start() { this.startCount = (this.startCount ?? 0) + 1; }
+  }
+  controller = createSpeechController({
+    Recognition,
+    onEvent: event => events.push(event),
+    setTimer: () => 43,
+    clearTimer() {
+      return Object.defineProperty({}, 'then', {
+        get() {
+          queueMicrotask(() => controller.start());
+          return undefined;
+        },
+      });
+    },
+  });
+
+  controller.start();
+  instances[0].onend();
+  await settleMicrotasks();
+
+  assert.equal(instances.length, 1);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.deepEqual(events, [{ type: 'empty' }]);
 });
 
 test('a void terminal clearTimer permits the next synchronous public start', () => {

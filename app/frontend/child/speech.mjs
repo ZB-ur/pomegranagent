@@ -507,17 +507,19 @@ export function createSpeechController(deps) {
       } catch {}
     };
     if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
+    const releaseFenceSoon = keepCleanupFence ? openCleanupFence() : null;
     let then;
     try {
       then = value.then;
     } catch (error) {
-      const releaseFenceSoon = keepCleanupFence ? openCleanupFence() : null;
       reject(error);
       releaseFenceSoon?.();
       return;
     }
-    if (typeof then !== 'function') return;
-    const releaseFenceSoon = keepCleanupFence ? openCleanupFence() : null;
+    if (typeof then !== 'function') {
+      releaseFenceSoon?.();
+      return;
+    }
     let settled = false;
     const settle = (rejected, error) => {
       if (settled) return;
