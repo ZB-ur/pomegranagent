@@ -77,7 +77,7 @@
 ```text
 node --unhandled-rejections=strict --test tests/frontend/child/api.test.mjs
 node --unhandled-rejections=strict --test tests/frontend/child/api.test.mjs
-# 16 passing each run
+# 17 passing each run after the review remediations
 
 node --unhandled-rejections=strict --test tests/frontend/child/*.test.mjs
 # 77 passing after the independent-review remediation
@@ -116,3 +116,30 @@ git diff --check
 - Final evidence: focused strict suite passed twice with 17 tests each; the
   full child Node suite passed 77 tests. Follow-up commit message:
   `fix(child): reject impossible chat and completion responses`.
+
+## Second independent-review remediation
+
+### Commit chain
+
+1. `660122e` — `feat(child): bind flow to reliable API contracts`
+2. `7d7beec` — `fix(child): reject impossible chat and completion responses`
+3. This follow-up — `fix(child): close response boundary semantics`
+
+### RED → GREEN evidence
+
+- RED: extending the existing strict matrices produced 14 passing and 3
+  failing focused tests. The failures were the expected missing rejections for
+  a zero-length roster name, a third-round continuation/`complete` outcome,
+  and `0000-01-01T00:00:00Z`.
+- GREEN: roster identity now requires a string with `length > 0` without
+  trimming, so whitespace-only backend names remain compatible with the
+  machine's frozen normalization contract. With fixed `max_rounds:3`, a
+  response at round three is now accepted if and only if it is
+  `ended:true/end_reason:'max_rounds'`; continuing or `complete` responses are
+  rejected, while lower rounds retain their legal continue and complete paths.
+  UTC timestamps reject years below one and continue to accept backend-form
+  `Z` values, leap days, and both absent and multi-digit fractional seconds.
+- Final evidence: focused strict suite passed twice with 17 tests each; the
+  complete child Node suite passed 77 tests without network or application-DB
+  access. The same injected `INVALID_RESPONSE` path handles each malformed
+  successful response.

@@ -90,6 +90,7 @@ function assertChild(value, duckAPI) {
   assertOrInvalid(duckAPI, 'roster child',
     isPositiveInteger(value.id)
     && typeof value.name === 'string'
+    && value.name.length > 0
     && isNullableString(value.nickname)
     && isNullableString(value.avatar));
 }
@@ -160,6 +161,9 @@ function assertChat(value, input, duckAPI) {
     || (!value.ended && value.end_reason === null));
   assertOrInvalid(duckAPI, 'chat',
     value.end_reason !== 'max_rounds' || value.round === input.max_rounds);
+  assertOrInvalid(duckAPI, 'chat',
+    (value.round === input.max_rounds)
+    === (value.ended === true && value.end_reason === 'max_rounds'));
   return value;
 }
 
@@ -171,7 +175,7 @@ function isValidTimestamp(value) {
   const [year, month, day, hour, minute, second] = [
     yearText, monthText, dayText, hourText, minuteText, secondText,
   ].map(Number);
-  if (hour > 23 || minute > 59 || second > 59) return false;
+  if (year < 1 || hour > 23 || minute > 59 || second > 59) return false;
 
   const parsed = new Date(0);
   parsed.setUTCFullYear(year, month - 1, day);
