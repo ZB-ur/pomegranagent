@@ -259,10 +259,12 @@ test('validates strict chat result semantics, request identity, and established 
     chatResult({ conversation_id: 5 }),
     chatResult({ child_message_id: 11 }),
     chatResult({ round: 0 }),
+    chatResult({ round: 4 }),
     chatResult({ reply: null }),
     chatResult({ ended: true, end_reason: null }),
     chatResult({ ended: false, end_reason: 'complete' }),
     chatResult({ ended: true, end_reason: 'other' }),
+    chatResult({ round: 1, ended: true, end_reason: 'max_rounds' }),
     chatResult({ replayed: 'false' }),
   ];
   for (const value of cases) {
@@ -272,8 +274,8 @@ test('validates strict chat result semantics, request identity, and established 
 });
 
 test('accepts each frozen chat end reason only with ended true', async () => {
-  for (const end_reason of ['complete', 'max_rounds']) {
-    const value = chatResult({ ended: true, end_reason });
+  for (const [end_reason, round] of [['complete', 1], ['max_rounds', 3]]) {
+    const value = chatResult({ ended: true, end_reason, round });
     const { duckAPI, duckAuth } = dependencies({ request: async () => value });
     assert.equal(await childAPI.createChildAPI(duckAPI, duckAuth).chat(chatInput(), new AbortController().signal), value);
   }
@@ -287,6 +289,7 @@ test('validates strict completion fields, submitted boundaries, timestamp, and a
     completeResult({ conversation_saved: false }),
     completeResult({ status: 'active' }),
     completeResult({ completed_at: 'not-a-timestamp' }),
+    completeResult({ completed_at: '2026-02-30T00:00:00Z' }),
     completeResult({ message_count: 0 }),
     completeResult({ last_message_id: 12 }),
     completeResult({ analysis_job_id: 0 }),
@@ -302,6 +305,27 @@ test('validates strict completion fields, submitted boundaries, timestamp, and a
     const value = completeResult({ analysis_status });
     const { duckAPI, duckAuth } = dependencies({ request: async () => value });
     assert.equal(await childAPI.createChildAPI(duckAPI, duckAuth).complete(4, 11, new AbortController().signal), value);
+  }
+});
+
+test('accepts a real UTC RFC3339 leap-day timestamp without normalizing invalid calendar dates', async () => {
+  const valid = completeResult({ completed_at: '2024-02-29T23:59:59.123456Z' });
+  const validDeps = dependencies({ request: async () => valid });
+  assert.equal(
+    await childAPI.createChildAPI(validDeps.duckAPI, validDeps.duckAuth).complete(4, 11, new AbortController().signal),
+    valid,
+  );
+
+  for (const completed_at of [
+    '2026-02-30T00:00:00Z',
+    '2026-13-01T00:00:00Z',
+    '2026-08-23T24:00:00Z',
+    '2026-08-23T00:00:00+00:00',
+  ]) {
+    const deps = dependencies({ request: async () => completeResult({ completed_at }) });
+    await assertInvalidResponse(
+      () => childAPI.createChildAPI(deps.duckAPI, deps.duckAuth).complete(4, 11, new AbortController().signal),
+    );
   }
 });
 

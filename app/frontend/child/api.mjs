@@ -19,6 +19,7 @@ const CHAT_INPUT_FIELDS = ['request_id', 'child_id', 'text', 'conversation_id', 
 const ANALYSIS_STATUSES = new Set(['pending', 'processing', 'succeeded', 'failed']);
 const END_REASONS = new Set(['max_rounds', 'complete']);
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UTC_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/;
 
 function isRecord(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -151,16 +152,36 @@ function assertChat(value, input, duckAPI) {
     && value.child_message_id !== value.diary_message_id
     && typeof value.reply === 'string'
     && isPositiveInteger(value.round)
+    && value.round <= input.max_rounds
     && typeof value.ended === 'boolean'
     && typeof value.replayed === 'boolean');
   assertOrInvalid(duckAPI, 'chat',
     (value.ended && END_REASONS.has(value.end_reason))
     || (!value.ended && value.end_reason === null));
+  assertOrInvalid(duckAPI, 'chat',
+    value.end_reason !== 'max_rounds' || value.round === input.max_rounds);
   return value;
 }
 
 function isValidTimestamp(value) {
-  return typeof value === 'string' && value.length > 0 && Number.isFinite(Date.parse(value));
+  if (typeof value !== 'string') return false;
+  const match = value.match(UTC_TIMESTAMP);
+  if (!match) return false;
+  const [, yearText, monthText, dayText, hourText, minuteText, secondText] = match;
+  const [year, month, day, hour, minute, second] = [
+    yearText, monthText, dayText, hourText, minuteText, secondText,
+  ].map(Number);
+  if (hour > 23 || minute > 59 || second > 59) return false;
+
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(year, month - 1, day);
+  parsed.setUTCHours(hour, minute, second, 0);
+  return parsed.getUTCFullYear() === year
+    && parsed.getUTCMonth() === month - 1
+    && parsed.getUTCDate() === day
+    && parsed.getUTCHours() === hour
+    && parsed.getUTCMinutes() === minute
+    && parsed.getUTCSeconds() === second;
 }
 
 function assertComplete(value, conversationId, expectedLastMessageId, duckAPI) {

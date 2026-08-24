@@ -80,7 +80,7 @@ node --unhandled-rejections=strict --test tests/frontend/child/api.test.mjs
 # 16 passing each run
 
 node --unhandled-rejections=strict --test tests/frontend/child/*.test.mjs
-# 76 passing
+# 77 passing after the independent-review remediation
 
 rg -n 'fetch\(' app/frontend/child
 rg -n 'DuckAPI|DuckAuth' app/frontend/child --glob '!api.mjs'
@@ -96,3 +96,23 @@ git diff --check
 - Message: `feat(child): bind flow to reliable API contracts`
 - Staged paths: `app/frontend/child/api.mjs`,
   `tests/frontend/child/api.test.mjs`, and this report only.
+
+## Independent-review remediation
+
+- The independent review of `660122e` identified two malformed-success gaps:
+  JavaScript `Date.parse()` normalized impossible calendar days (for example,
+  `2026-02-30`), and chat responses could exceed the submitted fixed three
+  rounds or claim `max_rounds` before round three.
+- RED: the added UTC calendar and chat-boundary cases produced 14 passing and
+  3 failing focused tests. The failures were the expected missing rejections
+  for `round:4`, `round:1/end_reason:'max_rounds'`, and date strings accepted
+  only because `Date.parse()` normalizes them.
+- GREEN: completion timestamps now require RFC3339 UTC `Z` form and field-wise
+  real calendar/time equality after UTC construction; fractional seconds and a
+  real leap-day timestamp remain accepted. Chat now rejects a round above the
+  submitted `max_rounds:3`, and only allows `end_reason:'max_rounds'` at round
+  three. All malformed successful values still flow through the injected
+  prototype-normalized `INVALID_RESPONSE` path.
+- Final evidence: focused strict suite passed twice with 17 tests each; the
+  full child Node suite passed 77 tests. Follow-up commit message:
+  `fix(child): reject impossible chat and completion responses`.
