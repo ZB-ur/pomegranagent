@@ -56,7 +56,7 @@ const BOOTSTRAP_DEPENDENCY_KEYS = Object.freeze([
   'AbortController',
 ]);
 const CANCELLED = Symbol('cancelled child effect');
-const ACTIVE_BOOTSTRAP_DEPS = new WeakSet();
+let bootstrapActive = false;
 
 export function createChildApp(deps) {
   const configured = validateAppDependencies(deps);
@@ -170,9 +170,10 @@ export function createChildApp(deps) {
       const operation = consume(() => {
         if (!isCurrentEffect(entry)) return CANCELLED;
         return callExternal(work, null, [entry.signal]);
-      });
+      }, withinBoundary);
       const settled = operation.then(
-        value => {
+        packet => {
+          const value = packet.value;
           if (value === CANCELLED || !isCurrentEffect(entry)) return undefined;
           return onFulfilled(value, entry);
         },
@@ -683,12 +684,19 @@ export function createChildApp(deps) {
     function initialize() {
       if (destroyed) return Promise.resolve(undefined);
       if (initializePromise !== null) return initializePromise;
-      initializePromise = consume(() => callExternal(configured.api.values.ready, configured.api.owner))
+      initializePromise = consume(
+        () => callExternal(configured.api.values.ready, configured.api.owner),
+        withinBoundary,
+      )
         .then(() => {
           if (destroyed) return undefined;
           lifecycle = 'ready';
-          return consume(() => callExternal(configured.store.values.load, configured.store.owner))
-            .then(localRecord => {
+          return consume(
+            () => callExternal(configured.store.values.load, configured.store.owner),
+            withinBoundary,
+          )
+            .then(packet => {
+              const localRecord = packet.value;
               if (destroyed || localRecord === null) return undefined;
               return beginLocalRecovery(localRecord);
             }, () => {
@@ -803,7 +811,12 @@ export function createChildApp(deps) {
 
     function handleGlobalKeydown(event) {
       if (publicNoop()) return false;
-      const keydown = readKeydownEvent(event);
+      let keydown;
+      try {
+        keydown = withinBoundary(() => readKeydownEvent(event));
+      } catch {
+        return false;
+      }
       if (keydown === null || keydown.code !== 'Space' || keydown.repeat === true || keydown.defaultPrevented === true) {
         return false;
       }
@@ -866,75 +879,76 @@ export function createChildApp(deps) {
 }
 
 export async function bootstrapBrowserChildApp(deps) {
-  const configured = validateBootstrapDependencies(deps);
-  if (ACTIVE_BOOTSTRAP_DEPS.has(configured.owner)) return null;
-  ACTIVE_BOOTSTRAP_DEPS.add(configured.owner);
+  if (bootstrapActive) return null;
+  bootstrapActive = true;
   try {
-  let api;
-  let preflight;
-  try {
-    const sourceAPI = await consume(() => configured.values.bootstrapAPI.call(configured.owner));
-    api = validateAPI(sourceAPI);
-    preflight = consume(() => api.values.ready.call(api.owner));
-    await preflight;
-  } catch (error) {
-    reportMaintenance(configured, error);
-    return null;
-  }
-
-  const facade = createPreflightAPIFacade(api, preflight);
-  let store = null;
-  let tts = null;
-  let view = null;
-  let app = null;
-  let forwardingLive = true;
-  try {
-    store = validateStore(configured.values.createStore.call(configured.owner));
-    tts = validateTTS(configured.values.createTTS.call(configured.owner, facade));
-    const actions = Object.freeze({
-      onStart: () => forwardingLive && app !== null ? app.start() : undefined,
-      onSelectChild: childId => forwardingLive && app !== null ? app.selectChild(childId) : undefined,
-      onRecordToggle: () => forwardingLive && app !== null ? app.recordToggle() : undefined,
-      onRetry: () => forwardingLive && app !== null ? app.retry() : undefined,
-      onReset: () => forwardingLive && app !== null ? app.reset() : undefined,
-      onOpenTeacherHelp: null,
-    });
-    view = validateView(configured.values.createView.call(
-      configured.owner,
-      configured.values.root,
-      actions,
-      configured.values.dom,
-    ));
-    app = createChildApp({
-      api: facade,
-      machine: configured.values.machine,
-      store: store.owner,
-      createDraft: configured.values.createDraft,
-      mergeRecovery: configured.values.mergeRecovery,
-      createSpeech: configured.values.createSpeech,
-      tts: tts.owner,
-      view: view.owner,
-      keyboard: configured.values.keyboard,
-      uuid: configured.values.uuid,
-      now: configured.values.now,
-      AbortController: configured.values.AbortController,
-    });
-    await app.initialize();
-    return app;
-  } catch {
-    forwardingLive = false;
-    if (app !== null) {
-      try {
-        app.destroy();
-      } catch {}
-    } else {
-      disposeBinding(view, 'destroy');
-      disposeBinding(tts, 'dispose');
+    const configured = validateBootstrapDependencies(deps);
+    let api;
+    let preflight;
+    try {
+      const sourcePacket = await consume(() => configured.values.bootstrapAPI.call(configured.owner));
+      api = validateAPI(sourcePacket.value);
+      const preflightPacket = consume(() => api.values.ready.call(api.owner));
+      preflight = preflightPacket.then(packet => packet.value);
+      await preflight;
+    } catch (error) {
+      reportMaintenance(configured, error);
+      return null;
     }
-    throw constructionFailure();
-  }
+
+    const facade = createPreflightAPIFacade(api, preflight);
+    let store = null;
+    let tts = null;
+    let view = null;
+    let app = null;
+    let forwardingLive = true;
+    try {
+      store = validateStore(configured.values.createStore.call(configured.owner));
+      tts = validateTTS(configured.values.createTTS.call(configured.owner, facade));
+      const actions = Object.freeze({
+        onStart: () => forwardingLive && app !== null ? app.start() : undefined,
+        onSelectChild: childId => forwardingLive && app !== null ? app.selectChild(childId) : undefined,
+        onRecordToggle: () => forwardingLive && app !== null ? app.recordToggle() : undefined,
+        onRetry: () => forwardingLive && app !== null ? app.retry() : undefined,
+        onReset: () => forwardingLive && app !== null ? app.reset() : undefined,
+        onOpenTeacherHelp: null,
+      });
+      view = validateView(configured.values.createView.call(
+        configured.owner,
+        configured.values.root,
+        actions,
+        configured.values.dom,
+      ));
+      app = createChildApp({
+        api: facade,
+        machine: configured.values.machine,
+        store: store.owner,
+        createDraft: configured.values.createDraft,
+        mergeRecovery: configured.values.mergeRecovery,
+        createSpeech: configured.values.createSpeech,
+        tts: tts.owner,
+        view: view.owner,
+        keyboard: configured.values.keyboard,
+        uuid: configured.values.uuid,
+        now: configured.values.now,
+        AbortController: configured.values.AbortController,
+      });
+      await app.initialize();
+      return app;
+    } catch {
+      forwardingLive = false;
+      if (app !== null) {
+        try {
+          app.destroy();
+        } catch {}
+      } else {
+        disposeBinding(view, 'destroy');
+        disposeBinding(tts, 'dispose');
+      }
+      throw constructionFailure();
+    }
   } finally {
-    ACTIVE_BOOTSTRAP_DEPS.delete(configured.owner);
+    bootstrapActive = false;
   }
 }
 
@@ -1128,15 +1142,84 @@ function constructionFailure() {
   return new TypeError('child app construction failed');
 }
 
-function consume(work) {
-  return Promise.resolve().then(work);
+function consume(work, boundary = invokeDirectly) {
+  return new Promise((resolve, reject) => {
+    Promise.resolve().then(() => {
+      let value;
+      try {
+        value = boundary(work);
+      } catch (error) {
+        reject(error);
+        return;
+      }
+      adoptExternalValue(value, resolve, reject, boundary, new Set());
+    }, reject);
+  });
 }
 
-function absorbThenable(value) {
+function adoptExternalValue(value, resolve, reject, boundary, seen) {
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')) {
+    resolve(valuePacket(value));
+    return;
+  }
+  if (seen.has(value)) {
+    reject(new TypeError('external thenable cycle'));
+    return;
+  }
+  seen.add(value);
+  let then;
   try {
-    if (value !== null && (typeof value === 'object' || typeof value === 'function')) {
-      Promise.resolve(value).catch(() => {});
-    }
+    then = boundary(() => value.then);
+  } catch (error) {
+    reject(error);
+    return;
+  }
+  if (typeof then !== 'function') {
+    resolve(valuePacket(value));
+    return;
+  }
+  let settled = false;
+  let returned;
+  try {
+    returned = boundary(() => then.call(
+      value,
+      next => {
+        if (settled) return;
+        settled = true;
+        adoptExternalValue(next, resolve, reject, boundary, seen);
+      },
+      error => {
+        if (settled) return;
+        settled = true;
+        reject(error);
+      },
+    ));
+  } catch (error) {
+    if (!settled) reject(error);
+    return;
+  }
+  absorbThenable(returned, boundary);
+}
+
+function valuePacket(value) {
+  const packet = Object.create(null);
+  packet.value = value;
+  return Object.freeze(packet);
+}
+
+function invokeDirectly(work) {
+  return work();
+}
+
+function absorbThenable(value, boundary = invokeDirectly) {
+  try {
+    if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return;
+    const then = boundary(() => value.then);
+    if (typeof then !== 'function') return;
+    const returned = boundary(() => then.call(value, () => undefined, () => undefined));
+    if (returned === value || returned === null
+      || (typeof returned !== 'object' && typeof returned !== 'function')) return;
+    Promise.resolve(returned).catch(() => {});
   } catch {}
 }
 

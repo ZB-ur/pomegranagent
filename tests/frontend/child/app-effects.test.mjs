@@ -2562,3 +2562,104 @@ test('roster scan dedupes children and resolves the zero, one, and multiple-acti
     assert.equal(fixture.calls.tts.filter(([kind]) => kind === 'speak').length, 0);
   }
 });
+
+test('rejected key event getters cannot reentrantly start speech before policy rejection', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  const event = {
+    get code() {
+      app.recordToggle();
+      return 'KeyA';
+    },
+    repeat: false,
+    defaultPrevented: false,
+    target: {},
+    preventDefault() { throw new Error('must not prevent rejected key'); },
+  };
+
+  assert.equal(app.handleGlobalKeydown(event), false);
+  assert.equal(fixture.calls.speechStart, 0);
+  assert.equal(app.getSnapshot().value, 'ready');
+});
+
+test('effect then getter and call execute inside the public-action critical section', async () => {
+  const fixture = createFixture();
+  let app = null;
+  let getterCalls = 0;
+  let thenCalls = 0;
+  fixture.deps.api.getTodayRoster = () => Object.defineProperty({}, 'then', {
+    get() {
+      getterCalls += 1;
+      app?.destroy();
+      return resolve => {
+        thenCalls += 1;
+        app?.destroy();
+        resolve([]);
+      };
+    },
+  });
+  app = createChildApp(fixture.deps);
+  await app.initialize();
+
+  await app.start();
+  await flushMicrotasks();
+
+  assert.equal(getterCalls, 1);
+  assert.equal(thenCalls, 1);
+  assert.equal(fixture.calls.speechDispose, 0);
+  assert.equal(fixture.calls.tts.some(([kind]) => kind === 'dispose'), false);
+  assert.equal(fixture.calls.view.some(([kind]) => kind === 'destroy'), false);
+  assert.equal(app.getSnapshot().value, 'selecting_child');
+});
+
+test('cleanup thenable return chains are consumed without leaking a nested rejection', async () => {
+  const fixture = createFixture();
+  const nestedCalls = { speech: 0, tts: 0, view: 0 };
+  const cleanupThenable = key => ({
+    then(resolve) {
+      resolve();
+      return {
+        then(_resolve, reject) {
+          nestedCalls[key] += 1;
+          reject(new Error(`private nested ${key} rejection`));
+        },
+      };
+    },
+  });
+  fixture.speech.dispose = () => cleanupThenable('speech');
+  fixture.deps.tts.dispose = () => cleanupThenable('tts');
+  fixture.deps.view.destroy = () => cleanupThenable('view');
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+
+  app.destroy();
+  await flushMicrotasks();
+
+  assert.deepEqual(nestedCalls, { speech: 1, tts: 1, view: 1 });
+});
+
+test('a bootstrap callback cannot reenter a second factory chain through different dependencies', async () => {
+  const outer = createBootstrapFixture();
+  const inner = createBootstrapFixture();
+  let nested = null;
+  outer.deps.bootstrapAPI = () => {
+    outer.calls.bootstrapAPI += 1;
+    outer.calls.order.push('api');
+    nested = bootstrapBrowserChildApp(inner.deps);
+    return Promise.resolve(outer.child.deps.api);
+  };
+
+  const outerApp = await bootstrapBrowserChildApp(outer.deps);
+  const innerApp = await nested;
+
+  assert.notEqual(outerApp, null);
+  assert.equal(innerApp, null);
+  assert.equal(outer.calls.storeFactory, 1);
+  assert.equal(inner.calls.storeFactory, 0);
+  outerApp.destroy();
+});

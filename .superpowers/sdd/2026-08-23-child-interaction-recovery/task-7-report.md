@@ -62,3 +62,16 @@ All tests use injected API, storage, speech, TTS, controller, and view fakes. No
 - The local Playwright package still lacks the required v1234 CFT and Headless Shell artifacts. Task 7 is Node-only and makes no browser acceptance claim.
 
 Implementation commit: `2cfa437d83b8dd43ca48e1b5075b7161ad13769b` (`feat(child): orchestrate recoverable diary effects`).
+
+## Independent-review remediation — guarded thenables and bootstrap uniqueness
+
+- Review start HEAD: `dd3fd7e` (implementation plus report self-reference). The independent reviewer returned **NO-GO** with no P0 and four P1 production findings.
+- All four findings were first encoded as exact strict REDs; the selected run was `0/4`:
+  1. a rejected `event.code` getter reentered `recordToggle()` before keyboard policy rejection (`speechStart` was `1`, expected `0`);
+  2. a roster result's hostile `then` getter/call ran after the external critical section and successfully destroyed the app;
+  3. cleanup thenables whose `then()` returned a rejecting chain left all nested-consumption counters at `0`;
+  4. `bootstrapAPI()` reentered with a different valid dependency object and created a second live factory chain instead of returning `null`.
+- The correction packetizes external results in a frozen null-prototype envelope, manually adopts thenables, and runs work plus `then` getter/call access through the existing critical boundary. It captures and consumes a `then()` return chain without returning raw hostile values through Promise assimilation. Key-event field reads now use the same boundary.
+- Bootstrap now owns one module-wide composition guard starting before dependency validation and ending in `finally`. It rejects every synchronous reentrant second chain regardless of dependency identity, while allowing a later sequential bootstrap after the first chain has settled.
+- Cleanup helpers preserve exactly-once calls while consuming direct rejections and the captured returned chain. No new state, mutable busy flag, browser global, timer, API method, or storage field was added.
+- GREEN evidence after remediation: selected regressions `4/4`; focused machine/app suite `111/111` twice from final source; full strict child Node suite `241/241`; syntax and diff checks accompany the follow-up commit.
