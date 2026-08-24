@@ -61,4 +61,4 @@ All tests use injected API, storage, speech, TTS, controller, and view fakes. No
 - Task 8 owns teacher PIN/relock and teacher-authorized text recovery; Task 7 intentionally exposes no teacher input or PIN state.
 - The local Playwright package still lacks the required v1234 CFT and Headless Shell artifacts. Task 7 is Node-only and makes no browser acceptance claim.
 
-Implementation commit: pending (self-reference boundary).
+Implementation commit: `2cfa437d83b8dd43ca48e1b5075b7161ad13769b` (`feat(child): orchestrate recoverable diary effects`).
