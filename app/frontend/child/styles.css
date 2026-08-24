@@ -1,0 +1,164 @@
+#child-app .child-view {
+  --child-paper: #fffdf5;
+  --child-ink: #242421;
+  --child-action: #1d5fb0;
+  --child-action-focus: #0b4f9c;
+  --child-yellow: #ffbf24;
+  --child-danger: #9f2d20;
+  box-sizing: border-box;
+  display: grid;
+  gap: 16px;
+  inline-size: min(96vw, 900px);
+  min-block-size: min(92vh, 640px);
+  margin: 2vh auto;
+  padding: clamp(16px, 3vw, 32px);
+  color: var(--child-ink);
+  background: var(--child-paper);
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: clamp(18px, 2.1vw, 26px);
+  line-height: 1.5;
+}
+
+#child-app .child-view *,
+#child-app .child-view *::before,
+#child-app .child-view *::after {
+  box-sizing: border-box;
+}
+
+#child-app .child-view button,
+#child-app .child-view input,
+#child-app .child-view textarea {
+  min-width: 44px;
+  min-height: 44px;
+  color: inherit;
+  font: inherit;
+}
+
+#child-app .child-view button {
+  padding: 10px 18px;
+  border: 3px solid var(--child-action);
+  border-radius: 14px;
+  color: #ffffff;
+  background: var(--child-action);
+  cursor: pointer;
+}
+
+#child-app .child-view button:disabled {
+  border-color: #67717d;
+  color: #38424c;
+  background: #d7dde2;
+  cursor: not-allowed;
+}
+
+#child-app .child-view :focus-visible {
+  outline: 4px solid var(--child-action-focus);
+  outline-offset: 4px;
+}
+
+#child-app .child-view h1,
+#child-app .child-view h2,
+#child-app .child-view p {
+  margin: 0;
+}
+
+#child-app .child-view ul {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+#child-app .child-view .child-card {
+  min-block-size: 88px;
+  color: var(--child-ink);
+  border-color: #7a4700;
+  background: var(--child-yellow);
+  font-weight: 700;
+}
+
+#child-app .child-view #record-button {
+  inline-size: clamp(160px, 26vw, 200px);
+  block-size: clamp(160px, 26vw, 200px);
+  justify-self: center;
+  border: 8px solid #7a4700;
+  border-radius: 50%;
+  color: var(--child-ink);
+  background: var(--child-yellow);
+  font-weight: 700;
+}
+
+#child-app .child-view [role="log"] {
+  display: grid;
+  gap: 12px;
+  max-block-size: min(32vh, 300px);
+  padding: 4px;
+  overflow: auto;
+}
+
+#child-app .child-view .child-message {
+  max-inline-size: 78%;
+  padding: 12px 16px;
+  border: 2px solid var(--child-yellow);
+  border-radius: 16px;
+  background: #ffffff;
+}
+
+#child-app .child-view .child-message--child {
+  justify-self: end;
+  border-color: var(--child-action);
+  color: #ffffff;
+  background: var(--child-action);
+}
+
+#child-app .child-view .child-message__speaker {
+  font-size: 0.8em;
+  font-weight: 700;
+}
+
+#child-app .child-view #pending-draft,
+#child-app .child-view .child-view__error,
+#child-app .child-view #roster-empty,
+#child-app .child-view #teacher-help-unavailable-note {
+  padding: 12px 16px;
+  border-inline-start: 6px solid var(--child-danger);
+  background: #fff4f2;
+}
+
+#child-app .child-view #teacher-help-button,
+#child-app .child-view #reset-button {
+  justify-self: start;
+}
+
+#child-app .child-view #teacher-help-unavailable-note {
+  color: #5b352f;
+}
+
+@media (max-width: 1024px) {
+  #child-app .child-view {
+    gap: 12px;
+    min-block-size: 0;
+  }
+
+  #child-app .child-view [role="log"] {
+    max-block-size: 26vh;
+  }
+}
+
+@media (min-width: 1280px) {
+  #child-app .child-view {
+    font-size: 24px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #child-app .child-view,
+  #child-app .child-view *,
+  #child-app .child-view *::before,
+  #child-app .child-view *::after {
+    animation: none !important;
+    scroll-behavior: auto;
+    transition: none !important;
+  }
+}
