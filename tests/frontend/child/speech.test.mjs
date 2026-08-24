@@ -786,7 +786,7 @@ test('manual and silence stop failures abort best-effort and abort failure falls
   });
   controller.start();
   controller.stop();
-  assert.deepEqual(calls, ['stop', 'abort', 'stop']);
+  assert.deepEqual(calls, ['stop', 'abort']);
   assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
   assert.equal(controller.recognition, null);
   assert.equal(clock.pending(), 0);
@@ -810,4 +810,250 @@ test('manual and silence stop failures abort best-effort and abort failure falls
   assert.deepEqual(cleanupEvents, [errorEvent('SPEECH_FAILED', true)]);
   assert.equal(cleanupController.recognition, null);
   assert.equal(cleanupClock.pending(), 0);
+});
+
+test('constructor and every recognition configuration setter stop invalidated generations before later setup', () => {
+  const properties = ['lang', 'interimResults', 'continuous'];
+
+  function makeScenario(trigger) {
+    const clock = fakeClock();
+    const events = [];
+    const instances = [];
+    let controller;
+    class Recognition {
+      constructor() {
+        instances.push(this);
+        if (trigger === 'constructor-dispose') controller.dispose();
+      }
+
+      set lang(value) {
+        this.writes = [...(this.writes ?? []), ['lang', value]];
+        if (trigger === 'lang-dispose') controller.dispose();
+        if (trigger === 'lang-replace' && instances[0] === this) replace();
+      }
+
+      set interimResults(value) {
+        this.writes = [...(this.writes ?? []), ['interimResults', value]];
+        if (trigger === 'interimResults-dispose') controller.dispose();
+        if (trigger === 'interimResults-replace' && instances[0] === this) replace();
+      }
+
+      set continuous(value) {
+        this.writes = [...(this.writes ?? []), ['continuous', value]];
+        if (trigger === 'continuous-dispose') controller.dispose();
+        if (trigger === 'continuous-replace' && instances[0] === this) replace();
+      }
+
+      start() { this.startCount = (this.startCount ?? 0) + 1; }
+      stop() { this.stopCount = (this.stopCount ?? 0) + 1; }
+      abort() { this.abortCount = (this.abortCount ?? 0) + 1; }
+    }
+    const replace = () => {
+      controller.stop();
+      controller.start();
+    };
+    controller = createSpeechController({
+      Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    });
+    return { clock, controller, events, instances };
+  }
+
+  const constructed = makeScenario('constructor-dispose');
+  constructed.controller.start();
+  assert.equal(constructed.instances.length, 1);
+  assert.deepEqual(constructed.instances[0].writes ?? [], []);
+  assert.equal(constructed.instances[0].startCount ?? 0, 0);
+  assert.equal(constructed.controller.recognition, null);
+  assert.equal(constructed.clock.pending(), 0);
+  assert.deepEqual(constructed.events, []);
+
+  for (const property of properties) {
+    const disposed = makeScenario(`${property}-dispose`);
+    disposed.controller.start();
+    assert.deepEqual(disposed.instances[0].writes.map(([key]) => key), properties.slice(0, properties.indexOf(property) + 1), property);
+    assert.equal(disposed.instances[0].startCount ?? 0, 0, property);
+    assert.equal(disposed.controller.recognition, null, property);
+    assert.equal(disposed.clock.pending(), 0, property);
+    assert.deepEqual(disposed.events, [], property);
+
+    const replaced = makeScenario(`${property}-replace`);
+    replaced.controller.start();
+    assert.equal(replaced.instances.length, 2, property);
+    assert.deepEqual(replaced.instances[0].writes.map(([key]) => key), properties.slice(0, properties.indexOf(property) + 1), property);
+    assert.equal(replaced.instances[0].startCount ?? 0, 0, property);
+    assert.equal(replaced.controller.recognition, replaced.instances[1], property);
+    assert.equal(replaced.instances[1].startCount, 1, property);
+    assert.equal(replaced.clock.pending(), 1, property);
+    assert.deepEqual(replaced.events, [], property);
+  }
+});
+
+test('a hostile stop getter may replace the run but is read once and never invokes the old stop', () => {
+  const clock = fakeClock();
+  const events = [];
+  const instances = [];
+  let controller;
+  class Recognition {
+    constructor() { instances.push(this); }
+    start() { this.startCount = (this.startCount ?? 0) + 1; }
+    abort() { this.abortCount = (this.abortCount ?? 0) + 1; }
+    get stop() {
+      this.stopGetterCount = (this.stopGetterCount ?? 0) + 1;
+      controller.start();
+      return () => { this.stopCallCount = (this.stopCallCount ?? 0) + 1; };
+    }
+  }
+  controller = createSpeechController({
+    Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  controller.start();
+  const old = instances[0];
+  controller.stop();
+
+  assert.equal(old.stopGetterCount, 1);
+  assert.equal(old.stopCallCount ?? 0, 0);
+  assert.equal(old.abortCount, 1);
+  assert.equal(instances.length, 2);
+  assert.equal(controller.recognition, instances[1]);
+  assert.equal(instances[1].startCount, 1);
+  assert.equal(clock.pending(), 1);
+  assert.deepEqual(events, []);
+});
+
+test('then getter failures in abort and stop execute cleanup fallback or one terminal failure', () => {
+  const thenTrap = () => Object.defineProperty({}, 'then', {
+    get() { throw new Error('then trap'); },
+  });
+
+  const disposeClock = fakeClock();
+  const disposeEvents = [];
+  const { Recognition: DisposeRecognition, instances: disposeInstances } = recognitionClass({
+    abort() { return thenTrap(); },
+    stop() { this.fallbackStopCount = (this.fallbackStopCount ?? 0) + 1; },
+  });
+  const disposeController = createSpeechController({
+    Recognition: DisposeRecognition,
+    onEvent: event => disposeEvents.push(event),
+    setTimer: disposeClock.setTimer,
+    clearTimer: disposeClock.clearTimer,
+  });
+  disposeController.start();
+  disposeController.dispose();
+  assert.equal(disposeInstances[0].abortCount, 1);
+  assert.equal(disposeInstances[0].fallbackStopCount, 1);
+  assert.deepEqual(disposeEvents, []);
+  assert.equal(disposeController.recognition, null);
+  assert.equal(disposeClock.pending(), 0);
+
+  const stopClock = fakeClock();
+  const stopEvents = [];
+  const { Recognition: StopRecognition, instances: stopInstances } = recognitionClass({
+    abort() { this.abortCleanupCount = (this.abortCleanupCount ?? 0) + 1; },
+    stop() { return thenTrap(); },
+  });
+  const stopController = createSpeechController({
+    Recognition: StopRecognition,
+    onEvent: event => stopEvents.push(event),
+    setTimer: stopClock.setTimer,
+    clearTimer: stopClock.clearTimer,
+  });
+  stopController.start();
+  stopController.stop();
+  assert.equal(stopInstances[0].stopCount, 1);
+  assert.equal(stopInstances[0].abortCleanupCount, 1);
+  assert.deepEqual(stopEvents, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(stopController.recognition, null);
+  assert.equal(stopClock.pending(), 0);
+});
+
+test('cleanup thenables keep a terminal generation suppressed through synchronous and asynchronous reentry', async () => {
+  const cases = [
+    {
+      name: 'synchronous start',
+      then(resolve) {
+        this.controller.start();
+        resolve();
+      },
+    },
+    {
+      name: 'asynchronous start',
+      then(resolve) {
+        queueMicrotask(() => {
+          this.controller.start();
+          resolve();
+        });
+      },
+    },
+    {
+      name: 'asynchronous dispose',
+      then(resolve) {
+        queueMicrotask(() => {
+          this.controller.dispose();
+          resolve();
+        });
+      },
+    },
+  ];
+  for (const scenario of cases) {
+    const clock = fakeClock();
+    const events = [];
+    const instances = [];
+    let controller;
+    class Recognition {
+      constructor() { instances.push(this); }
+      start() { this.startCount = (this.startCount ?? 0) + 1; }
+      stop() { throw new Error('stop failure'); }
+      abort() {
+        const thenable = { controller };
+        thenable.then = scenario.then;
+        return thenable;
+      }
+    }
+    controller = createSpeechController({
+      Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    });
+    controller.start();
+    controller.stop();
+    for (let tick = 0; tick < 6; tick += 1) await Promise.resolve();
+
+    assert.equal(instances.length, 1, scenario.name);
+    assert.equal(instances[0].startCount, 1, scenario.name);
+    assert.equal(controller.recognition, null, scenario.name);
+    assert.equal(controller.isListening(), false, scenario.name);
+    assert.equal(clock.pending(), 0, scenario.name);
+    assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)], scenario.name);
+  }
+});
+
+test('timer dependency then getter failures are current SPEECH_FAILED paths rather than swallowed values', () => {
+  const thenTrap = () => Object.defineProperty({}, 'then', {
+    get() { throw new Error('timer then trap'); },
+  });
+
+  const initialEvents = [];
+  const { Recognition: InitialRecognition } = recognitionClass();
+  const initial = createSpeechController({
+    Recognition: InitialRecognition,
+    onEvent: event => initialEvents.push(event),
+    setTimer: () => thenTrap(),
+    clearTimer: () => {},
+  });
+  assert.doesNotThrow(() => initial.start());
+  assert.deepEqual(initialEvents, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(initial.recognition, null);
+
+  const clock = fakeClock();
+  const clearEvents = [];
+  const { Recognition: ClearRecognition, instances } = recognitionClass();
+  const clear = createSpeechController({
+    Recognition: ClearRecognition,
+    onEvent: event => clearEvents.push(event),
+    setTimer: clock.setTimer,
+    clearTimer: () => thenTrap(),
+  });
+  clear.start();
+  assert.doesNotThrow(() => clear.stop());
+  assert.equal(instances[0].stopCount, 1);
+  assert.deepEqual(clearEvents, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(clear.recognition, null);
 });

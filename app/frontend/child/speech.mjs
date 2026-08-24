@@ -16,6 +16,7 @@ export function createSpeechController(deps) {
   let disposed = false;
   let nextGeneration = 0;
   let suppressing = false;
+  let cleanupThenables = 0;
 
   function isCurrent(run) {
     return current === run && run.phase !== 'terminal' && run.generation === current.generation;
@@ -32,7 +33,7 @@ export function createSpeechController(deps) {
   }
 
   function start() {
-    if (disposed || suppressing) return;
+    if (disposed || suppressing || cleanupThenables !== 0) return;
     if (Recognition === null || Recognition === undefined) {
       emit(errorEvent('SPEECH_UNSUPPORTED', false));
       return;
@@ -52,33 +53,63 @@ export function createSpeechController(deps) {
       recognition: null,
       timer: null,
       timerFailure: false,
+      cleanupStarted: false,
+      stopAttempted: false,
     };
+    current = run;
 
     let recognition;
     try {
       recognition = new Recognition();
     } catch (error) {
-      emit(syncErrorEvent(error));
-      return;
-    }
-
-    run.recognition = recognition;
-    current = run;
-    try {
-      recognition.onresult = event => handleResult(run, event);
-      recognition.onspeechend = () => handleSpeechEnd(run);
-      recognition.onerror = event => handleError(run, event);
-      recognition.onend = () => handleEnd(run);
-      recognition.lang = 'zh-CN';
-      recognition.interimResults = true;
-      recognition.continuous = true;
-      recognition.start();
-    } catch (error) {
       if (isCurrent(run)) terminal(run, syncErrorEvent(error), { cleanupRecognition: false });
       return;
     }
 
-    arm(run);
+    if (!isListeningRun(run)) return;
+    run.recognition = recognition;
+    if (!assignRecognition(run, 'onresult', event => handleResult(run, event))) return;
+    if (!assignRecognition(run, 'onspeechend', () => handleSpeechEnd(run))) return;
+    if (!assignRecognition(run, 'onerror', event => handleError(run, event))) return;
+    if (!assignRecognition(run, 'onend', () => handleEnd(run))) return;
+    if (!assignRecognition(run, 'lang', 'zh-CN')) return;
+    if (!assignRecognition(run, 'interimResults', true)) return;
+    if (!assignRecognition(run, 'continuous', true)) return;
+    if (!startRecognition(run)) return;
+    if (isListeningRun(run)) arm(run);
+  }
+
+  function assignRecognition(run, property, value) {
+    if (!isListeningRun(run)) return false;
+    try {
+      run.recognition[property] = value;
+    } catch (error) {
+      if (isCurrent(run)) terminal(run, syncErrorEvent(error), { cleanupRecognition: false });
+      return false;
+    }
+    return isListeningRun(run);
+  }
+
+  function startRecognition(run) {
+    let startMethod;
+    try {
+      startMethod = run.recognition.start;
+    } catch (error) {
+      if (isCurrent(run)) terminal(run, syncErrorEvent(error), { cleanupRecognition: false });
+      return false;
+    }
+    if (!isListeningRun(run)) return false;
+    if (typeof startMethod !== 'function') {
+      terminal(run, errorEvent('SPEECH_FAILED', true), { cleanupRecognition: false });
+      return false;
+    }
+    try {
+      consumeThenable(startMethod.call(run.recognition), false);
+    } catch (error) {
+      if (isCurrent(run)) terminal(run, syncErrorEvent(error), { cleanupRecognition: false });
+      return false;
+    }
+    return isListeningRun(run);
   }
 
   function stop(reason = 'manual') {
@@ -204,7 +235,7 @@ export function createSpeechController(deps) {
     let handle;
     try {
       handle = setTimer(() => timerFired(run, handle), SILENCE_MS);
-      absorbThenable(handle);
+      consumeThenable(handle, false);
     } catch {
       if (run.timer === SCHEDULING) run.timer = null;
       if (isCurrent(run)) fail(run, true);
@@ -226,7 +257,7 @@ export function createSpeechController(deps) {
 
   function clearReturnedHandle(run, handle) {
     try {
-      absorbThenable(clearTimer(handle));
+      consumeThenable(clearTimer(handle), false);
     } catch {
       if (isCurrent(run)) fail(run, true);
     }
@@ -237,29 +268,41 @@ export function createSpeechController(deps) {
     run.phase = 'stopping';
     const released = releaseTimer(run, true, false);
     if (!released && run.timerFailure) {
-      stopRecognition(run);
+      stopRecognition(run, true);
       return;
     }
     if (!isCurrent(run) || run.phase !== 'stopping') return;
 
-    stopRecognition(run);
+    stopRecognition(run, false);
   }
 
-  function stopRecognition(run) {
+  function stopRecognition(run, terminalCleanup) {
+    const recognition = run.recognition;
+    let stopMethod;
     try {
-      if (typeof run.recognition.stop !== 'function') throw new TypeError('recognition stop is unavailable');
-      absorbThenable(run.recognition.stop());
-    } catch {
-      if (isCurrent(run)) {
-        fail(run, true);
-      } else if (run.timerFailure) {
-        suppressing = true;
-        try {
-          cleanup(run);
-        } finally {
-          suppressing = false;
-        }
-      }
+      stopMethod = recognition.stop;
+    } catch (error) {
+      handleStopFailure(run, terminalCleanup);
+      return;
+    }
+    if (!terminalCleanup && (!isCurrent(run) || run.phase !== 'stopping')) return;
+    if (typeof stopMethod !== 'function') {
+      handleStopFailure(run, terminalCleanup);
+      return;
+    }
+    run.stopAttempted = true;
+    try {
+      consumeThenable(stopMethod.call(recognition), false);
+    } catch (error) {
+      handleStopFailure(run, terminalCleanup);
+    }
+  }
+
+  function handleStopFailure(run, terminalCleanup) {
+    if (isCurrent(run)) {
+      fail(run, true, run.stopAttempted);
+    } else if (terminalCleanup && run.timerFailure) {
+      cleanupWithSuppression(run, run.stopAttempted);
     }
   }
 
@@ -268,7 +311,7 @@ export function createSpeechController(deps) {
     run.timer = null;
     if (handle === null || handle === SCHEDULING) return true;
     try {
-      absorbThenable(clearTimer(handle));
+      consumeThenable(clearTimer(handle), false);
       return true;
     } catch {
       if (reportFailure && isCurrent(run)) {
@@ -279,22 +322,21 @@ export function createSpeechController(deps) {
     }
   }
 
-  function fail(run, cleanupRecognition) {
-    terminal(run, errorEvent('SPEECH_FAILED', true), { cleanupRecognition });
+  function fail(run, cleanupRecognition, stopAlreadyAttempted = false) {
+    terminal(run, errorEvent('SPEECH_FAILED', true), { cleanupRecognition, stopAlreadyAttempted });
   }
 
-  function terminal(run, event, { cleanupRecognition }) {
+  function terminal(run, event, { cleanupRecognition, stopAlreadyAttempted = false }) {
     if (!isCurrent(run)) return;
     run.phase = 'terminal';
     if (current === run) current = null;
-    releaseTimer(run, false, false);
-    if (cleanupRecognition) {
-      suppressing = true;
-      try {
-        cleanup(run);
-      } finally {
-        suppressing = false;
-      }
+    const previous = suppressing;
+    suppressing = true;
+    try {
+      releaseTimer(run, false, false);
+      if (cleanupRecognition) cleanup(run, stopAlreadyAttempted);
+    } finally {
+      suppressing = previous;
     }
     emit(event);
   }
@@ -303,30 +345,63 @@ export function createSpeechController(deps) {
     if (!isCurrent(run)) return;
     run.phase = 'terminal';
     if (current === run) current = null;
+    const previous = suppressing;
     suppressing = true;
     try {
       releaseTimer(run, false, false);
-      cleanup(run);
+      cleanup(run, false);
     } finally {
-      suppressing = false;
+      suppressing = previous;
     }
   }
 
-  function cleanup(run) {
+  function cleanupWithSuppression(run, stopAlreadyAttempted) {
+    const previous = suppressing;
+    suppressing = true;
+    try {
+      cleanup(run, stopAlreadyAttempted);
+    } finally {
+      suppressing = previous;
+    }
+  }
+
+  function cleanup(run, stopAlreadyAttempted) {
+    if (run.cleanupStarted) return;
+    run.cleanupStarted = true;
     const recognition = run.recognition;
     try {
       const abort = recognition.abort;
       if (typeof abort === 'function') {
         try {
-          absorbThenable(abort.call(recognition));
+          consumeThenable(abort.call(recognition), true);
           return;
         } catch {}
       }
     } catch {}
+    if (stopAlreadyAttempted) return;
     try {
       const stop = recognition.stop;
-      if (typeof stop === 'function') absorbThenable(stop.call(recognition));
+      if (typeof stop === 'function') consumeThenable(stop.call(recognition), true);
     } catch {}
+  }
+
+  function consumeThenable(value, keepCleanupBarrier) {
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
+    const then = value.then;
+    if (typeof then !== 'function') return;
+    let settled = false;
+    if (keepCleanupBarrier) cleanupThenables += 1;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      if (keepCleanupBarrier) cleanupThenables -= 1;
+    };
+    try {
+      then.call(value, settle, settle);
+    } catch (error) {
+      settle();
+      throw error;
+    }
   }
 
   return Object.freeze({
@@ -342,10 +417,4 @@ export function createSpeechController(deps) {
 
 function errorEvent(code, retryable) {
   return { type: 'error', error: { code, retryable } };
-}
-
-function absorbThenable(value) {
-  try {
-    if (value && typeof value.then === 'function') Promise.resolve(value).catch(() => {});
-  } catch {}
 }
