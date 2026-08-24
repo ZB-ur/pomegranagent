@@ -32,6 +32,16 @@ SHELL_HEADER = re.compile(
     r"\(playwright chromium-headless-shell v(?P<revision>\d+)\)$"
 )
 INSTALL_LOCATION = re.compile(r"^\s+Install location:\s+(?P<path>.+?)\s*$")
+FAIL_CLOSED_BUSINESS_PATTERNS = (
+    "**/api/roster/today",
+    "**/api/children/*/active-conversation",
+    "**/api/chat",
+    "**/api/conversations/*/complete",
+    "**/api/tts*",
+)
+FAIL_CLOSED_BUSINESS_BODY = (
+    '{"error":{"code":"UNEXPECTED_BROWSER_REQUEST","message":"fixture route required"}}'
+)
 
 
 class BrowserTarget(NamedTuple):
@@ -103,7 +113,10 @@ def require_gate_one(*, runner=subprocess.run) -> BrowserGate:
         capture_output=True,
         text=True,
     )
-    gate = parse_chromium_dry_run(completed.stdout)
+    complete_output = "\n".join(
+        part for part in (completed.stdout, completed.stderr) if isinstance(part, str) and part
+    )
+    gate = parse_chromium_dry_run(complete_output)
     failures = []
     for label, target, expected_name in (
         ("Chrome for Testing", gate.cft, "chromium-1234"),
@@ -173,6 +186,19 @@ def make_context_route_policy(*, port: int, egress_tripwire: Path):
     return context_policy
 
 
+def install_fail_closed_business_routes(page, *, port: int) -> None:
+    def fail_closed(route):
+        assert is_exact_fixture_url(route.request.url, port)
+        route.fulfill(
+            status=503,
+            content_type="application/json",
+            body=FAIL_CLOSED_BUSINESS_BODY,
+        )
+
+    for pattern in FAIL_CLOSED_BUSINESS_PATTERNS:
+        page.route(pattern, fail_closed)
+
+
 def _load_child_server_module():
     spec = importlib.util.spec_from_file_location("task6b_child_server_fixture", CHILD_SERVER_SCRIPT)
     assert spec is not None and spec.loader is not None
@@ -184,6 +210,11 @@ def _load_child_server_module():
 @pytest.fixture
 def chromium_gate_parser():
     return parse_chromium_dry_run
+
+
+@pytest.fixture
+def gate_one_validator():
+    return require_gate_one
 
 
 @pytest.fixture
@@ -199,6 +230,11 @@ def exact_fixture_url():
 @pytest.fixture
 def context_route_policy():
     return make_context_route_policy
+
+
+@pytest.fixture
+def business_route_installer():
+    return install_fail_closed_business_routes
 
 
 @pytest.fixture(scope="session")
@@ -332,6 +368,7 @@ def child_page(chromium_browser, child_server):
         make_context_route_policy(port=child_server.port, egress_tripwire=egress_tripwire),
     )
     page = context.new_page()
+    install_fail_closed_business_routes(page, port=child_server.port)
     page.add_init_script(
         """
         sessionStorage.clear();

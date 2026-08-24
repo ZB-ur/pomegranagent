@@ -5,6 +5,7 @@ from pathlib import Path
 import re
 import sqlite3
 import subprocess
+from types import SimpleNamespace
 
 import pytest
 
@@ -205,7 +206,7 @@ def test_browser_entry_has_no_bare_api_globals():
     assert "innerHTML" not in source
 
 
-def test_chromium_gate_requires_cft_v1234(chromium_gate_parser, tmp_path):
+def test_chromium_gate_requires_cft_v1234(chromium_gate_parser, gate_one_validator, tmp_path):
     cft = tmp_path / "chromium-1234"
     shell = tmp_path / "chromium_headless_shell-1234"
     cft.mkdir()
@@ -216,6 +217,13 @@ def test_chromium_gate_requires_cft_v1234(chromium_gate_parser, tmp_path):
     assert parsed.cft.install_dir == cft
     assert parsed.cft.install_dir.is_dir()
     assert parsed.cft.install_dir != Path("/ignore/ffmpeg-1011")
+    stderr_only = SimpleNamespace(
+        stdout="",
+        stderr=SYNTHETIC_DRY_RUN.format(cft=cft, shell=shell),
+    )
+    combined = gate_one_validator(runner=lambda *_args, **_kwargs: stderr_only)
+    assert combined.cft.install_dir == cft
+    assert combined.shell.install_dir == shell
 
 
 def test_chromium_gate_requires_headless_shell_v1234(chromium_gate_parser, tmp_path):
@@ -517,6 +525,44 @@ def test_loopback_server_uses_disposable_resources(child_server):
     assert Path(child_server.environment["BROWSER_LOG_DIR"]).is_relative_to(child_server.runtime_dir)
     assert Path(child_server.environment["BROWSER_TTS_CACHE_DIR"]).is_relative_to(child_server.runtime_dir)
     assert child_server.process.poll() is None
+
+
+def test_child_page_registers_fail_closed_business_routes_before_navigation(
+    business_route_installer,
+):
+    routes = []
+
+    class Page:
+        def route(self, pattern, handler):
+            routes.append((pattern, handler))
+
+    page = Page()
+    business_route_installer(page, port=43123)
+    assert [pattern for pattern, _handler in routes] == [
+        "**/api/roster/today",
+        "**/api/children/*/active-conversation",
+        "**/api/chat",
+        "**/api/conversations/*/complete",
+        "**/api/tts*",
+    ]
+    for pattern, handler in routes:
+        outcomes = []
+
+        class Request:
+            url = "http://127.0.0.1:43123/api/chat"
+
+        class Route:
+            request = Request()
+
+            def fulfill(self, **kwargs):
+                outcomes.append(kwargs)
+
+        handler(Route())
+        assert outcomes == [{
+            "status": 503,
+            "content_type": "application/json",
+            "body": '{"error":{"code":"UNEXPECTED_BROWSER_REQUEST","message":"fixture route required"}}',
+        }], pattern
 
 
 def test_page_specific_routes_cannot_widen_loopback_policy(child_page):

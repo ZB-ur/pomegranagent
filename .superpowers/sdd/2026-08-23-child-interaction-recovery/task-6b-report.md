@@ -25,7 +25,7 @@
 | Maintenance | Foundation `#runtime-maintenance` is never replaced by the child fallback. The child fallback builds fixed text nodes only and never renders an arbitrary error value. |
 | Keyboard policy | Interactive/contenteditable targets and active modal dialogs are rejected before Task 7 global Space handling. The forwarder passes the original event and contains no direct action or `preventDefault`. |
 | Browser revision gate | Playwright package, two independent whole-output target scans, exact product/revision/install directories, launched browser version, and probe UA are separate fail-closed gates. There is no top-level Playwright import. |
-| Server isolation | The launcher inserts the repository root before app imports; disables dotenv first; rejects provider/proxy names before and after main import; redirects every import-time FileHandler; installs lowest-level LLM, Edge-TTS, and socket tripwires; uses a non-starting worker; and binds uvicorn only to `127.0.0.1`. |
+| Server isolation | The launcher inserts the repository root before app imports; disables dotenv first; rejects provider/proxy names before and after main import; redirects every import-time FileHandler; installs lowest-level LLM, Edge-TTS, and socket tripwires; uses a non-starting worker; and binds uvicorn only to `127.0.0.1`. Before any navigation the page fixture registers deterministic fail-closed local routes for roster, active conversation, chat, completion, and TTS; individual tests may replace them only with stricter exact-origin fixtures. |
 | Resource isolation | The fixture environment is rebuilt from a small execution allowlist, uses a resolved disposable app-mode DB/log/TTS cache, takes read-only logical DB and file/tree digests, blocks service workers and non-exact browser origins, and verifies real snapshots/tripwires only after all browser resources and the server process have exited. |
 
 ## Browser package and provisioning result
@@ -45,7 +45,7 @@ Chrome Headless Shell 151.0.7922.34 (playwright chromium-headless-shell v1234)
   Install location: /Users/lddmay/Library/Caches/ms-playwright/chromium_headless_shell-1234
 ```
 
-Both required v1234 directories were absent. The whole-output parser tests independently located the CFT and Headless Shell headers and each header's own first install location while ignoring interleaved Download/Fallback and FFmpeg blocks. Both parser targets were green against synthetic existing directories.
+Both required v1234 directories were absent. The whole-output parser tests independently located the CFT and Headless Shell headers and each header's own first install location while ignoring interleaved Download/Fallback and FFmpeg blocks. The gate combines captured stdout and stderr before both independent scans; the stderr-only regression is green. Both parser targets were green against synthetic existing directories.
 
 **Browser coverage: NO-GO.** Gate 2 did not launch; therefore no runtime `browser.version`, probe `navigator.userAgent`, application server, test browser/context/page, loopback port, service-worker-block runtime observation, or two-viewport browser assertion is claimed. No Task 6B code, test, fixture, script, or agent ran an installation command. The gate printed only this documentation-only, human-authorized follow-up: `./.venv/bin/python -m playwright install chromium`.
 
@@ -72,7 +72,7 @@ Because gate 1 stopped before fixture construction, no browser runtime directory
 
 ./.venv/bin/python -m pytest tests/browser/test_child_shell.py -q \
   -k '<all no-browser source/parser/import/seam/predicate slices>'
-# 33 passed, 16 deselected
+# 34 passed, 16 deselected
 
 node --unhandled-rejections=strict --test tests/frontend/child/*.test.mjs
 # 241 passed, 0 failed
@@ -98,6 +98,8 @@ test_loopback_server_uses_disposable_resources
 
 ## Commit and review status
 
-- Implementation commit: pending exact owned-path commit.
-- Cached-whitelist comparison: pending exact eight-path stage.
-- Independent review: pending post-commit review. No approval is claimed in this report revision.
+- Implementation commit: `008dd1c` (`feat(child): compose browser shell`), with an exact eight-of-eight cached whitelist and clean cached diff.
+- The first independent implementation review returned **NO-GO** with two P1 findings and one P2 report finding: gate 1 ignored stderr; chat/completion lacked navigation-time default interception; and this status section had not yet recorded the implementation hash/review outcome.
+- Remediation RED/GREEN: an stderr-only valid v1234 result and the five-route fail-closed registry were added to the pure suite. Before implementation, both new selectors errored on missing fixtures; the reviewer's direct stdout/stderr reproduction independently showed the existing gate rejected a valid stderr-only dry run. After the fix both selected tests pass, gate 1 scans combined captured output, and the child page owns all five deterministic default interceptors before yield/navigation.
+- Remediation commit: pending exact three-path follow-up (`conftest.py`, `test_child_shell.py`, and this report).
+- Independent re-review: pending. No approval is claimed in this report revision.
