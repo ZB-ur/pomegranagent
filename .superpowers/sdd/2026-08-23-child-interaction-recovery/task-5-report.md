@@ -24,7 +24,7 @@
    - The timer-rearm assertion referred to the first generation's timer after it had fired. The contract requires clearing the *current generation's* prior timer, so the regression assertion now captures `secondInitial` and proves it is cleared before the result rearm.
    - The synchronous-error fake emitted `onerror` on every generation, preventing the reentrant replacement generation from reaching its required initial timer. The fake now emits only on generation one; the regression assertion proves exactly two instances, the second current instance, and exactly one live timer.
 
-3. Final focused strict runs were green twice: `16/16` passing and `0` failing each time, with no open fake timers or unhandled rejections. The full strict child Node suite was `118/118` passing and `0` failing.
+3. Pre-review focused strict runs were green twice: `16/16` passing and `0` failing each time, with no open fake timers or unhandled rejections. The pre-review full strict child Node suite was `118/118` passing and `0` failing.
 
 ## Frozen lifecycle evidence
 
@@ -44,8 +44,8 @@ The legacy plan sample conflicts with the approved Task 5 brief: it exposed a ca
 ## Final verification to accompany commit
 
 ```text
-node --unhandled-rejections=strict --test tests/frontend/child/speech.test.mjs  # 16 pass (twice)
-node --unhandled-rejections=strict --test tests/frontend/child/*.test.mjs       # 118 pass
+node --unhandled-rejections=strict --test tests/frontend/child/speech.test.mjs  # 21 pass (twice after correction)
+node --unhandled-rejections=strict --test tests/frontend/child/*.test.mjs       # 123 pass after correction
 node --check app/frontend/child/speech.mjs
 node --check tests/frontend/child/speech.test.mjs
 git diff --check
@@ -53,3 +53,12 @@ git show --check
 ```
 
 Residual risk: Task 7 alone owns browser click/Space composition and mapping these normalized speech events into machine events; this task intentionally has no browser microphone or DOM integration.
+
+## Independent-review lifecycle correction
+
+- Follow-up start HEAD: `75775ce0a121a6ae1f8ad119e85a711ae4ee7acd`.
+- The reviewer supplied four independently failing RED cases before this correction. A stopping supersede whose old `abort()` synchronously called `dispose()` incorrectly constructed a second recognizer (`2 !== 1`). A manual `clearTimer()` reentry through dispose still called old `stop()` (`1 !== 0`). Constructor/configuration/start failures with a throwing `name` accessor escaped `start()` as `name trap`. Manual/silence `stop()` throws performed no abort cleanup (`['stop']` rather than `['stop','abort']`).
+- `start()` now rechecks `disposed`, `suppressing`, and current-run identity immediately after suppression. `requestStop()` separately distinguishes its own timer-clear failure (still best-effort stops) from a reentrantly invalidated run (never calls an obsolete recognizer). Synchronous-error name lookup is trap-safe. Stop failure terminal cleanup attempts `abort()`, then attempts `stop()` exactly once more only when abort itself throws, without recursive terminal emission.
+- Additional regression coverage exercises `clearTimer() → controller.start()`: it suppresses the old generation, leaves the replacement current, leaves exactly one timer, and does not stop the old recognizer. All cleanup reentry fixtures retain zero stale events and one exact terminal event where an error is required.
+- During final cleanup review, the composed local `clearTimer` throw followed by a `stop()` throw was also made RED: it initially stopped without attempting abort. The stale local-failure branch now performs abort cleanup with start suppression, so it remains one `SPEECH_FAILED` while releasing the recognizer.
+- Correction verification: focused strict ran twice at `21/21` passing; the full child strict suite ran at `123/123` passing. Syntax checks, `git diff --check`, and post-commit `git show --check` accompany the follow-up commit.

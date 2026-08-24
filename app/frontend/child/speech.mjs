@@ -41,7 +41,7 @@ export function createSpeechController(deps) {
     if (current?.phase === 'listening') return;
     if (current?.phase === 'stopping') {
       suppress(current);
-      if (current !== null) return;
+      if (disposed || suppressing || current !== null) return;
     }
 
     const run = {
@@ -51,6 +51,7 @@ export function createSpeechController(deps) {
       phase: 'listening',
       recognition: null,
       timer: null,
+      timerFailure: false,
     };
 
     let recognition;
@@ -185,7 +186,12 @@ export function createSpeechController(deps) {
   }
 
   function syncErrorEvent(error) {
-    const name = error?.name;
+    let name;
+    try {
+      name = error?.name;
+    } catch {
+      return errorEvent('SPEECH_FAILED', true);
+    }
     if (name === 'NotAllowedError' || name === 'SecurityError') return errorEvent('MIC_PERMISSION_DENIED', false);
     return errorEvent('SPEECH_FAILED', true);
   }
@@ -229,13 +235,31 @@ export function createSpeechController(deps) {
   function requestStop(run) {
     if (!isListeningRun(run)) return;
     run.phase = 'stopping';
-    releaseTimer(run, true, false);
+    const released = releaseTimer(run, true, false);
+    if (!released && run.timerFailure) {
+      stopRecognition(run);
+      return;
+    }
+    if (!isCurrent(run) || run.phase !== 'stopping') return;
 
+    stopRecognition(run);
+  }
+
+  function stopRecognition(run) {
     try {
       if (typeof run.recognition.stop !== 'function') throw new TypeError('recognition stop is unavailable');
       absorbThenable(run.recognition.stop());
     } catch {
-      if (isCurrent(run)) fail(run, false);
+      if (isCurrent(run)) {
+        fail(run, true);
+      } else if (run.timerFailure) {
+        suppressing = true;
+        try {
+          cleanup(run);
+        } finally {
+          suppressing = false;
+        }
+      }
     }
   }
 
@@ -247,7 +271,10 @@ export function createSpeechController(deps) {
       absorbThenable(clearTimer(handle));
       return true;
     } catch {
-      if (reportFailure && isCurrent(run)) fail(run, cleanupRecognition);
+      if (reportFailure && isCurrent(run)) {
+        run.timerFailure = true;
+        fail(run, cleanupRecognition);
+      }
       return false;
     }
   }
@@ -288,8 +315,17 @@ export function createSpeechController(deps) {
   function cleanup(run) {
     const recognition = run.recognition;
     try {
-      const method = typeof recognition.abort === 'function' ? recognition.abort : recognition.stop;
-      if (typeof method === 'function') absorbThenable(method.call(recognition));
+      const abort = recognition.abort;
+      if (typeof abort === 'function') {
+        try {
+          absorbThenable(abort.call(recognition));
+          return;
+        } catch {}
+      }
+    } catch {}
+    try {
+      const stop = recognition.stop;
+      if (typeof stop === 'function') absorbThenable(stop.call(recognition));
     } catch {}
   }
 

@@ -649,3 +649,165 @@ test('an onEvent exception is contained without terminating a listening partial 
   assert.equal(controller.isListening(), false);
   assert.equal(clock.pending(), 0);
 });
+
+test('supersede abort disposal leaves the controller permanently terminal without a replacement run', () => {
+  const clock = fakeClock();
+  const events = [];
+  let controller;
+  const { Recognition, instances } = recognitionClass({
+    abort() { controller.dispose(); },
+  });
+  controller = createSpeechController({
+    Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  controller.start();
+  controller.stop();
+  controller.start();
+
+  assert.equal(instances.length, 1);
+  assert.equal(instances[0].abortCount, 1);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.equal(clock.pending(), 0);
+  assert.deepEqual(events, []);
+  controller.start();
+  assert.equal(instances.length, 1);
+});
+
+test('manual-stop clearTimer reentry does not stop an invalidated old recognizer', () => {
+  const clock = fakeClock();
+  const events = [];
+  let controller;
+  const { Recognition, instances } = recognitionClass();
+  controller = createSpeechController({
+    Recognition,
+    onEvent: event => events.push(event),
+    setTimer: clock.setTimer,
+    clearTimer(handle) {
+      clock.clearTimer(handle);
+      controller.dispose();
+    },
+  });
+  controller.start();
+  controller.stop();
+
+  assert.equal(instances[0].stopCount ?? 0, 0);
+  assert.equal(instances[0].abortCount, 1);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.equal(clock.pending(), 0);
+  assert.deepEqual(events, []);
+});
+
+test('manual-stop clearTimer start reentry keeps only the replacement generation active', () => {
+  const clock = fakeClock();
+  const events = [];
+  let controller;
+  const { Recognition, instances } = recognitionClass();
+  controller = createSpeechController({
+    Recognition,
+    onEvent: event => events.push(event),
+    setTimer: clock.setTimer,
+    clearTimer(handle) {
+      clock.clearTimer(handle);
+      controller.start();
+    },
+  });
+  controller.start();
+  const old = instances[0];
+  controller.stop();
+
+  assert.equal(old.stopCount ?? 0, 0);
+  assert.equal(old.abortCount, 1);
+  assert.equal(instances.length, 2);
+  assert.equal(controller.recognition, instances[1]);
+  assert.equal(controller.isListening(), true);
+  assert.equal(clock.pending(), 1);
+  assert.deepEqual(events, []);
+});
+
+test('throwing name accessors in constructor, configuration, and start failures never escape start', () => {
+  const trappedError = () => Object.defineProperty({}, 'name', {
+    get() { throw new Error('name trap'); },
+  });
+  const cases = [
+    { name: 'constructor', Recognition: class { constructor() { throw trappedError(); } } },
+    { name: 'configuration', Recognition: class { set lang(_) { throw trappedError(); } } },
+    { name: 'start', Recognition: class { start() { throw trappedError(); } } },
+  ];
+  for (const item of cases) {
+    const clock = fakeClock();
+    const events = [];
+    const controller = createSpeechController({
+      Recognition: item.Recognition,
+      onEvent: event => events.push(event),
+      setTimer: clock.setTimer,
+      clearTimer: clock.clearTimer,
+    });
+    assert.doesNotThrow(() => controller.start(), item.name);
+    assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)], item.name);
+    assert.equal(controller.recognition, null, item.name);
+    assert.equal(controller.isListening(), false, item.name);
+    assert.equal(clock.pending(), 0, item.name);
+  }
+});
+
+test('manual and silence stop failures abort best-effort and abort failure falls back without a second terminal event', () => {
+  for (const mode of ['manual', 'silence']) {
+    const clock = fakeClock();
+    const calls = [];
+    const events = [];
+    const { Recognition, instances } = recognitionClass({
+      abort() { calls.push('abort'); },
+      stop() { calls.push('stop'); throw new Error('stop failure'); },
+    });
+    const controller = createSpeechController({
+      Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+    });
+    controller.start();
+    if (mode === 'manual') controller.stop();
+    else clock.advance(1500);
+    assert.deepEqual(calls, ['stop', 'abort'], mode);
+    assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)], mode);
+    assert.equal(controller.recognition, null, mode);
+    assert.equal(clock.pending(), 0, mode);
+    assert.equal(instances[0].abortCount, 1, mode);
+  }
+
+  const clock = fakeClock();
+  const calls = [];
+  const events = [];
+  const { Recognition } = recognitionClass({
+    abort() { calls.push('abort'); throw new Error('abort failure'); },
+    stop() { calls.push('stop'); throw new Error('stop failure'); },
+  });
+  const controller = createSpeechController({
+    Recognition, onEvent: event => events.push(event), setTimer: clock.setTimer, clearTimer: clock.clearTimer,
+  });
+  controller.start();
+  controller.stop();
+  assert.deepEqual(calls, ['stop', 'abort', 'stop']);
+  assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(controller.recognition, null);
+  assert.equal(clock.pending(), 0);
+
+  const cleanupClock = fakeClock();
+  const cleanupCalls = [];
+  const cleanupEvents = [];
+  const { Recognition: CleanupRecognition } = recognitionClass({
+    abort() { cleanupCalls.push('abort'); },
+    stop() { cleanupCalls.push('stop'); throw new Error('stop after timer failure'); },
+  });
+  const cleanupController = createSpeechController({
+    Recognition: CleanupRecognition,
+    onEvent: event => cleanupEvents.push(event),
+    setTimer: () => 101,
+    clearTimer() { throw new Error('timer clear failure'); },
+  });
+  cleanupController.start();
+  cleanupController.stop();
+  assert.deepEqual(cleanupCalls, ['stop', 'abort']);
+  assert.deepEqual(cleanupEvents, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(cleanupController.recognition, null);
+  assert.equal(cleanupClock.pending(), 0);
+});
