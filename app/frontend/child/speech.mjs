@@ -268,15 +268,12 @@ export function createSpeechController(deps) {
   }
 
   function clearReturnedHandle(run, handle) {
-    try {
-      consumeThenable(clearTimer(handle), {
-        onRejected() {
-          if (isCurrent(run)) fail(run, true);
-        },
-      });
-    } catch {
-      if (isCurrent(run)) fail(run, true);
-    }
+    invokeClearTimer(handle, {
+      cleanupBoundary: true,
+      onRejected() {
+        if (isCurrent(run)) fail(run, true);
+      },
+    });
   }
 
   function requestStop(run) {
@@ -346,7 +343,8 @@ export function createSpeechController(deps) {
     if (handle === null || handle === SCHEDULING) return true;
     try {
       let rejected = false;
-      consumeThenable(clearTimer(handle), {
+      invokeClearTimer(handle, {
+        cleanupBoundary: suppressing,
         onRejected() {
           rejected = true;
           timerFailure(run, reportFailure, cleanupRecognition);
@@ -356,6 +354,21 @@ export function createSpeechController(deps) {
     } catch {
       timerFailure(run, reportFailure, cleanupRecognition);
       return false;
+    }
+  }
+
+  function invokeClearTimer(handle, { cleanupBoundary, onRejected }) {
+    const previous = suppressing;
+    if (cleanupBoundary) suppressing = true;
+    try {
+      const value = clearTimer(handle);
+      consumeThenable(value, { keepCleanupFence: cleanupBoundary, onRejected });
+    } catch (error) {
+      try {
+        onRejected(error);
+      } catch {}
+    } finally {
+      if (cleanupBoundary) suppressing = previous;
     }
   }
 
@@ -463,10 +476,10 @@ export function createSpeechController(deps) {
     } catch {}
   }
 
-  function consumeThenable(value, { keepCleanupFence = false, onRejected = () => {} } = {}) {
-    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
-    let fenceOpen = false;
+  function openCleanupFence() {
+    let fenceOpen = true;
     let fenceReleaseScheduled = false;
+    cleanupThenables += 1;
     const closeFence = () => {
       if (!fenceOpen) return;
       fenceOpen = false;
@@ -481,38 +494,67 @@ export function createSpeechController(deps) {
         closeFence();
       }
     };
-    if (keepCleanupFence) {
-      fenceOpen = true;
-      cleanupThenables += 1;
-    }
+    return releaseFenceSoon;
+  }
+
+  function consumeThenable(value, { keepCleanupFence = false, onRejected = () => {} } = {}) {
+    let rejected = false;
+    const reject = error => {
+      if (rejected) return;
+      rejected = true;
+      try {
+        onRejected(error);
+      } catch {}
+    };
+    if (!value || (typeof value !== 'object' && typeof value !== 'function')) return;
     let then;
     try {
       then = value.then;
     } catch (error) {
-      try {
-        onRejected(error);
-      } catch {}
-      releaseFenceSoon();
+      const releaseFenceSoon = keepCleanupFence ? openCleanupFence() : null;
+      reject(error);
+      releaseFenceSoon?.();
       return;
     }
-    if (typeof then !== 'function') {
-      releaseFenceSoon();
-      return;
-    }
+    if (typeof then !== 'function') return;
+    const releaseFenceSoon = keepCleanupFence ? openCleanupFence() : null;
     let settled = false;
     const settle = (rejected, error) => {
       if (settled) return;
       settled = true;
-      try {
-        if (rejected) onRejected(error);
-      } catch {}
+      if (rejected) reject(error);
     };
+    let returned;
     try {
-      then.call(value, () => settle(false), error => settle(true, error));
+      returned = then.call(value, () => settle(false), error => settle(true, error));
     } catch (error) {
       settle(true, error);
     }
-    releaseFenceSoon();
+    consumeThenCallReturn(returned, value, reject);
+    releaseFenceSoon?.();
+  }
+
+  function consumeThenCallReturn(returned, source, reject) {
+    if (returned === source || !returned || (typeof returned !== 'object' && typeof returned !== 'function')) return;
+    let then;
+    try {
+      then = returned.then;
+    } catch (error) {
+      reject(error);
+      return;
+    }
+    if (typeof then !== 'function') return;
+    let settled = false;
+    const settle = (rejected, error) => {
+      if (settled) return;
+      settled = true;
+      if (rejected) reject(error);
+    };
+    try {
+      then.call(returned, () => settle(false), error => settle(true, error));
+    } catch (error) {
+      settle(true, error);
+    }
   }
 
   return Object.freeze({

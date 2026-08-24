@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 
 import { createSpeechController } from '../../../app/frontend/child/speech.mjs';
 
@@ -1294,4 +1295,178 @@ test('a cleanup then getter trap fences its directly queued reentry before falli
   assert.deepEqual(events, []);
   controller.start();
   assert.equal(instances.length, 2);
+});
+
+test('an invalid synchronous timer handle fences hostile clearTimer reentry before a replacement can start', async () => {
+  const scenarios = [
+    {
+      name: 'clearTimer call',
+      clearTimer(controller) { controller.start(); },
+    },
+    {
+      name: 'clearTimer then getter',
+      clearTimer(controller) {
+        return Object.defineProperty({}, 'then', {
+          get() {
+            queueMicrotask(() => controller.start());
+            throw new Error('clear then getter');
+          },
+        });
+      },
+    },
+    {
+      name: 'clearTimer then call',
+      clearTimer(controller) {
+        return {
+          then() {
+            queueMicrotask(() => controller.start());
+            throw new Error('clear then call');
+          },
+        };
+      },
+    },
+    {
+      name: 'clearTimer then direct microtask',
+      clearTimer(controller) {
+        return { then() { queueMicrotask(() => controller.start()); } };
+      },
+    },
+  ];
+
+  for (const scenario of scenarios) {
+    const events = [];
+    const instances = [];
+    let arms = 0;
+    let controller;
+    class Recognition {
+      constructor() { instances.push(this); }
+      start() { this.startCount = (this.startCount ?? 0) + 1; }
+      stop() {
+        this.stopCount = (this.stopCount ?? 0) + 1;
+        this.onend();
+      }
+      abort() { this.abortCount = (this.abortCount ?? 0) + 1; }
+    }
+    controller = createSpeechController({
+      Recognition,
+      onEvent: event => events.push(event),
+      setTimer(callback, delay) {
+        assert.equal(delay, 1500, scenario.name);
+        arms += 1;
+        if (arms === 1) callback();
+        return arms;
+      },
+      clearTimer() { return scenario.clearTimer(controller); },
+    });
+
+    assert.doesNotThrow(() => controller.start(), scenario.name);
+    await settleMicrotasks();
+
+    assert.equal(arms, 1, scenario.name);
+    assert.equal(instances.length, 1, scenario.name);
+    assert.equal(instances[0].stopCount, 1, scenario.name);
+    assert.equal(controller.recognition, null, scenario.name);
+    assert.equal(controller.isListening(), false, scenario.name);
+    assert.deepEqual(events, [{ type: 'empty' }], scenario.name);
+  }
+});
+
+test('a natural terminal clearTimer fences its directly queued replacement only through the bounded cleanup window', async () => {
+  const events = [];
+  const instances = [];
+  let controller;
+  class Recognition {
+    constructor() { instances.push(this); }
+    start() { this.startCount = (this.startCount ?? 0) + 1; }
+    abort() { this.abortCount = (this.abortCount ?? 0) + 1; }
+  }
+  controller = createSpeechController({
+    Recognition,
+    onEvent: event => events.push(event),
+    setTimer: () => 41,
+    clearTimer() {
+      return { then() { queueMicrotask(() => controller.start()); } };
+    },
+  });
+
+  controller.start();
+  instances[0].onend();
+  await settleMicrotasks();
+
+  assert.equal(instances.length, 1);
+  assert.equal(controller.recognition, null);
+  assert.equal(controller.isListening(), false);
+  assert.deepEqual(events, [{ type: 'empty' }]);
+
+  controller.start();
+  assert.equal(instances.length, 2);
+  assert.equal(controller.recognition, instances[1]);
+  assert.equal(controller.isListening(), true);
+});
+
+test('a void terminal clearTimer permits the next synchronous public start', () => {
+  const events = [];
+  const instances = [];
+  class Recognition {
+    constructor() { instances.push(this); }
+    start() { this.startCount = (this.startCount ?? 0) + 1; }
+  }
+  const controller = createSpeechController({
+    Recognition,
+    onEvent: event => events.push(event),
+    setTimer: () => 59,
+    clearTimer() {},
+  });
+
+  controller.start();
+  instances[0].onend();
+  controller.start();
+
+  assert.equal(instances.length, 2);
+  assert.equal(controller.recognition, instances[1]);
+  assert.equal(controller.isListening(), true);
+  assert.deepEqual(events, [{ type: 'empty' }]);
+});
+
+test('an abort then call return rejection is consumed and falls back exactly once without an unhandled rejection', () => {
+  const moduleUrl = new URL('../../../app/frontend/child/speech.mjs', import.meta.url).href;
+  const script = `
+    import { createSpeechController } from ${JSON.stringify(moduleUrl)};
+    const instances = [];
+    class Recognition {
+      constructor() { instances.push(this); }
+      start() {}
+      abort() {
+        return {
+          then() { return Promise.reject(new Error('nested abort rejection')); },
+        };
+      }
+      stop() { this.stopCount = (this.stopCount ?? 0) + 1; }
+    }
+    const controller = createSpeechController({
+      Recognition,
+      onEvent() {},
+      setTimer() { return 1; },
+      clearTimer() {},
+    });
+    controller.start();
+    controller.dispose();
+    for (let turn = 0; turn < 8; turn += 1) await Promise.resolve();
+    if (instances.length !== 1) {
+      console.error('unexpected replacement run');
+      process.exitCode = 1;
+    }
+    if (instances[0].stopCount !== 1) {
+      console.error('fallback stop was not exact');
+      process.exitCode = 1;
+    }
+  `;
+  const result = spawnSync(process.execPath, [
+    '--unhandled-rejections=strict',
+    '--input-type=module',
+    '--eval',
+    script,
+  ], { encoding: 'utf8' });
+
+  assert.equal(result.status, 0, result.stderr || result.stdout);
 });
