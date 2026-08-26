@@ -563,6 +563,11 @@ def test_child_page_registers_fail_closed_business_routes_before_navigation(
             "content_type": "application/json",
             "body": '{"error":{"code":"UNEXPECTED_BROWSER_REQUEST","message":"fixture route required"}}',
         }], pattern
+    fixture_source = (ROOT / "tests/browser/conftest.py").read_text(encoding="utf-8")
+    context_install = "install_fail_closed_business_routes(context, port=child_server.port)"
+    assert context_install in fixture_source
+    assert fixture_source.index(context_install) < fixture_source.index("page = context.new_page()")
+    assert "install_fail_closed_business_routes(page, port=child_server.port)" not in fixture_source
 
 
 def test_page_specific_routes_cannot_widen_loopback_policy(child_page):

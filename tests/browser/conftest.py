@@ -367,8 +367,8 @@ def child_page(chromium_browser, child_server):
         "**/*",
         make_context_route_policy(port=child_server.port, egress_tripwire=egress_tripwire),
     )
+    install_fail_closed_business_routes(context, port=child_server.port)
     page = context.new_page()
-    install_fail_closed_business_routes(page, port=child_server.port)
     page.add_init_script(
         """
         sessionStorage.clear();
