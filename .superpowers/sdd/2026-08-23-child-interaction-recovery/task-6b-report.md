@@ -5,7 +5,7 @@
 - Exact approved start HEAD: `fdbe6c7a8fda34bc1de4b6df5a9350238da379bc`, the independently approved Child Task 7 boundary.
 - Owned product paths: `app/frontend/child/browser.mjs`, `app/frontend/index.html`, and `requirements-dev.txt`.
 - Owned test paths: `tests/test_frontend_foundation.py`, `tests/browser/conftest.py`, `tests/browser/child_server.py`, and `tests/browser/test_child_shell.py`.
-- This ignored report is force-staged as the eighth owned path. The implementation is `008dd1c` (`feat(child): compose browser shell`); the first review remediation is `6839819` (`fix(child): close browser fixture isolation gaps`). The context-level route remediation described below is pending its exact follow-up commit and independent re-review.
+- This ignored report is force-staged as the eighth owned path. The implementation is `008dd1c` (`feat(child): compose browser shell`); the first review remediation is `6839819` (`fix(child): close browser fixture isolation gaps`); the context-level route remediation is `65f19539a3fd6d14690fd20163e0746636269b64` (`fix(child): isolate every browser fixture page`).
 - Existing user changes in `.workbuddy/memory/2026-08-22.md`, `docs/superpowers/specs/2026-08-23-interaction-stabilization-design.md`, `.superpowers/brainstorm/`, and `docs/superpowers/plans/` remained outside Task 6B and were not staged.
 
 ## TDD evidence
@@ -104,4 +104,6 @@ test_loopback_server_uses_disposable_resources
 - First remediation commit: `6839819` (`fix(child): close browser fixture isolation gaps`), limited to `conftest.py`, `test_child_shell.py`, and this report.
 - The second independent review confirmed the first three findings closed, then returned **NO-GO** on one new P1: the five default business interceptors were page-owned, while the health-fallback path creates a second page from the same context. It also flagged this report's stale top-level implementation status as P2.
 - Context-route RED/GREEN: a source-order regression first failed because `install_fail_closed_business_routes(context, port=child_server.port)` was absent. The fixture now installs all five defaults on the browser context before `context.new_page()`, removes the page-owned registration, and the focused regression passes. This makes the initial page and every later page inherit the same fail-closed defaults.
-- Context-route remediation commit and independent re-review: pending. No approval is claimed in this report revision.
+- Context-route remediation commit: `65f19539a3fd6d14690fd20163e0746636269b64` (`fix(child): isolate every browser fixture page`), limited to `conftest.py`, `test_child_shell.py`, and this report.
+- Final independent re-review: **GO** for implementation and isolation at `65f19539a3fd6d14690fd20163e0746636269b64`. The reviewer confirmed the five defaults are context-owned before any page, cover the health-fallback second page, preserve page-route exact-origin overrides, and passed the focused regression, Python compile, and diff check without launching a browser, server, Popen, installer, or network.
+- Browser runtime evidence remains **NO-GO** solely because the required local Playwright v1234 Chrome for Testing and Headless Shell artifacts are absent. No browser-runtime claim is made.
