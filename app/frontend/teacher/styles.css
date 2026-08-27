@@ -1,0 +1,90 @@
+:root {
+  --bg: #f5f6f8;
+  --panel: #ffffff;
+  --ink: #1f2937;
+  --muted: #6b7280;
+  --brand: #2f80ed;
+  --brand-dark: #1d5fb0;
+  --yellow: #ffb800;
+  --green: #16a34a;
+  --red: #dc2626;
+  --border: #e5e7eb;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: "PingFang SC", "Microsoft YaHei", sans-serif; background: var(--bg); color: var(--ink); }
+.layout { display: flex; min-height: 100vh; }
+aside { width: 220px; background: #12233f; color: #cbd5e1; padding: 22px 0; flex-shrink: 0; }
+aside .logo { padding: 0 22px 20px; font-size: 20px; color: #fff; font-weight: bold; }
+.teacher-logo { width: 32px; height: 34px; vertical-align: middle; margin-right: 8px; }
+aside .nav { display: flex; flex-direction: column; }
+aside .nav button {
+  text-align: left; background: none; border: none; color: #cbd5e1; font-size: 15px;
+  padding: 13px 22px; cursor: pointer; border-left: 3px solid transparent;
+}
+aside .nav button:hover { background: #1c3155; }
+aside .nav button.active { background: #1c3155; color: #fff; border-left-color: var(--yellow); }
+main { flex: 1; min-width: 0; padding: 26px 30px; overflow-y: auto; }
+.view { display: none; }
+.view.active { display: block; }
+h2 { font-size: 22px; margin-bottom: 18px; }
+.card { background: var(--panel); border-radius: 14px; padding: 20px; box-shadow: 0 1px 3px rgba(0, 0, 0, .06); }
+table { width: 100%; border-collapse: collapse; font-size: 14px; }
+th, td { text-align: left; padding: 11px 12px; border-bottom: 1px solid var(--border); }
+th { color: var(--muted); font-weight: 500; background: #fafafa; }
+.btn { background: var(--brand); color: #fff; border: none; padding: 9px 16px; border-radius: 8px; cursor: pointer; font-size: 14px; }
+.btn:hover { background: var(--brand-dark); }
+.btn.gray { background: #e5e7eb; color: var(--ink); }
+.btn.green { background: var(--green); }
+.btn.small { padding: 5px 10px; font-size: 13px; }
+input, select, textarea { padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; font-size: 14px; }
+.row { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
+.muted { color: var(--muted); font-size: 13px; }
+.tag { display: inline-block; padding: 2px 9px; border-radius: 10px; font-size: 12px; }
+.tag.pending { background: #fef3c7; color: #92400e; }
+.tag.confirmed { background: #dcfce7; color: #166534; }
+.tag.ended { background: #e0e7ff; color: #3730a3; }
+.bubble { padding: 8px 12px; border-radius: 10px; margin: 6px 0; font-size: 14px; max-width: 80%; }
+.bubble.c { background: #dbeafe; margin-left: auto; }
+.bubble.d { background: #fff7e0; }
+.score-box { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+.score-box .name { width: 120px; font-size: 14px; }
+.stars { display: flex; gap: 4px; }
+.stars button { background: none; border: none; font-size: 22px; cursor: pointer; color: #d1d5db; }
+.stars button.on { color: var(--yellow); }
+textarea { width: 100%; min-height: 46px; }
+.metric { text-align: center; padding: 18px; }
+.metric .num { font-size: 30px; font-weight: bold; }
+.metric .label { color: var(--muted); font-size: 13px; margin-top: 4px; }
+.metrics { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 18px; }
+.chart-wrap svg { width: 100%; height: auto; }
+.skip-link { left: 12px; position: fixed; top: -60px; z-index: 2; }
+.skip-link:focus { top: 12px; }
+.teacher-lock-feedback { color: #fecaca; font-size: 13px; margin: 12px 22px; }
+.teacher-lock-button { margin: 18px 22px; }
+.teacher-scroll { max-height: 300px; overflow-y: auto; margin: 10px 0; }
+.teacher-flex { flex: 1; }
+.teacher-narrow { width: 60px; }
+.teacher-days { width: 80px; }
+.teacher-row-top { margin-top: 8px; }
+.teacher-row-actions { margin-top: 14px; }
+.teacher-chart { overflow-x: auto; }
+.teacher-chart-inner { min-width: 700px; }
+.teacher-detail-top { margin-top: 10px; }
+
+button, input, select, textarea { min-height: 44px; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+  outline: 3px solid #ffb800;
+  outline-offset: 2px;
+}
+
+@media (max-width: 1024px) {
+  aside { width: 190px; }
+  main { padding: 20px; }
+  .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .card { overflow-wrap: anywhere; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important; animation-iteration-count: 1 !important; scroll-behavior: auto !important; transition-duration: .01ms !important; }
+}

@@ -419,3 +419,46 @@ def child_page(chromium_browser, child_server):
                 resource.close()
             except Exception:
                 pass
+
+
+class TeacherBrowserHarness:
+    """Fresh, exact-origin teacher contexts backed by the disposable app server."""
+
+    def __init__(self, *, browser, server: BrowserServer) -> None:
+        self.browser = browser
+        self.server = server
+        self._contexts = []
+
+    def new_context(self):
+        context = self.browser.new_context(service_workers="block")
+        egress_tripwire = Path(self.server.environment["BROWSER_CONTEXT_EGRESS_TRIPWIRE_PATH"])
+        context.route(
+            "**/*",
+            make_context_route_policy(port=self.server.port, egress_tripwire=egress_tripwire),
+        )
+        self._contexts.append(context)
+        return context
+
+    def close(self) -> None:
+        for context in reversed(self._contexts):
+            for page in reversed(context.pages):
+                try:
+                    page.close()
+                except Exception:
+                    pass
+            try:
+                context.close()
+            except Exception:
+                pass
+        self._contexts.clear()
+        self.browser.close()
+
+
+@pytest.fixture
+def teacher_browser(chromium_browser, child_server):
+    browser = chromium_browser()
+    harness = TeacherBrowserHarness(browser=browser, server=child_server)
+    try:
+        yield harness
+    finally:
+        harness.close()
