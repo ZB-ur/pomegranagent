@@ -143,7 +143,7 @@ export function createChildApp(deps) {
     }
 
     function createEffect(key) {
-      cancelEffect(key);
+      cancelEffect(key, 'superseded');
       let controller;
       let signal;
       let abort;
@@ -198,18 +198,19 @@ export function createChildApp(deps) {
       return settled;
     }
 
-    function startPassiveEffect(key, work, onFulfilled, onRejected, onFinally = null) {
-      cancelEffect(key);
+    function startPassiveEffect(key, work, onFulfilled, onRejected, onFinally = null, onCancel = null) {
+      cancelEffect(key, 'superseded');
       const entry = {
         active: true,
         appEpoch,
         epoch: ++nextEffectEpoch,
         key,
+        onCancel,
       };
       effects.set(key, entry);
       const operation = consume(() => {
         if (!isCurrentEffect(entry)) return CANCELLED;
-        return callExternal(work, null);
+        return callExternal(work, null, [entry]);
       }, withinBoundary);
       const settled = operation.then(
         packet => {
@@ -233,12 +234,17 @@ export function createChildApp(deps) {
       return settled;
     }
 
-    function cancelEffect(key) {
+    function cancelEffect(key, reason = 'cancelled') {
       const entry = effects.get(key);
       if (!entry) return;
       effects.delete(key);
       entry.active = false;
       withinBoundary(() => {
+        if (typeof entry.onCancel === 'function') {
+          try {
+            callExternal(entry.onCancel, null, [entry, reason]);
+          } catch {}
+        }
         if (typeof entry.abort === 'function') {
           try {
             const value = callExternal(entry.abort, entry.controller);
@@ -269,6 +275,16 @@ export function createChildApp(deps) {
       return withinBoundary(() => {
         appEpoch += 1;
         for (const key of [...effects.keys()]) cancelEffect(key);
+      });
+    }
+
+    function cancelRecoveryEffects() {
+      return withinBoundary(() => {
+        for (const key of [...effects.keys()]) {
+          if (key === 'recovery' || key === 'roster' || key.startsWith('active:')) {
+            cancelEffect(key, 'superseded');
+          }
+        }
       });
     }
 
@@ -327,18 +343,34 @@ export function createChildApp(deps) {
       });
     }
 
-    function startActiveRecovery(localRecord, child, retainTeacherAuthorization = false) {
+    function startActiveRecovery(localRecord, child, retainTeacherAuthorization = false, recoveryOwner = null) {
       return startEffect(
         `active:${child.id}`,
         () => configured.api.values.getActiveConversation.call(configured.api.owner, child.id),
-        active => resolveRecovery(localRecord, successRead(child, active), retainTeacherAuthorization),
-        error => resolveRecovery(localRecord, failureRead(child, normalizeError(error)), retainTeacherAuthorization),
-        () => resolveRecovery(localRecord, failureRead(child, effectControllerError()), retainTeacherAuthorization),
+        active => resolveRecovery(localRecord, successRead(child, active), retainTeacherAuthorization, recoveryOwner),
+        error => resolveRecovery(
+          localRecord,
+          failureRead(child, normalizeError(error)),
+          retainTeacherAuthorization,
+          recoveryOwner,
+        ),
+        () => resolveRecovery(
+          localRecord,
+          failureRead(child, effectControllerError()),
+          retainTeacherAuthorization,
+          recoveryOwner,
+        ),
       );
     }
 
-    function resolveRecovery(localRecord, remoteRead, retainTeacherAuthorization = false) {
-      if (destroyed || snapshot.value !== 'recovery') return Promise.resolve(undefined);
+    function resolveRecovery(
+      localRecord,
+      remoteRead,
+      retainTeacherAuthorization = false,
+      recoveryOwner = null,
+    ) {
+      const ownerIsCurrent = () => recoveryOwner === null || isCurrentEffect(recoveryOwner);
+      if (destroyed || snapshot.value !== 'recovery' || !ownerIsCurrent()) return Promise.resolve(undefined);
       let outcome;
       try {
         outcome = validateRecoveryOutcome(
@@ -368,10 +400,11 @@ export function createChildApp(deps) {
         }
       }
       const finish = () => {
+        if (!ownerIsCurrent()) return undefined;
         const resolved = commit({ type: 'RECOVERY_RESOLVED', snapshot: resolvedSnapshot });
         if (!resolved.ok) return undefined;
         if (resolvedSnapshot.value === 'loading_roster') {
-          return scanRoster(null, retainTeacherAuthorization);
+          return scanRoster(null, retainTeacherAuthorization, recoveryOwner);
         }
         if (resolvedSnapshot.value === 'saving_conversation') return startCompletion();
         return undefined;
@@ -382,6 +415,7 @@ export function createChildApp(deps) {
         return Promise.resolve(undefined);
       }
       return Promise.resolve(withinBoundary(() => {
+        if (!ownerIsCurrent()) return undefined;
         try {
           absorbThenable(callExternal(configured.store.values.clear, configured.store.owner));
         } catch {
@@ -455,42 +489,70 @@ export function createChildApp(deps) {
       return values;
     }
 
-    function scanRoster(localRecord, retainTeacherAuthorization = false) {
+    function scanRoster(localRecord, retainTeacherAuthorization = false, recoveryOwner = null) {
+      if (recoveryOwner !== null && !isCurrentEffect(recoveryOwner)) return Promise.resolve(undefined);
       return startEffect(
         'roster',
         () => configured.api.values.getTodayRoster.call(configured.api.owner),
-        roster => handleRoster(localRecord, roster, retainTeacherAuthorization),
-        error => handleRosterFailure(localRecord, normalizeError(error), retainTeacherAuthorization),
-        () => handleRosterFailure(localRecord, effectControllerError(), retainTeacherAuthorization),
+        roster => handleRoster(localRecord, roster, retainTeacherAuthorization, recoveryOwner),
+        error => handleRosterFailure(
+          localRecord,
+          normalizeError(error),
+          retainTeacherAuthorization,
+          recoveryOwner,
+        ),
+        () => handleRosterFailure(
+          localRecord,
+          effectControllerError(),
+          retainTeacherAuthorization,
+          recoveryOwner,
+        ),
       );
     }
 
-    function handleRoster(localRecord, roster, retainTeacherAuthorization = false) {
+    function handleRoster(localRecord, roster, retainTeacherAuthorization = false, recoveryOwner = null) {
+      if (recoveryOwner !== null && !isCurrentEffect(recoveryOwner)) return undefined;
       let children;
       try {
         children = normalizeRoster(roster);
       } catch {
-        return handleRosterFailure(localRecord, { code: 'NETWORK_ERROR', retryable: false }, retainTeacherAuthorization);
+        return handleRosterFailure(
+          localRecord,
+          { code: 'NETWORK_ERROR', retryable: false },
+          retainTeacherAuthorization,
+          recoveryOwner,
+        );
       }
       if (children.length > 2) {
-        return handleRosterFailure(localRecord, { code: 'ROSTER_CARDINALITY_INVALID', retryable: false }, retainTeacherAuthorization);
+        return handleRosterFailure(
+          localRecord,
+          { code: 'ROSTER_CARDINALITY_INVALID', retryable: false },
+          retainTeacherAuthorization,
+          recoveryOwner,
+        );
       }
       if (children.length === 0) {
         if (localRecord === null) {
           commit({ type: 'ROSTER_LOADED', children });
           return undefined;
         }
-        return resolveRecovery(localRecord, successRead(null, { conversation: null }), retainTeacherAuthorization);
+        return resolveRecovery(
+          localRecord,
+          successRead(null, { conversation: null }),
+          retainTeacherAuthorization,
+          recoveryOwner,
+        );
       }
-      return scanActiveChildren(localRecord, children, retainTeacherAuthorization);
+      return scanActiveChildren(localRecord, children, retainTeacherAuthorization, recoveryOwner);
     }
 
-    function handleRosterFailure(localRecord, error, retainTeacherAuthorization = false) {
+    function handleRosterFailure(localRecord, error, retainTeacherAuthorization = false, recoveryOwner = null) {
+      if (recoveryOwner !== null && !isCurrentEffect(recoveryOwner)) return undefined;
       if (localRecord === null) {
         beginRecovery(error);
         return undefined;
       }
-      return resolveRecovery(localRecord, failureRead(null, error), retainTeacherAuthorization);
+      return resolveRecovery(localRecord, failureRead(null, error), retainTeacherAuthorization, recoveryOwner);
     }
 
     function normalizeRoster(value) {
@@ -526,15 +588,18 @@ export function createChildApp(deps) {
       });
     }
 
-    function scanActiveChildren(localRecord, children, retainTeacherAuthorization = false) {
+    function scanActiveChildren(localRecord, children, retainTeacherAuthorization = false, recoveryOwner = null) {
+      if (recoveryOwner !== null && !isCurrentEffect(recoveryOwner)) return Promise.resolve(undefined);
       let remaining = children.length;
       let firstFailure = null;
       const reads = [];
       const settle = () => {
         remaining -= 1;
         if (remaining !== 0) return undefined;
-        if (firstFailure !== null) return handleRosterFailure(localRecord, firstFailure, retainTeacherAuthorization);
-        return decideActiveReads(localRecord, children, reads, retainTeacherAuthorization);
+        if (firstFailure !== null) {
+          return handleRosterFailure(localRecord, firstFailure, retainTeacherAuthorization, recoveryOwner);
+        }
+        return decideActiveReads(localRecord, children, reads, retainTeacherAuthorization, recoveryOwner);
       };
       const pending = children.map(child => startEffect(
         `active:${child.id}`,
@@ -566,14 +631,26 @@ export function createChildApp(deps) {
       return descriptor.value;
     }
 
-    function decideActiveReads(localRecord, children, reads, retainTeacherAuthorization = false) {
+    function decideActiveReads(
+      localRecord,
+      children,
+      reads,
+      retainTeacherAuthorization = false,
+      recoveryOwner = null,
+    ) {
+      if (recoveryOwner !== null && !isCurrentEffect(recoveryOwner)) return undefined;
       const activeReads = reads.filter(read => read.conversation !== null);
       if (activeReads.length === 0) {
         if (localRecord === null) {
           commit({ type: 'ROSTER_LOADED', children });
           return undefined;
         }
-        return resolveRecovery(localRecord, successRead(null, { conversation: null }), retainTeacherAuthorization);
+        return resolveRecovery(
+          localRecord,
+          successRead(null, { conversation: null }),
+          retainTeacherAuthorization,
+          recoveryOwner,
+        );
       }
       if (activeReads.length === 1) {
         const selected = activeReads[0];
@@ -584,11 +661,16 @@ export function createChildApp(deps) {
           }, { persist: false });
           if (!entered.ok) return undefined;
         }
-        return resolveRecovery(localRecord, successRead(selected.child, selected.active), retainTeacherAuthorization);
+        return resolveRecovery(
+          localRecord,
+          successRead(selected.child, selected.active),
+          retainTeacherAuthorization,
+          recoveryOwner,
+        );
       }
       return handleRosterFailure(localRecord, {
         code: 'MULTIPLE_ACTIVE_CONVERSATIONS', retryable: false,
-      }, retainTeacherAuthorization);
+      }, retainTeacherAuthorization, recoveryOwner);
     }
 
     function startCompletion() {
@@ -970,17 +1052,18 @@ export function createChildApp(deps) {
         clearLocalPin();
         return Promise.resolve(undefined);
       }
-      const authenticate = () => consume(
+      const authenticate = entry => consume(
         () => callExternal(configured.api.values.teacherStatus, configured.api.owner),
         withinBoundary,
       ).then(packet => {
+        if (!isCurrentEffect(entry)) return CANCELLED;
         const status = readAuthStatus(packet.value);
         if (status === null) throw Object.freeze({ code: 'AUTH_STATE_CHANGED', retryable: false });
         const method = status.configured
           ? configured.api.values.teacherUnlock
           : configured.api.values.teacherSetup;
         return consume(() => callExternal(method, configured.api.owner, [pin]), withinBoundary);
-      }).then(packet => packet.value);
+      }).then(packet => packet === CANCELLED ? CANCELLED : packet.value);
       const rejectAuth = error => {
         commit({ type: 'TEACHER_LOCKED' }, { persist: false });
         showError(teacherAuthErrorCopy(error));
@@ -1006,6 +1089,10 @@ export function createChildApp(deps) {
           },
           rejectAuth,
           clearInput,
+          () => {
+            clearLocalPin();
+            clearInput();
+          },
         );
       }, () => undefined).then(() => undefined, () => undefined).finally(clearLocalPin);
     }
@@ -1071,14 +1158,15 @@ export function createChildApp(deps) {
         if (!controlEnabled(controls, 'teacherRecoveryRetryDisabled')) return undefined;
         const committed = commit({ type: 'TEACHER_RECOVERY_RETRY' });
         if (!committed.ok) return undefined;
+        cancelRecoveryEffects();
         return startEffect(
           'recovery',
           () => configured.store.values.load.call(configured.store.owner),
-          localRecord => {
+          (localRecord, recoveryOwner) => {
             const child = safeLocalChild(localRecord);
             return child === null
-              ? scanRoster(localRecord, true)
-              : startActiveRecovery(localRecord, child, true);
+              ? scanRoster(localRecord, true, recoveryOwner)
+              : startActiveRecovery(localRecord, child, true, recoveryOwner);
           },
           () => {
             beginRecovery({ code: 'LOCAL_STORAGE_FAILED', retryable: false }, { persist: false });

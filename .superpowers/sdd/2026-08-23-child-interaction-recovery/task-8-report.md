@@ -69,4 +69,15 @@ The direct-global audit found no `DuckAPI`, `DuckAuth`, `fetch`, or legacy `acce
 
 ## Commit and downstream gate
 
-Implementation commit: pending. This report is force-staged with the whitelist implementation commit; a report-only follow-up will record its hash and independent-review disposition. Foundation Task 9 remains the cross-surface release gate.
+Initial implementation commit: `2354d830c4eccc6c1dab094874e0378c5aaf09b0` (`feat(child): add PIN-gated teacher recovery`). Foundation Task 9 remains the cross-surface release gate.
+
+## Independent review remediation
+
+The first independent review returned NO-GO with two P1 races and no P0 finding:
+
+1. Reset or destruction between the teacher-status response and the setup/unlock call did not immediately clear the captured PIN, and a later status response could still start the second auth request.
+2. A second teacher recovery retry cancelled only the first root effect, leaving its already-spawned roster/active child read able to resolve against the newer recovery attempt.
+
+Both defects received focused tests before production changes. The auth row failed because no `clearTeacherPin` call occurred before the delayed status settled. The recovery row failed because the superseded active read changed the current state from `recovery` to `selecting_child`.
+
+The minimal repair gives passive effects an exactly-once cancellation cleanup, checks auth-effect ownership again before setup/unlock, cancels the complete recovery effect group on retry, and carries the current root recovery owner through every roster/active/merge continuation. The same two focused tests then passed, followed by app `88/88`, Task 8 core `138/138`, and the browser matrix `14/14` twice. A follow-up commit and the independent re-review disposition are recorded after final verification.

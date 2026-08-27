@@ -340,15 +340,15 @@ function localReadyRecord() {
   };
 }
 
-async function enterAuthorizedRecovery(fixture, teacherStatus = null) {
+async function enterAuthorizedRecovery(fixture, teacherStatus = null, activeReader = null) {
   fixture.deps.api.getTodayRoster = () => {
     fixture.calls.api.push('roster');
     return Promise.resolve([childRecord()]);
   };
-  fixture.deps.api.getActiveConversation = childId => {
+  fixture.deps.api.getActiveConversation = activeReader ?? (childId => {
     fixture.calls.api.push(['active', childId]);
     return Promise.resolve({ conversation: null });
-  };
+  });
   fixture.deps.api.teacherStatus = teacherStatus ?? (() => {
     fixture.calls.api.push('teacherStatus');
     return Promise.resolve({ configured: true, authenticated: true });
@@ -866,6 +866,36 @@ test('teacher auth effects share epoch cancellation and cannot leak raw values o
       ['showTeacherHelpError', '老师帮助暂时不可用，请稍后重试'],
     ]);
   }
+
+  const betweenCalls = createFixture();
+  const delayedStatus = deferred();
+  let betweenStatusWork = () => Promise.resolve({ configured: true, authenticated: true });
+  betweenCalls.deps.api.teacherUnlock = pin => {
+    betweenCalls.calls.api.push(['teacherUnlock', pin]);
+    return Promise.resolve({ configured: true, authenticated: true });
+  };
+  const betweenCallsApp = await enterAuthorizedRecovery(
+    betweenCalls,
+    () => betweenStatusWork(),
+  );
+  betweenStatusWork = () => delayedStatus.promise;
+  betweenCalls.calls.api.length = 0;
+  betweenCalls.calls.view.length = 0;
+  const cancelledAuth = betweenCallsApp.submitTeacherPin('4826');
+  await flushMicrotasks();
+  betweenCallsApp.reset();
+  assert.equal(
+    betweenCalls.calls.view.some(([kind]) => kind === 'clearTeacherPin'),
+    true,
+    'reset cancellation must clear the live PIN input before status settles',
+  );
+  delayedStatus.resolve({ configured: true, authenticated: false });
+  await cancelledAuth;
+  assert.equal(
+    betweenCalls.calls.api.some(call => Array.isArray(call) && call[0] === 'teacherUnlock'),
+    false,
+    'a cancelled status result must not start unlock',
+  );
 });
 
 test('teacher text and saved draft enter recovery through legal drafts and one chat registry boundary', async () => {
@@ -962,6 +992,44 @@ test('authorized recovery retry, microphone retry, and manual completion use onl
   assert.equal(recovered.calls.store[0][0], 'save');
   assert.equal(recovered.calls.store[0][1].value, 'recovery');
   assert.equal(recovered.calls.store[1], 'load');
+
+  const superseded = createFixture();
+  const firstActive = deferred();
+  const secondLoad = deferred();
+  let loadWork = () => null;
+  let activeReads = 0;
+  superseded.deps.store.load = () => {
+    superseded.calls.store.push('load');
+    return loadWork();
+  };
+  const supersededApp = await enterAuthorizedRecovery(
+    superseded,
+    null,
+    childId => {
+      superseded.calls.api.push(['active', childId]);
+      activeReads += 1;
+      return activeReads === 1 ? Promise.resolve({ conversation: null }) : firstActive.promise;
+    },
+  );
+  loadWork = () => localReadyRecord();
+  const firstRetry = supersededApp.retryTeacherRecovery();
+  await flushMicrotasks();
+  assert.equal(activeReads, 2);
+  loadWork = () => secondLoad.promise;
+  const secondRetry = supersededApp.retryTeacherRecovery();
+  await flushMicrotasks();
+  const writesBeforeOldRead = superseded.calls.store.filter(call => Array.isArray(call) && call[0] === 'save').length;
+  firstActive.resolve({ conversation: null });
+  await flushMicrotasks();
+  assert.equal(supersededApp.getSnapshot().value, 'recovery');
+  assert.equal(supersededApp.getSnapshot().teacherUnlocked, true);
+  assert.equal(
+    superseded.calls.store.filter(call => Array.isArray(call) && call[0] === 'save').length,
+    writesBeforeOldRead,
+    'the first retry child read must be inert after a second retry owns recovery',
+  );
+  secondLoad.resolve(localReadyRecord());
+  await Promise.all([firstRetry, secondRetry]);
 
   const microphone = createFixture();
   const microphoneOrder = [];
