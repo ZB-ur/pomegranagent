@@ -7,6 +7,13 @@ const ACTION_KEYS = Object.freeze([
   'onRetry',
   'onReset',
   'onOpenTeacherHelp',
+  'onSubmitTeacherPin',
+  'onSubmitTeacherText',
+  'onSaveTeacherDraft',
+  'onRetryTeacherRecovery',
+  'onRetryMicrophone',
+  'onEndWithTeacher',
+  'onLockTeacherHelp',
 ]);
 const DOM_KEYS = Object.freeze([
   'createElement',
@@ -46,6 +53,13 @@ const ACTION_TOKEN_TO_KEY = Object.freeze(Object.assign(Object.create(null), {
   reset: 'onReset',
   'open-teacher-help': 'onOpenTeacherHelp',
 }));
+const TEACHER_TOKEN_TO_KEY = Object.freeze(Object.assign(Object.create(null), {
+  'save-draft': 'onSaveTeacherDraft',
+  'retry-recovery': 'onRetryTeacherRecovery',
+  'retry-microphone': 'onRetryMicrophone',
+  'end-session': 'onEndWithTeacher',
+  lock: 'onLockTeacherHelp',
+}));
 
 export function createChildView(root, actions, dom) {
   assertRoot(root);
@@ -56,8 +70,13 @@ export function createChildView(root, actions, dom) {
   let renderEpoch = 0;
   let currentState = null;
   let currentStatus = null;
+  let currentSnapshot = null;
+  let currentControls = null;
   let currentActionables = new Set();
   let currentFocusTargets = new Map();
+  let teacherUI = null;
+  let teacherMode = 'locked';
+  let teacherOpener = null;
 
   function createElement(tag) {
     const element = invoke(domAPI.createElement, dom, [tag], 'createElement');
@@ -165,29 +184,23 @@ export function createChildView(root, actions, dom) {
     nextFocusTargets.set('#child-status', status);
     append(section, status);
 
-    const helpIsUnavailable = actionCallbacks.onOpenTeacherHelp === null;
-    const describedBy = helpIsUnavailable
-      ? 'child-status teacher-help-unavailable-note'
-      : 'child-status';
     const help = button({
       id: 'teacher-help-button',
       text: '老师帮忙',
       token: 'open-teacher-help',
-      disabled: helpIsUnavailable,
-      describedBy,
+      describedBy: 'child-status',
     });
     append(section, help);
-    if (helpIsUnavailable) {
-      const note = element('p', { id: 'teacher-help-unavailable-note' });
-      appendText(note, '老师帮助功能尚未启用');
-      append(section, note);
-    }
 
-    replaceChildren(root, section);
+    if (teacherUI === null) replaceChildren(root, section);
+    else replaceChildren(root, section, teacherUI.dialog);
     currentStatus = status;
     currentState = snapshot.value;
+    currentSnapshot = snapshot;
+    currentControls = controls;
+    if (teacherUI !== null) updateTeacherDialogFromSnapshot();
     if (previousState !== snapshot.value) {
-      const selector = focusTargetFor(snapshot, controls, helpIsUnavailable);
+      const selector = focusTargetFor(snapshot, controls);
       scheduleFocus(epoch, snapshot.value, selector);
     }
     return undefined;
@@ -310,6 +323,321 @@ export function createChildView(root, actions, dom) {
     }
   }
 
+  function openTeacherHelp(options) {
+    assertAlive();
+    const parsed = readBooleanOptions(options, ['unlocked'], 'openTeacherHelp options');
+    ensureTeacherDialog();
+    teacherOpener = currentFocusTargets.get('#teacher-help-button') ?? null;
+    setTeacherMode(parsed.unlocked ? 'unlocked' : 'locked');
+    if (teacherUI.dialog.open !== true) invoke(teacherUI.dialog.showModal, teacherUI.dialog, [], 'dialog.showModal');
+    focusTeacherField();
+    return undefined;
+  }
+
+  function showTeacherHelpUnlocked() {
+    assertAlive();
+    ensureTeacherDialog();
+    setTeacherMode('unlocked');
+    focusTeacherField();
+    return undefined;
+  }
+
+  function showTeacherHelpError(copy) {
+    assertAlive();
+    if (typeof copy !== 'string') throw new TypeError('teacher help copy must be a string');
+    ensureTeacherDialog();
+    replaceChildren(teacherUI.error, createText(copy));
+    return undefined;
+  }
+
+  function clearTeacherPin() {
+    assertAlive();
+    if (teacherUI !== null) {
+      try {
+        teacherUI.pin.value = '';
+        if (hasCallable(teacherUI.pin, 'setCustomValidity')) teacherUI.pin.setCustomValidity('');
+      } catch (error) {
+        throw asTypeError(error);
+      }
+    }
+    return undefined;
+  }
+
+  function closeTeacherHelp(options) {
+    assertAlive();
+    const parsed = readBooleanOptions(options, ['clearText', 'restoreFocus'], 'closeTeacherHelp options');
+    closeTeacherDialog(parsed.clearText, parsed.restoreFocus);
+    return undefined;
+  }
+
+  function ensureTeacherDialog() {
+    if (teacherUI !== null) return teacherUI;
+    const dialog = element('dialog', {
+      id: 'teacher-help-dialog',
+      'aria-modal': 'true',
+      'aria-labelledby': 'teacher-help-title',
+      'aria-describedby': 'teacher-help-description',
+    });
+    const title = element('h2', { id: 'teacher-help-title', tabindex: '-1' });
+    appendText(title, '老师帮忙');
+    const description = element('p', { id: 'teacher-help-description' });
+    appendText(description, '老师可以帮助继续这次对话。');
+
+    const unlockForm = element('form', { id: 'teacher-unlock-form', novalidate: '' });
+    const pinLabel = element('label', { for: 'teacher-pin' });
+    appendText(pinLabel, '教师 PIN');
+    const pin = element('input', {
+      id: 'teacher-pin',
+      type: 'password',
+      inputmode: 'numeric',
+      pattern: '[0-9]{4,6}',
+      minlength: '4',
+      maxlength: '6',
+      autocomplete: 'current-password',
+      required: '',
+    });
+    const error = element('p', {
+      id: 'teacher-help-error',
+      role: 'alert',
+      'aria-live': 'assertive',
+    });
+    const unlockButton = element('button', { id: 'teacher-unlock-button', type: 'submit' });
+    appendText(unlockButton, '解锁老师帮助');
+    append(unlockForm, pinLabel, pin, error, unlockButton);
+
+    const actions = element('section', { id: 'teacher-actions', 'aria-label': '老师帮助操作' });
+    const textLabel = element('label', { for: 'teacher-text' });
+    appendText(textLabel, '补录孩子刚才说的话');
+    const text = element('textarea', { id: 'teacher-text', maxlength: '2000' });
+    const actionsNote = element('p', { id: 'teacher-actions-note' });
+    const submitText = teacherButton('teacher-submit-text', '发送补录', 'submit-text');
+    const saveDraft = teacherButton('teacher-save-draft', '保存补录草稿', 'save-draft');
+    const retryRecovery = teacherButton('teacher-retry-recovery', '重新检查这次对话', 'retry-recovery');
+    const retryMicrophone = teacherButton('teacher-retry-microphone', '重试麦克风', 'retry-microphone');
+    const endSession = teacherButton('teacher-end-session', '结束并安全保存会话', 'end-session');
+    const lock = teacherButton('teacher-lock-button', '立即锁定', 'lock');
+    append(actions, textLabel, text, actionsNote, submitText, saveDraft, retryRecovery, retryMicrophone, endSession, lock);
+    const close = teacherButton('teacher-help-close', '返回孩子页面', 'close');
+    append(dialog, title, description, unlockForm, actions, close);
+    teacherUI = {
+      dialog,
+      title,
+      unlockForm,
+      pin,
+      error,
+      unlockButton,
+      actions,
+      text,
+      actionsNote,
+      submitText,
+      saveDraft,
+      retryRecovery,
+      retryMicrophone,
+      endSession,
+      lock,
+      close,
+    };
+    try {
+      unlockForm.addEventListener('submit', handleTeacherSubmit);
+      dialog.addEventListener('click', handleTeacherClick);
+      dialog.addEventListener('cancel', handleTeacherCancel);
+      dialog.addEventListener('keydown', handleTeacherKeydown);
+    } catch (error) {
+      teacherUI = null;
+      throw asTypeError(error);
+    }
+    append(root, dialog);
+    updateTeacherDialogFromSnapshot();
+    return teacherUI;
+  }
+
+  function teacherButton(id, text, token) {
+    const node = element('button', { id, type: 'button', 'data-teacher-action': token });
+    appendText(node, text);
+    return node;
+  }
+
+  function setTeacherMode(mode) {
+    teacherMode = mode;
+    setHidden(teacherUI.unlockForm, mode !== 'locked');
+    setHidden(teacherUI.actions, mode !== 'unlocked');
+    updateTeacherDialogFromSnapshot();
+  }
+
+  function updateTeacherDialogFromSnapshot() {
+    if (teacherUI === null) return;
+    setHidden(teacherUI.unlockForm, teacherMode !== 'locked');
+    setHidden(teacherUI.actions, teacherMode !== 'unlocked');
+    if (currentSnapshot === null || currentControls === null) return;
+    const retryDraft = currentSnapshot.value === 'submission_failed'
+      && currentSnapshot.draft !== null
+      && currentSnapshot.error?.retryable === true
+      && currentControls.retryDisabled === false;
+    if ((currentSnapshot.value === 'submitting' || currentSnapshot.value === 'submission_failed')
+      && currentSnapshot.draft !== null) {
+      try {
+        teacherUI.text.value = currentSnapshot.draft.text;
+      } catch (error) {
+        throw asTypeError(error);
+      }
+    }
+    replaceChildren(teacherUI.submitText, createText(retryDraft ? '重新发送这句话' : '发送补录'));
+    setAttribute(teacherUI.submitText, 'data-teacher-action', retryDraft ? 'retry' : 'submit-text');
+    setDisabled(teacherUI.submitText, retryDraft
+      ? currentControls.retryDisabled
+      : currentControls.teacherTextDisabled);
+    setDisabled(teacherUI.saveDraft, currentControls.teacherDraftDisabled);
+    setDisabled(teacherUI.retryRecovery, currentControls.teacherRecoveryRetryDisabled);
+    setDisabled(teacherUI.retryMicrophone, currentControls.teacherMicrophoneRetryDisabled);
+    setDisabled(teacherUI.endSession, currentControls.teacherCompleteDisabled);
+    const safe = currentControls.teacherTextDisabled === false
+      || currentControls.teacherRecoveryRetryDisabled === false
+      || currentControls.teacherMicrophoneRetryDisabled === false
+      || currentControls.teacherCompleteDisabled === false
+      || retryDraft;
+    replaceChildren(teacherUI.actionsNote, createText(safe ? '' : '请先在安全恢复状态下操作'));
+    setHidden(teacherUI.actionsNote, safe);
+  }
+
+  function focusTeacherField() {
+    const target = teacherMode === 'unlocked' ? teacherUI.text : teacherUI.pin;
+    try {
+      target.focus();
+    } catch (error) {
+      throw asTypeError(error);
+    }
+  }
+
+  function closeTeacherDialog(clearText, restoreFocus) {
+    if (teacherUI === null) return;
+    if (clearText === true) {
+      try {
+        teacherUI.pin.value = '';
+        teacherUI.text.value = '';
+        if (hasCallable(teacherUI.pin, 'setCustomValidity')) teacherUI.pin.setCustomValidity('');
+        replaceChildren(teacherUI.error);
+      } catch (error) {
+        throw asTypeError(error);
+      }
+      teacherMode = 'locked';
+      setHidden(teacherUI.unlockForm, false);
+      setHidden(teacherUI.actions, true);
+    }
+    if (teacherUI.dialog.open === true) invoke(teacherUI.dialog.close, teacherUI.dialog, [], 'dialog.close');
+    if (restoreFocus === true) {
+      const opener = teacherOpener;
+      if (opener !== null && contains(root, opener) && opener.disabled !== true && hasCallable(opener, 'focus')) {
+        try {
+          opener.focus();
+        } catch {
+          focus('#teacher-help-button');
+        }
+      } else {
+        focus('#teacher-help-button');
+      }
+    }
+    teacherOpener = null;
+  }
+
+  function handleTeacherSubmit(event) {
+    if (destroyed || teacherUI === null || teacherMode !== 'locked') return;
+    try {
+      if (event !== null && typeof event === 'object' && hasCallable(event, 'preventDefault')) event.preventDefault();
+      actionCallbacks.onSubmitTeacherPin(teacherUI.pin.value);
+    } catch {}
+  }
+
+  function handleTeacherClick(event) {
+    if (destroyed || teacherUI === null) return;
+    const target = findTeacherActionElement(event);
+    if (target === null || target.disabled === true || !contains(teacherUI.dialog, target)) return;
+    const token = safeGetAttribute(target, 'data-teacher-action');
+    try {
+      if (token === 'submit-text') {
+        actionCallbacks.onSubmitTeacherText(teacherUI.text.value);
+        return;
+      }
+      if (token === 'retry') {
+        actionCallbacks.onRetry();
+        return;
+      }
+      if (token === 'close') {
+        closeTeacherDialog(true, true);
+        return;
+      }
+      if (!Object.hasOwn(TEACHER_TOKEN_TO_KEY, token)) return;
+      const callback = actionCallbacks[TEACHER_TOKEN_TO_KEY[token]];
+      if (typeof callback === 'function') callback(token === 'save-draft' ? teacherUI.text.value : undefined);
+    } catch {}
+  }
+
+  function handleTeacherCancel(event) {
+    if (destroyed || teacherUI === null) return;
+    try {
+      if (event !== null && typeof event === 'object' && hasCallable(event, 'preventDefault')) event.preventDefault();
+      closeTeacherDialog(true, true);
+    } catch {}
+  }
+
+  function handleTeacherKeydown(event) {
+    if (destroyed || teacherUI === null || teacherUI.dialog.open !== true) return;
+    let key;
+    let shiftKey;
+    let target;
+    try {
+      key = event?.key;
+      shiftKey = event?.shiftKey === true;
+      target = event?.target;
+    } catch {
+      return;
+    }
+    if (key !== 'Tab') return;
+    const candidates = teacherMode === 'locked'
+      ? [teacherUI.pin, teacherUI.unlockButton, teacherUI.close]
+      : [
+        teacherUI.text,
+        teacherUI.submitText,
+        teacherUI.saveDraft,
+        teacherUI.retryRecovery,
+        teacherUI.retryMicrophone,
+        teacherUI.endSession,
+        teacherUI.lock,
+        teacherUI.close,
+      ];
+    const enabled = candidates.filter(candidate => candidate.disabled !== true && contains(teacherUI.dialog, candidate));
+    if (enabled.length === 0) return;
+    const destination = shiftKey && target === enabled[0]
+      ? enabled.at(-1)
+      : !shiftKey && target === enabled.at(-1)
+        ? enabled[0]
+        : null;
+    if (destination === null) return;
+    try {
+      if (hasCallable(event, 'preventDefault')) event.preventDefault();
+      destination.focus();
+    } catch {}
+  }
+
+  function findTeacherActionElement(event) {
+    let node;
+    try {
+      node = event === null || typeof event !== 'object' ? null : event.target;
+    } catch {
+      return null;
+    }
+    const seen = new Set();
+    while (node !== null && node !== undefined && node !== teacherUI.dialog && !seen.has(node)) {
+      seen.add(node);
+      if (hasCallable(node, 'getAttribute') && safeGetAttribute(node, 'data-teacher-action') !== null) return node;
+      try {
+        node = node.parentNode;
+      } catch {
+        return null;
+      }
+    }
+    return null;
+  }
+
   function scheduleFocus(epoch, state, selector) {
     try {
       domAPI.queueMicrotask(() => {
@@ -327,10 +655,19 @@ export function createChildView(root, actions, dom) {
     renderEpoch += 1;
     currentState = null;
     currentStatus = null;
+    currentSnapshot = null;
+    currentControls = null;
     currentActionables = new Set();
     currentFocusTargets = new Map();
     try {
       root.removeEventListener('click', handleClick);
+      if (teacherUI !== null) {
+        teacherUI.unlockForm.removeEventListener('submit', handleTeacherSubmit);
+        teacherUI.dialog.removeEventListener('click', handleTeacherClick);
+        teacherUI.dialog.removeEventListener('cancel', handleTeacherCancel);
+        teacherUI.dialog.removeEventListener('keydown', handleTeacherKeydown);
+      }
+      if (teacherUI !== null) closeTeacherDialog(true, false);
       replaceChildren(root);
     } catch (error) {
       throw asTypeError(error);
@@ -403,7 +740,17 @@ export function createChildView(root, actions, dom) {
     throw asTypeError(error);
   }
 
-  return Object.freeze({ render, announce, focus, destroy });
+  return Object.freeze({
+    render,
+    announce,
+    focus,
+    destroy,
+    openTeacherHelp,
+    showTeacherHelpUnlocked,
+    showTeacherHelpError,
+    clearTeacherPin,
+    closeTeacherHelp,
+  });
 }
 
 function validateActions(actions) {
@@ -411,9 +758,7 @@ function validateActions(actions) {
   const callbacks = Object.create(null);
   for (const key of ACTION_KEYS) {
     const value = values[key];
-    if (key === 'onOpenTeacherHelp') {
-      if (value !== null && typeof value !== 'function') throw new TypeError('onOpenTeacherHelp must be a function or null');
-    } else if (typeof value !== 'function') {
+    if (typeof value !== 'function') {
       throw new TypeError(`${key} must be a function`);
     }
     callbacks[key] = value;
@@ -550,6 +895,14 @@ function setDisabled(element, disabled) {
   }
 }
 
+function setHidden(element, hidden) {
+  try {
+    element.hidden = hidden === true;
+  } catch (error) {
+    throw asTypeError(error);
+  }
+}
+
 function safeGetAttribute(element, name) {
   try {
     return element.getAttribute(name);
@@ -614,7 +967,7 @@ function errorCopy(error) {
   return ERROR_COPY.get(error?.code) ?? RECOVERY_FALLBACK;
 }
 
-function focusTargetFor(snapshot, controls, helpIsUnavailable) {
+function focusTargetFor(snapshot, controls) {
   switch (snapshot.value) {
     case 'welcome': return '#start-button';
     case 'loading_roster': return '#child-status';
@@ -628,11 +981,39 @@ function focusTargetFor(snapshot, controls, helpIsUnavailable) {
     case 'submission_failed':
       return snapshot.draft !== null && snapshot.child !== null && !controls.retryDisabled
         ? '#retry-button'
-        : helpIsUnavailable ? '#child-status' : '#teacher-help-button';
+        : '#teacher-help-button';
     case 'completed': return '#reset-button';
-    case 'recovery': return helpIsUnavailable ? '#child-status' : '#teacher-help-button';
+    case 'recovery': return '#teacher-help-button';
     default: throw new TypeError('Unknown child view state');
   }
+}
+
+function readBooleanOptions(value, keys, name) {
+  let ownKeys;
+  try {
+    ownKeys = Reflect.ownKeys(value);
+  } catch {
+    throw new TypeError(`${name} must be an own-data record`);
+  }
+  if (value === null || (typeof value !== 'object' && typeof value !== 'function')
+    || ownKeys.length !== keys.length
+    || ownKeys.some(key => typeof key !== 'string' || !keys.includes(key))) {
+    throw new TypeError(`${name} must be an own-data record`);
+  }
+  const result = Object.create(null);
+  for (const key of keys) {
+    let descriptor;
+    try {
+      descriptor = Reflect.getOwnPropertyDescriptor(value, key);
+    } catch {
+      throw new TypeError(`${name} must be an own-data record`);
+    }
+    if (descriptor === undefined || !Object.hasOwn(descriptor, 'value') || typeof descriptor.value !== 'boolean') {
+      throw new TypeError(`${name}.${key} must be a boolean data property`);
+    }
+    result[key] = descriptor.value;
+  }
+  return result;
 }
 
 function asTypeError(error) {

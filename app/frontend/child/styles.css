@@ -135,6 +135,90 @@
   color: #5b352f;
 }
 
+#child-app #teacher-help-dialog {
+  box-sizing: border-box;
+  inline-size: min(92vw, 720px);
+  max-block-size: min(88vh, 680px);
+  padding: clamp(18px, 3vw, 30px);
+  overflow: auto;
+  border: 3px solid #1d5fb0;
+  border-radius: 18px;
+  color: #242421;
+  background: #fffdf5;
+  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: clamp(17px, 2vw, 22px);
+  line-height: 1.5;
+}
+
+#child-app #teacher-help-dialog::backdrop {
+  background: rgb(20 28 38 / 58%);
+}
+
+#child-app #teacher-help-dialog form,
+#child-app #teacher-help-dialog #teacher-actions {
+  display: grid;
+  gap: 12px;
+  margin-block: 18px;
+}
+
+#child-app #teacher-help-dialog #teacher-unlock-form[hidden],
+#child-app #teacher-help-dialog #teacher-actions[hidden] {
+  display: none;
+}
+
+#child-app #teacher-help-dialog button,
+#child-app #teacher-help-dialog input,
+#child-app #teacher-help-dialog textarea {
+  min-inline-size: 44px;
+  min-block-size: 44px;
+  font: inherit;
+}
+
+#child-app #teacher-help-dialog input,
+#child-app #teacher-help-dialog textarea {
+  padding: 10px 12px;
+  border: 2px solid #5f6c78;
+  border-radius: 10px;
+  color: #242421;
+  background: #ffffff;
+}
+
+#child-app #teacher-help-dialog textarea {
+  inline-size: 100%;
+  min-block-size: 120px;
+  resize: vertical;
+}
+
+#child-app #teacher-help-dialog button {
+  padding: 10px 16px;
+  border: 3px solid #1d5fb0;
+  border-radius: 12px;
+  color: #ffffff;
+  background: #1d5fb0;
+}
+
+#child-app #teacher-help-dialog button:disabled {
+  border-color: #67717d;
+  color: #38424c;
+  background: #d7dde2;
+}
+
+#child-app #teacher-help-dialog :focus-visible {
+  outline: 4px solid #0b4f9c;
+  outline-offset: 3px;
+}
+
+#child-app #teacher-help-error {
+  min-block-size: 1.5em;
+  padding: 8px 10px;
+  color: #7b1f16;
+  background: #fff0ed;
+}
+
+#child-app #teacher-actions-note {
+  color: #5b352f;
+}
+
 @media (max-width: 1024px) {
   #child-app .child-view {
     gap: 12px;
@@ -143,6 +227,11 @@
 
   #child-app .child-view [role="log"] {
     max-block-size: 26vh;
+  }
+
+  #child-app #teacher-help-dialog {
+    inline-size: min(96vw, 680px);
+    max-block-size: 92vh;
   }
 }
 
@@ -156,7 +245,9 @@
   #child-app .child-view,
   #child-app .child-view *,
   #child-app .child-view *::before,
-  #child-app .child-view *::after {
+  #child-app .child-view *::after,
+  #child-app #teacher-help-dialog,
+  #child-app #teacher-help-dialog * {
     animation: none !important;
     scroll-behavior: auto;
     transition: none !important;

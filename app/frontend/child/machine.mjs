@@ -67,6 +67,13 @@ export function transition(snapshot, event) {
     throw new TypeError('event must have an own non-empty type');
   }
 
+  if (event.type === 'TEACHER_UNLOCKED') {
+    return replace(snapshot, { teacherUnlocked: true });
+  }
+  if (event.type === 'TEACHER_LOCKED') {
+    return replace(snapshot, { teacherUnlocked: false });
+  }
+
   switch (`${snapshot.value}:${event.type}`) {
     case 'welcome:START':
       return replace(snapshot, { value: 'loading_roster', error: null });
@@ -169,8 +176,53 @@ export function transition(snapshot, event) {
     case 'recovery:RECOVERY_RESOLVED':
       return resolveRecovery(event.snapshot);
 
-    case 'recovery:TEACHER_UNLOCKED':
-      return replace(snapshot, { teacherUnlocked: true });
+    case 'recovery:TEACHER_RECOVERY_RETRY':
+      if (snapshot.teacherUnlocked !== true) throw illegalTransition(snapshot, event);
+      return replace(snapshot, {});
+
+    case 'recovery:TEACHER_TEXT_SUBMITTED':
+      if (snapshot.teacherUnlocked !== true || snapshot.child === null
+        || snapshot.draft !== null || snapshot.shouldComplete !== false) {
+        throw illegalTransition(snapshot, event);
+      }
+      return replace(snapshot, {
+        value: 'submitting',
+        draft: normalizeDraft(event.draft),
+        error: null,
+      });
+
+    case 'recovery:TEACHER_DRAFT_SAVED':
+      if (snapshot.teacherUnlocked !== true || snapshot.child === null
+        || snapshot.draft !== null || snapshot.shouldComplete !== false) {
+        throw illegalTransition(snapshot, event);
+      }
+      return replace(snapshot, {
+        value: 'submission_failed',
+        draft: normalizeDraft(event.draft),
+        error: { code: 'TEACHER_DRAFT_SAVED', retryable: true },
+      });
+
+    case 'recovery:TEACHER_RETRY_MICROPHONE':
+      if (snapshot.teacherUnlocked !== true || snapshot.child === null
+        || snapshot.draft !== null || snapshot.shouldComplete !== false) {
+        throw illegalTransition(snapshot, event);
+      }
+      return replace(snapshot, {
+        value: 'listening',
+        stopRequested: false,
+        error: null,
+      });
+
+    case 'recovery:TEACHER_COMPLETE_REQUESTED':
+      if (snapshot.teacherUnlocked !== true || snapshot.conversationId === null
+        || snapshot.lastMessageId === null || snapshot.messages.length === 0) {
+        throw illegalTransition(snapshot, event);
+      }
+      return replace(snapshot, {
+        value: 'saving_conversation',
+        shouldComplete: true,
+        error: null,
+      });
 
     case 'recovery:RESET':
     case 'completed:RESET':
@@ -188,6 +240,16 @@ export function controlsFor(snapshot) {
   const canType = snapshot.teacherUnlocked === true
     && (snapshot.value === 'ready' || snapshot.value === 'submission_failed');
   const canRetry = snapshot.value === 'submission_failed' && snapshot.error?.retryable === true;
+  const teacherRecovery = snapshot.value === 'recovery' && snapshot.teacherUnlocked === true;
+  const teacherSafeInput = teacherRecovery
+    && snapshot.child !== null
+    && snapshot.draft === null
+    && snapshot.shouldComplete === false;
+  const teacherSafeCompletion = teacherRecovery
+    && snapshot.conversationId !== null
+    && snapshot.lastMessageId !== null
+    && snapshot.messages.length > 0
+    && snapshot.messages.at(-1).id === snapshot.lastMessageId;
 
   return Object.freeze({
     busy,
@@ -195,6 +257,11 @@ export function controlsFor(snapshot) {
     recordDisabled: !canRecord,
     textDisabled: !canType,
     retryDisabled: !canRetry,
+    teacherTextDisabled: !teacherSafeInput,
+    teacherDraftDisabled: !teacherSafeInput,
+    teacherRecoveryRetryDisabled: !teacherRecovery,
+    teacherMicrophoneRetryDisabled: !teacherSafeInput,
+    teacherCompleteDisabled: !teacherSafeCompletion,
   });
 }
 

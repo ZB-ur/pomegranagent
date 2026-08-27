@@ -31,6 +31,11 @@ class FakeElement {
     this.listeners = new Map();
     this.focusState = focusState;
     this.replaceCount = 0;
+    this.hidden = false;
+    this.open = false;
+    this.value = '';
+    this.showModalCount = 0;
+    this.closeCount = 0;
   }
 
   append(...nodes) {
@@ -74,6 +79,22 @@ class FakeElement {
 
   removeEventListener(type, listener) {
     this.listeners.get(type)?.delete(listener);
+  }
+
+  showModal() {
+    this.showModalCount += 1;
+    this.open = true;
+    this.setAttribute('open', '');
+  }
+
+  close() {
+    this.closeCount += 1;
+    this.open = false;
+    this.attributes.delete('open');
+  }
+
+  setCustomValidity(message) {
+    this.validationMessage = String(message);
   }
 
   querySelector(selector) {
@@ -151,6 +172,13 @@ function actions(overrides = {}) {
     onRetry() {},
     onReset() {},
     onOpenTeacherHelp() {},
+    onSubmitTeacherPin() {},
+    onSubmitTeacherText() {},
+    onSaveTeacherDraft() {},
+    onRetryTeacherRecovery() {},
+    onRetryMicrophone() {},
+    onEndWithTeacher() {},
+    onLockTeacherHelp() {},
     ...overrides,
   };
 }
@@ -198,16 +226,37 @@ function dispatchClick(root, target) {
   for (const listener of root.listeners.get('click') ?? []) listener({ target });
 }
 
+function dispatch(target, type, event = {}) {
+  const supplied = {
+    target,
+    preventDefault() { this.defaultPrevented = true; },
+    defaultPrevented: false,
+    ...event,
+  };
+  for (const listener of target.listeners.get(type) ?? []) listener(supplied);
+  return supplied;
+}
+
 function actionButton(root, token) {
   return find(root, node => node instanceof FakeElement && node.getAttribute('data-child-action') === token);
 }
 
-test('exports only createChildView and returns the frozen four-method surface', () => {
+test('exports only createChildView and returns the frozen nine-method surface', () => {
   assert.deepEqual(Object.keys(viewModule), ['createChildView']);
   const fake = createFakeDOM();
   const view = createChildView(fake.root, actions(), fake.dom);
   assert.equal(Object.isFrozen(view), true);
-  assert.deepEqual(Object.keys(view).sort(), ['announce', 'destroy', 'focus', 'render']);
+  assert.deepEqual(Object.keys(view).sort(), [
+    'announce',
+    'clearTeacherPin',
+    'closeTeacherHelp',
+    'destroy',
+    'focus',
+    'openTeacherHelp',
+    'render',
+    'showTeacherHelpError',
+    'showTeacherHelpUnlocked',
+  ]);
   assert.equal(view.announce('before render'), undefined);
   assert.equal(view.focus('#start-button'), false);
   assert.equal(view.destroy(), undefined);
@@ -472,7 +521,7 @@ test('uses log semantics, visible speakers, and a separate unconfirmed draft wit
   assert.equal(fake.root.textContent.includes('分析完成'), false);
 });
 
-test('uses machine retry authorization and defensively routes incomplete retry state to help or status', () => {
+test('uses machine retry authorization and routes incomplete retry state to enabled teacher help', () => {
   const fake = createFakeDOM();
   const realHelp = createChildView(fake.root, actions(), fake.dom);
   realHelp.render(snapshotFor('submission_failed'));
@@ -480,13 +529,13 @@ test('uses machine retry authorization and defensively routes incomplete retry s
   assert.equal(realHelp.focus('#retry-button'), true);
 
   const defensive = createFakeDOM();
-  const nullHelp = createChildView(defensive.root, actions({ onOpenTeacherHelp: null }), defensive.dom);
-  nullHelp.render(snapshotFor('submission_failed', { child: null, draft: null }));
+  const teacherHelp = createChildView(defensive.root, actions(), defensive.dom);
+  teacherHelp.render(snapshotFor('submission_failed', { child: null, draft: null }));
   defensive.flush();
   assert.equal(byId(defensive.root, 'retry-button'), null);
   assert.equal(byId(defensive.root, 'child-status').textContent, '这句话没有可重发的草稿，请老师帮忙');
-  assert.equal(defensive.focused(), byId(defensive.root, 'child-status'));
-  assert.equal(nullHelp.focus('#teacher-help-button'), false);
+  assert.equal(defensive.focused(), byId(defensive.root, 'teacher-help-button'));
+  assert.equal(teacherHelp.focus('#teacher-help-button'), true);
 });
 
 test('announces literal text without focus theft and invalidates stale queued focus work', () => {
@@ -553,22 +602,209 @@ test('maps every approved error code to fixed local copy without rendering raw e
   }
 });
 
-test('makes null teacher help visibly and natively unavailable without a no-op', () => {
+test('keeps teacher help visibly and natively available in every rendered state', () => {
   const fake = createFakeDOM();
-  const view = createChildView(fake.root, actions({ onOpenTeacherHelp: null }), fake.dom);
+  assert.throws(() => createChildView(fake.root, actions({ onOpenTeacherHelp: null }), fake.dom), TypeError);
+  const view = createChildView(fake.root, actions(), fake.dom);
   view.render(snapshotFor('welcome'));
   const help = byId(fake.root, 'teacher-help-button');
-  assert.equal(help.disabled, true);
-  assert.equal(help.getAttribute('aria-describedby'), 'child-status teacher-help-unavailable-note');
-  assert.equal(byId(fake.root, 'teacher-help-unavailable-note').textContent, '老师帮助功能尚未启用');
-  assert.equal(view.focus('#teacher-help-button'), false);
+  assert.equal(help.disabled, false);
+  assert.equal(help.getAttribute('aria-describedby'), 'child-status');
+  assert.equal(byId(fake.root, 'teacher-help-unavailable-note'), null);
+  assert.equal(view.focus('#teacher-help-button'), true);
+});
 
-  const enabled = createFakeDOM();
-  const activeView = createChildView(enabled.root, actions(), enabled.dom);
-  activeView.render(snapshotFor('welcome'));
-  assert.equal(byId(enabled.root, 'teacher-help-unavailable-note'), null);
-  assert.equal(byId(enabled.root, 'teacher-help-button').disabled, false);
-  assert.equal(byId(enabled.root, 'teacher-help-button').getAttribute('aria-describedby'), 'child-status');
+test('teacher help remains visible and opens a labelled native dialog without unsafe text rendering', () => {
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions(), fake.dom);
+  view.render(snapshotFor('recovery'));
+  const opener = byId(fake.root, 'teacher-help-button');
+  assert.equal(opener.disabled, false);
+  assert.equal(byId(fake.root, 'teacher-help-unavailable-note'), null);
+
+  view.openTeacherHelp({ unlocked: false });
+  const dialog = byId(fake.root, 'teacher-help-dialog');
+  const pin = byId(fake.root, 'teacher-pin');
+  assert.ok(dialog);
+  assert.equal(dialog.tagName, 'DIALOG');
+  assert.equal(dialog.getAttribute('aria-modal'), 'true');
+  assert.equal(dialog.getAttribute('aria-labelledby'), 'teacher-help-title');
+  assert.equal(dialog.getAttribute('aria-describedby'), 'teacher-help-description');
+  assert.equal(byId(fake.root, 'teacher-help-title').textContent, '老师帮忙');
+  assert.equal(byId(fake.root, 'teacher-help-description').textContent, '老师可以帮助继续这次对话。');
+  assert.equal(pin.getAttribute('type'), 'password');
+  assert.equal(pin.getAttribute('inputmode'), 'numeric');
+  assert.equal(pin.getAttribute('pattern'), '[0-9]{4,6}');
+  assert.equal(pin.getAttribute('minlength'), '4');
+  assert.equal(pin.getAttribute('maxlength'), '6');
+  assert.equal(pin.getAttribute('autocomplete'), 'current-password');
+  assert.equal(pin.getAttribute('required'), '');
+  assert.equal(byId(fake.root, 'teacher-help-error').getAttribute('role'), 'alert');
+  assert.equal(byId(fake.root, 'teacher-help-error').getAttribute('aria-live'), 'assertive');
+  assert.equal(byId(fake.root, 'teacher-unlock-form').hidden, false);
+  assert.equal(byId(fake.root, 'teacher-actions').hidden, true);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.showModalCount, 1);
+  assert.equal(fake.focused(), pin);
+
+  const sameDialog = dialog;
+  const samePin = pin;
+  view.showTeacherHelpError('<img src=x onerror=boom>');
+  assert.equal(byId(fake.root, 'teacher-help-error').textContent, '<img src=x onerror=boom>');
+  assert.equal(findAll(fake.root, node => node.tagName === 'IMG').length, 0);
+  view.render(snapshotFor('submission_failed'));
+  assert.equal(byId(fake.root, 'teacher-help-dialog'), sameDialog);
+  assert.equal(byId(fake.root, 'teacher-pin'), samePin);
+  assert.equal(dialog.open, true);
+  view.openTeacherHelp({ unlocked: false });
+  assert.equal(dialog.showModalCount, 1);
+
+  view.showTeacherHelpUnlocked();
+  assert.equal(byId(fake.root, 'teacher-unlock-form').hidden, true);
+  assert.equal(byId(fake.root, 'teacher-actions').hidden, false);
+  assert.equal(fake.focused(), byId(fake.root, 'teacher-text'));
+});
+
+test('teacher dialog delegates PIN, text, draft, retry, microphone, end, and lock actions without storing input', () => {
+  const calls = [];
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions({
+    onSubmitTeacherPin: value => calls.push(['pin', value]),
+    onSubmitTeacherText: value => calls.push(['text', value]),
+    onSaveTeacherDraft: value => calls.push(['draft', value]),
+    onRetry: () => calls.push(['retry']),
+    onRetryTeacherRecovery: () => calls.push(['recovery']),
+    onRetryMicrophone: () => calls.push(['microphone']),
+    onEndWithTeacher: () => calls.push(['end']),
+    onLockTeacherHelp: () => calls.push(['lock']),
+  }), fake.dom);
+  const recovery = snapshotFor('recovery', {
+    teacherUnlocked: true,
+    draft: null,
+    error: { code: 'SPEECH_FAILED', retryable: true, message: 'raw' },
+  });
+  view.render(recovery);
+  view.openTeacherHelp({ unlocked: false });
+  const dialog = byId(fake.root, 'teacher-help-dialog');
+  const pin = byId(fake.root, 'teacher-pin');
+  const text = byId(fake.root, 'teacher-text');
+  pin.value = '4826';
+  const submitted = dispatch(byId(fake.root, 'teacher-unlock-form'), 'submit');
+  assert.equal(submitted.defaultPrevented, true);
+  assert.deepEqual(calls.pop(), ['pin', '4826']);
+  assert.equal(fake.root.textContent.includes('4826'), false);
+
+  view.showTeacherHelpUnlocked();
+  text.value = '机密补录-4826';
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-submit-text') });
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-save-draft') });
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-retry-recovery') });
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-retry-microphone') });
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-end-session') });
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-lock-button') });
+  assert.deepEqual(calls, [
+    ['text', '机密补录-4826'],
+    ['draft', '机密补录-4826'],
+    ['recovery'],
+    ['microphone'],
+    ['end'],
+    ['lock'],
+  ]);
+  assert.equal(fake.root.textContent.includes('机密补录-4826'), false);
+
+  const sameDialog = dialog;
+  const sameText = text;
+  view.render(snapshotFor('submitting', { teacherUnlocked: true, draft }));
+  assert.equal(byId(fake.root, 'teacher-help-dialog'), sameDialog);
+  assert.equal(byId(fake.root, 'teacher-text'), sameText);
+  assert.equal(text.value, draft.text);
+  assert.equal(byId(fake.root, 'teacher-submit-text').disabled, true);
+  assert.equal(byId(fake.root, 'teacher-save-draft').disabled, true);
+
+  calls.length = 0;
+  view.render(snapshotFor('submission_failed', {
+    teacherUnlocked: true,
+    draft,
+    error: { code: 'NETWORK_ERROR', retryable: true, message: 'raw' },
+  }));
+  assert.equal(byId(fake.root, 'teacher-help-dialog'), sameDialog);
+  assert.equal(byId(fake.root, 'teacher-text'), sameText);
+  assert.equal(text.value, draft.text);
+  assert.equal(byId(fake.root, 'teacher-submit-text').textContent, '重新发送这句话');
+  assert.equal(byId(fake.root, 'teacher-submit-text').disabled, false);
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-submit-text') });
+  assert.deepEqual(calls, [['retry']]);
+
+  view.render(snapshotFor('ready', { teacherUnlocked: true }));
+  assert.equal(byId(fake.root, 'teacher-actions-note').textContent, '请先在安全恢复状态下操作');
+  assert.equal(byId(fake.root, 'teacher-submit-text').disabled, true);
+  assert.equal(byId(fake.root, 'teacher-retry-recovery').disabled, true);
+});
+
+test('teacher dialog traps Tab, restores focus, clears secrets, and leaves global Space to the injected keyboard policy', () => {
+  const calls = [];
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions({
+    onRecordToggle: () => calls.push('record'),
+    onLockTeacherHelp: () => calls.push('lock'),
+  }), fake.dom);
+  view.render(snapshotFor('recovery', {
+    teacherUnlocked: true,
+    error: { code: 'SPEECH_FAILED', retryable: true, message: 'raw' },
+  }));
+  fake.flush();
+  const firstOpener = byId(fake.root, 'teacher-help-button');
+  view.openTeacherHelp({ unlocked: true });
+  const dialog = byId(fake.root, 'teacher-help-dialog');
+  const text = byId(fake.root, 'teacher-text');
+  const close = byId(fake.root, 'teacher-help-close');
+  assert.equal(fake.focused(), text);
+
+  let keyEvent = dispatch(dialog, 'keydown', { key: 'Tab', shiftKey: true, target: text });
+  assert.equal(keyEvent.defaultPrevented, true);
+  assert.equal(fake.focused(), close);
+  keyEvent = dispatch(dialog, 'keydown', { key: 'Tab', shiftKey: false, target: close });
+  assert.equal(keyEvent.defaultPrevented, true);
+  assert.equal(fake.focused(), text);
+  dispatch(dialog, 'keydown', { key: ' ', code: 'Space', target: byId(fake.root, 'teacher-help-title') });
+  assert.deepEqual(calls, []);
+
+  text.value = '机密补录-4826';
+  byId(fake.root, 'teacher-pin').value = '4826';
+  view.showTeacherHelpError('固定错误');
+  const cancel = dispatch(dialog, 'cancel');
+  assert.equal(cancel.defaultPrevented, true);
+  assert.equal(dialog.open, false);
+  assert.equal(dialog.closeCount, 1);
+  assert.equal(text.value, '');
+  assert.equal(byId(fake.root, 'teacher-pin').value, '');
+  assert.equal(byId(fake.root, 'teacher-help-error').textContent, '');
+  assert.equal(fake.focused(), firstOpener);
+
+  view.openTeacherHelp({ unlocked: true });
+  const staleOpener = firstOpener;
+  view.render(snapshotFor('recovery', {
+    teacherUnlocked: true,
+    error: { code: 'SPEECH_FAILED', retryable: true, message: 'raw' },
+  }));
+  assert.equal(fake.root.contains(staleOpener), false);
+  dispatch(dialog, 'click', { target: close });
+  assert.equal(dialog.closeCount, 2);
+  assert.equal(fake.focused(), byId(fake.root, 'teacher-help-button'));
+
+  view.openTeacherHelp({ unlocked: true });
+  view.closeTeacherHelp({ clearText: true, restoreFocus: true });
+  assert.equal(dialog.closeCount, 3);
+  assert.equal(dialog.open, false);
+  assert.deepEqual(calls, []);
+
+  view.openTeacherHelp({ unlocked: false });
+  const closeCount = dialog.closeCount;
+  view.destroy();
+  assert.equal(dialog.closeCount, closeCount + 1);
+  dispatch(dialog, 'cancel');
+  dispatch(dialog, 'keydown', { key: 'Tab', target: byId(dialog, 'teacher-pin') });
+  assert.deepEqual(calls, []);
 });
 
 test('styles retain the standalone static accessibility and safety contract', () => {
@@ -579,6 +815,11 @@ test('styles retain the standalone static accessibility and safety contract', ()
   assert.match(css, /@media\s*\(prefers-reduced-motion:\s*reduce\)/);
   assert.match(css, /1024px/);
   assert.match(css, /1280px/);
+  assert.match(css, /#child-app\s+#teacher-help-dialog[\s\S]*max-block-size[\s\S]*overflow\s*:\s*auto/);
+  assert.match(css, /#child-app\s+#teacher-help-dialog\s+textarea[\s\S]*inline-size\s*:\s*100%/);
+  assert.match(css, /#child-app\s+#teacher-help-dialog\s+(?:button|input|textarea)[\s\S]*min-block-size\s*:\s*44px/);
+  assert.match(css, /#child-app\s+#teacher-help-error[\s\S]*color\s*:\s*#7b1f16/i);
+  assert.match(css, /#child-app\s+#teacher-help-dialog\s+:focus-visible[\s\S]*outline/);
   assert.doesNotMatch(css, /overflow\s*:\s*hidden/i);
   assert.doesNotMatch(css, /@import|url\s*\(/i);
 });

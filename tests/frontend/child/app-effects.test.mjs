@@ -84,6 +84,11 @@ function createFixture() {
     render(snapshot) { calls.view.push(['render', snapshot]); },
     announce(text) { calls.view.push(['announce', text]); },
     focus(selector) { calls.view.push(['focus', selector]); return false; },
+    openTeacherHelp(options) { calls.view.push(['openTeacherHelp', options]); },
+    showTeacherHelpUnlocked() { calls.view.push(['showTeacherHelpUnlocked']); },
+    showTeacherHelpError(copy) { calls.view.push(['showTeacherHelpError', copy]); },
+    clearTeacherPin() { calls.view.push(['clearTeacherPin']); },
+    closeTeacherHelp(options) { calls.view.push(['closeTeacherHelp', options]); },
     destroy() { calls.view.push(['destroy']); },
   };
   class FakeAbortController {
@@ -130,6 +135,7 @@ function createFixture() {
 function createBootstrapFixture() {
   const child = createFixture();
   const calls = {
+    actions: null,
     order: [],
     bootstrapAPI: 0,
     maintenance: [],
@@ -166,7 +172,22 @@ function createBootstrapFixture() {
       calls.order.push('view');
       assert.equal(root, deps.root);
       assert.equal(dom, deps.dom);
-      assert.equal(actions.onOpenTeacherHelp, null);
+      calls.actions = actions;
+      assert.deepEqual(Reflect.ownKeys(actions).sort(), [
+        'onEndWithTeacher', 'onLockTeacherHelp', 'onOpenTeacherHelp', 'onRecordToggle',
+        'onReset', 'onRetry', 'onRetryMicrophone', 'onRetryTeacherRecovery',
+        'onSaveTeacherDraft', 'onSelectChild', 'onStart', 'onSubmitTeacherPin',
+        'onSubmitTeacherText',
+      ]);
+      for (const callback of Object.values(actions)) assert.equal(typeof callback, 'function');
+      assert.equal(actions.onOpenTeacherHelp(), undefined);
+      assert.equal(actions.onSubmitTeacherPin('1234'), undefined);
+      assert.equal(actions.onSubmitTeacherText('补录'), undefined);
+      assert.equal(actions.onSaveTeacherDraft('草稿'), undefined);
+      assert.equal(actions.onRetryTeacherRecovery(), undefined);
+      assert.equal(actions.onRetryMicrophone(), undefined);
+      assert.equal(actions.onEndWithTeacher(), undefined);
+      assert.equal(actions.onLockTeacherHelp(), undefined);
       return child.deps.view;
     },
     root: {},
@@ -319,6 +340,31 @@ function localReadyRecord() {
   };
 }
 
+async function enterAuthorizedRecovery(fixture, teacherStatus = null) {
+  fixture.deps.api.getTodayRoster = () => {
+    fixture.calls.api.push('roster');
+    return Promise.resolve([childRecord()]);
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: null });
+  };
+  fixture.deps.api.teacherStatus = teacherStatus ?? (() => {
+    fixture.calls.api.push('teacherStatus');
+    return Promise.resolve({ configured: true, authenticated: true });
+  });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'error', error: { code: 'SPEECH_FAILED', retryable: true } });
+  await app.openTeacherHelp();
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.equal(app.getSnapshot().teacherUnlocked, true);
+  return app;
+}
+
 test('createChildApp accepts only trap-safe exact plain dependency facades before effects', () => {
   const valid = createFixture();
   const app = createChildApp(valid.deps);
@@ -444,8 +490,10 @@ test('child app exposes the frozen lifecycle surface and destruction is an idemp
   const beforeDestroy = app.getSnapshot();
 
   assert.deepEqual(Reflect.ownKeys(app).sort(), [
-    'destroy', 'getSnapshot', 'handleGlobalKeydown', 'initialize', 'recordToggle', 'reset',
-    'retry', 'selectChild', 'start',
+    'destroy', 'endWithTeacher', 'getSnapshot', 'handleGlobalKeydown', 'initialize',
+    'lockTeacherHelp', 'openTeacherHelp', 'recordToggle', 'reset', 'retry',
+    'retryMicrophone', 'retryTeacherRecovery', 'saveTeacherDraft', 'selectChild', 'start',
+    'submitTeacherPin', 'submitTeacherText',
   ]);
   assert.equal(Object.isFrozen(app), true);
   assert.equal(Object.isFrozen(beforeDestroy), true);
@@ -455,8 +503,17 @@ test('child app exposes the frozen lifecycle surface and destruction is an idemp
   assert.equal(await app.retry(), undefined);
   assert.equal(app.reset(), undefined);
   assert.equal(app.handleGlobalKeydown({ code: 'Space' }), false);
-  assert.deepEqual(fixture.calls.api, ['ready']);
+  assert.equal(await app.openTeacherHelp(), undefined);
+  assert.equal(await app.submitTeacherPin('1234'), undefined);
+  assert.equal(await app.submitTeacherText('补录'), undefined);
+  assert.equal(await app.saveTeacherDraft('草稿'), undefined);
+  assert.equal(await app.retryTeacherRecovery(), undefined);
+  assert.equal(await app.retryMicrophone(), undefined);
+  assert.equal(await app.endWithTeacher(), undefined);
+  assert.equal(await app.lockTeacherHelp(), undefined);
+  assert.deepEqual(fixture.calls.api, ['ready', 'teacherStatus', 'teacherStatus', 'teacherLock']);
   assert.deepEqual(fixture.calls.store, ['load']);
+  const snapshotBeforeDestroy = app.getSnapshot();
 
   assert.equal(app.destroy(), undefined);
   assert.equal(app.destroy(), undefined);
@@ -471,11 +528,513 @@ test('child app exposes the frozen lifecycle surface and destruction is an idemp
   assert.equal(await app.retry(), undefined);
   assert.equal(app.reset(), undefined);
   assert.equal(app.handleGlobalKeydown({ code: 'Space' }), false);
-  assert.equal(app.getSnapshot(), beforeDestroy);
+  assert.equal(await app.openTeacherHelp(), undefined);
+  assert.equal(await app.submitTeacherPin('1234'), undefined);
+  assert.equal(await app.submitTeacherText('补录'), undefined);
+  assert.equal(await app.saveTeacherDraft('草稿'), undefined);
+  assert.equal(await app.retryTeacherRecovery(), undefined);
+  assert.equal(await app.retryMicrophone(), undefined);
+  assert.equal(await app.endWithTeacher(), undefined);
+  assert.equal(await app.lockTeacherHelp(), undefined);
+  assert.equal(app.getSnapshot(), snapshotBeforeDestroy);
   assert.equal(fixture.calls.speechStart, 0);
   assert.equal(fixture.calls.speechStop, 0);
-  assert.deepEqual(fixture.calls.api, ['ready']);
+  assert.deepEqual(fixture.calls.api, ['ready', 'teacherStatus', 'teacherStatus', 'teacherLock']);
   assert.deepEqual(fixture.calls.store, ['load']);
+});
+
+test('teacher help status uses the adapter-only registry path and fixed local failure copy', async () => {
+  const fixture = createFixture();
+  let statusWork = () => Promise.resolve({ configured: true, authenticated: true });
+  fixture.deps.api.teacherStatus = () => {
+    fixture.calls.api.push('teacherStatus');
+    return statusWork();
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  fixture.calls.api.length = 0;
+  fixture.calls.store.length = 0;
+  fixture.calls.view.length = 0;
+
+  assert.equal(await app.openTeacherHelp(), undefined);
+  assert.equal(app.getSnapshot().teacherUnlocked, true);
+  assert.deepEqual(fixture.calls.api, ['teacherStatus']);
+  assert.deepEqual(fixture.calls.store, []);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind !== 'render'), [
+    ['openTeacherHelp', { unlocked: true }],
+  ]);
+
+  statusWork = () => Promise.resolve({ configured: true, authenticated: false });
+  fixture.calls.api.length = 0;
+  fixture.calls.store.length = 0;
+  fixture.calls.view.length = 0;
+  assert.equal(await app.openTeacherHelp(), undefined);
+  assert.equal(app.getSnapshot().teacherUnlocked, false);
+  assert.deepEqual(fixture.calls.api, ['teacherStatus']);
+  assert.deepEqual(fixture.calls.store, []);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind !== 'render'), [
+    ['openTeacherHelp', { unlocked: false }],
+  ]);
+
+  statusWork = () => Promise.resolve({ configured: true, authenticated: true });
+  await app.openTeacherHelp();
+  assert.equal(app.getSnapshot().teacherUnlocked, true);
+  const failures = [
+    () => { throw { code: 'NETWORK_ERROR', message: 'private sync detail' }; },
+    () => ({ get then() { throw { code: 'NETWORK_ERROR', message: 'private then detail' }; } }),
+    () => Promise.reject({ code: 'NETWORK_ERROR', message: 'private reject detail' }),
+  ];
+  for (const failure of failures) {
+    statusWork = failure;
+    fixture.calls.api.length = 0;
+    fixture.calls.store.length = 0;
+    fixture.calls.view.length = 0;
+    assert.equal(await app.openTeacherHelp(), undefined);
+    assert.equal(app.getSnapshot().teacherUnlocked, false);
+    assert.deepEqual(fixture.calls.api, ['teacherStatus']);
+    assert.deepEqual(fixture.calls.store, []);
+    assert.deepEqual(fixture.calls.view.filter(([kind]) => kind !== 'render'), [
+      ['openTeacherHelp', { unlocked: false }],
+      ['showTeacherHelpError', '老师帮助暂时不可用，请稍后重试'],
+    ]);
+    assert.equal(JSON.stringify(fixture.calls.view).includes('private'), false);
+  }
+});
+
+test('teacher PIN rechecks status, uses one adapter auth call, and clears every secret reference', async () => {
+  const sentinel = '4826';
+
+  async function runSuccess({ configured, method }) {
+    const fixture = createFixture();
+    fixture.deps.api.teacherStatus = () => {
+      fixture.calls.api.push('teacherStatus');
+      return Promise.resolve({ configured, authenticated: false });
+    };
+    fixture.deps.api.teacherSetup = pin => {
+      fixture.calls.api.push(['teacherSetup', pin]);
+      return Promise.resolve({ configured: true, authenticated: true });
+    };
+    fixture.deps.api.teacherUnlock = pin => {
+      fixture.calls.api.push(['teacherUnlock', pin]);
+      return Promise.resolve({ configured: true, authenticated: true });
+    };
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    fixture.calls.api.length = 0;
+    fixture.calls.store.length = 0;
+    fixture.calls.view.length = 0;
+
+    assert.equal(await app.submitTeacherPin(sentinel), undefined);
+    assert.deepEqual(fixture.calls.api, ['teacherStatus', [method, sentinel]]);
+    assert.equal(app.getSnapshot().teacherUnlocked, true);
+    assert.deepEqual(fixture.calls.store, []);
+    assert.deepEqual(fixture.calls.view.filter(([kind]) => kind !== 'render'), [
+      ['showTeacherHelpUnlocked'],
+      ['clearTeacherPin'],
+    ]);
+    assert.equal(JSON.stringify(app.getSnapshot()).includes(sentinel), false);
+    assert.equal(JSON.stringify(fixture.calls.store).includes(sentinel), false);
+    assert.equal(JSON.stringify(fixture.calls.view).includes(sentinel), false);
+  }
+
+  await runSuccess({ configured: false, method: 'teacherSetup' });
+  await runSuccess({ configured: true, method: 'teacherUnlock' });
+
+  const invalid = createFixture();
+  const invalidApp = createChildApp(invalid.deps);
+  await invalidApp.initialize();
+  invalid.calls.api.length = 0;
+  invalid.calls.view.length = 0;
+  assert.equal(await invalidApp.submitTeacherPin('１２34'), undefined);
+  assert.deepEqual(invalid.calls.api, []);
+  assert.deepEqual(invalid.calls.view, [
+    ['showTeacherHelpError', '请输入 4 到 6 位数字 PIN'],
+    ['clearTeacherPin'],
+  ]);
+
+  const failures = [
+    () => Promise.reject({ code: 'PIN_INVALID', message: `raw-${sentinel}` }),
+    () => ({ get then() { throw { code: 'PIN_ALREADY_CONFIGURED', message: `raw-${sentinel}` }; } }),
+    () => Promise.reject({ code: 'NETWORK_ERROR', message: `raw-${sentinel}` }),
+  ];
+  const expectedCopies = [
+    'PIN 不正确，请重新输入',
+    '老师帮助状态已变化，请关闭后重新打开',
+    '老师帮助暂时不可用，请稍后重试',
+  ];
+  for (let index = 0; index < failures.length; index += 1) {
+    const fixture = createFixture();
+    fixture.deps.api.teacherStatus = () => {
+      fixture.calls.api.push('teacherStatus');
+      return Promise.resolve({ configured: true, authenticated: false });
+    };
+    fixture.deps.api.teacherUnlock = pin => {
+      fixture.calls.api.push(['teacherUnlock', pin]);
+      return failures[index]();
+    };
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    fixture.calls.api.length = 0;
+    fixture.calls.store.length = 0;
+    fixture.calls.view.length = 0;
+    assert.equal(await app.submitTeacherPin(sentinel), undefined);
+    assert.deepEqual(fixture.calls.api, ['teacherStatus', ['teacherUnlock', sentinel]]);
+    assert.equal(app.getSnapshot().teacherUnlocked, false);
+    assert.deepEqual(fixture.calls.store, []);
+    assert.deepEqual(fixture.calls.view.filter(([kind]) => kind !== 'render'), [
+      ['showTeacherHelpError', expectedCopies[index]],
+      ['clearTeacherPin'],
+    ]);
+    assert.equal(JSON.stringify(fixture.calls.view).includes(sentinel), false);
+    assert.equal(JSON.stringify(fixture.calls.store).includes(sentinel), false);
+    assert.equal(JSON.stringify(app.getSnapshot()).includes(sentinel), false);
+  }
+});
+
+test('teacher lock is adapter-only, clears dialog state, restores focus, and leaves child drafts intact', async () => {
+  const fixture = createFixture();
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return localDraftRecord();
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: null });
+  };
+  fixture.deps.api.teacherStatus = () => {
+    fixture.calls.api.push('teacherStatus');
+    return Promise.resolve({ configured: true, authenticated: true });
+  };
+  fixture.deps.api.teacherLock = () => {
+    fixture.calls.api.push('teacherLock');
+    return Promise.resolve({ configured: true, authenticated: false });
+  };
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.openTeacherHelp();
+  const draftBeforeLock = app.getSnapshot().draft;
+  fixture.calls.api.length = 0;
+  fixture.calls.store.length = 0;
+  fixture.calls.view.length = 0;
+
+  assert.equal(await app.lockTeacherHelp(), undefined);
+  assert.equal(app.getSnapshot().teacherUnlocked, false);
+  assert.equal(app.getSnapshot().draft.request_id, draftBeforeLock.request_id);
+  assert.deepEqual(fixture.calls.api, ['teacherLock']);
+  assert.deepEqual(fixture.calls.store, []);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind !== 'render'), [
+    ['closeTeacherHelp', { clearText: true, restoreFocus: true }],
+    ['clearTeacherPin'],
+  ]);
+
+  const rejected = createFixture();
+  rejected.deps.api.teacherStatus = () => Promise.resolve({ configured: true, authenticated: true });
+  rejected.deps.api.teacherLock = () => {
+    rejected.calls.api.push('teacherLock');
+    return Promise.reject({ code: 'NETWORK_ERROR', message: 'private lock detail' });
+  };
+  const rejectedApp = createChildApp(rejected.deps);
+  await rejectedApp.initialize();
+  await rejectedApp.openTeacherHelp();
+  rejected.calls.api.length = 0;
+  rejected.calls.store.length = 0;
+  rejected.calls.view.length = 0;
+  assert.equal(await rejectedApp.lockTeacherHelp(), undefined);
+  assert.equal(rejectedApp.getSnapshot().teacherUnlocked, true);
+  assert.deepEqual(rejected.calls.api, ['teacherLock']);
+  assert.deepEqual(rejected.calls.store, []);
+  assert.deepEqual(rejected.calls.view, [
+    ['showTeacherHelpError', '老师帮助暂时不可用，请稍后重试'],
+    ['clearTeacherPin'],
+  ]);
+
+  const stale = createFixture();
+  const pendingLock = deferred();
+  stale.deps.api.teacherStatus = () => Promise.resolve({ configured: true, authenticated: true });
+  stale.deps.api.teacherLock = () => {
+    stale.calls.api.push('teacherLock');
+    return pendingLock.promise;
+  };
+  const staleApp = createChildApp(stale.deps);
+  await staleApp.initialize();
+  await staleApp.openTeacherHelp();
+  stale.calls.view.length = 0;
+  const locking = staleApp.lockTeacherHelp();
+  await flushMicrotasks();
+  staleApp.destroy();
+  pendingLock.resolve({ configured: true, authenticated: false });
+  await locking;
+  assert.equal(stale.calls.view.some(([kind]) => kind === 'closeTeacherHelp'), false);
+  assert.equal(stale.calls.view.filter(([kind]) => kind === 'destroy').length, 1);
+});
+
+test('teacher auth effects share epoch cancellation and cannot leak raw values or unhandled rejections', async () => {
+  for (const action of ['status', 'auth', 'lock']) {
+    const fixture = createFixture();
+    const app = await enterAuthorizedRecovery(fixture);
+    fixture.calls.api.length = 0;
+    fixture.calls.store.length = 0;
+    fixture.calls.view.length = 0;
+
+    const pending = action === 'status'
+      ? app.openTeacherHelp()
+      : action === 'auth'
+        ? app.submitTeacherPin('4826')
+        : app.lockTeacherHelp();
+    app.reset();
+    await pending;
+
+    assert.deepEqual(fixture.calls.api, [], `${action} must not invoke after reset wins the microtask`);
+    assert.equal(app.getSnapshot().value, 'welcome');
+    assert.equal(app.getSnapshot().teacherUnlocked, false);
+    assert.deepEqual(fixture.calls.store, ['clear']);
+    if (action === 'auth') {
+      assert.equal(fixture.calls.view.some(([kind]) => kind === 'clearTeacherPin'), true);
+    }
+  }
+
+  const lateStatus = createFixture();
+  const statusResult = deferred();
+  let statusWork = () => Promise.resolve({ configured: true, authenticated: true });
+  const statusAdapter = () => {
+    lateStatus.calls.api.push('teacherStatus');
+    return statusWork();
+  };
+  const lateStatusApp = await enterAuthorizedRecovery(lateStatus, statusAdapter);
+  statusWork = () => statusResult.promise;
+  lateStatus.calls.store.length = 0;
+  lateStatus.calls.view.length = 0;
+  const opening = lateStatusApp.openTeacherHelp();
+  await flushMicrotasks();
+  lateStatusApp.reset();
+  statusResult.resolve({ configured: true, authenticated: true });
+  await opening;
+  assert.equal(lateStatusApp.getSnapshot().value, 'welcome');
+  assert.equal(lateStatusApp.getSnapshot().teacherUnlocked, false);
+  assert.equal(lateStatus.calls.view.some(([kind]) => kind === 'openTeacherHelp'), false);
+
+  const lateAuth = createFixture();
+  const authResult = deferred();
+  let authStatus = { configured: true, authenticated: true };
+  lateAuth.deps.api.teacherUnlock = pin => {
+    lateAuth.calls.api.push(['teacherUnlock', pin]);
+    return authResult.promise;
+  };
+  const lateAuthApp = await enterAuthorizedRecovery(lateAuth, () => Promise.resolve(authStatus));
+  authStatus = { configured: true, authenticated: false };
+  lateAuth.calls.store.length = 0;
+  lateAuth.calls.view.length = 0;
+  const authenticating = lateAuthApp.submitTeacherPin('4826');
+  await flushMicrotasks();
+  lateAuthApp.reset();
+  authResult.resolve({ configured: true, authenticated: true });
+  await authenticating;
+  assert.equal(lateAuthApp.getSnapshot().value, 'welcome');
+  assert.equal(lateAuthApp.getSnapshot().teacherUnlocked, false);
+  assert.equal(JSON.stringify(lateAuth.calls.view).includes('4826'), false);
+  assert.equal(JSON.stringify(lateAuth.calls.store).includes('4826'), false);
+
+  const lateLock = createFixture();
+  const lockResult = deferred();
+  lateLock.deps.api.teacherStatus = () => Promise.resolve({ configured: true, authenticated: true });
+  lateLock.deps.api.teacherLock = () => {
+    lateLock.calls.api.push('teacherLock');
+    return lockResult.promise;
+  };
+  const lateLockApp = await enterAuthorizedRecovery(lateLock);
+  lateLock.calls.view.length = 0;
+  const locking = lateLockApp.lockTeacherHelp();
+  await flushMicrotasks();
+  lateLockApp.destroy();
+  lockResult.resolve({ configured: true, authenticated: false });
+  await locking;
+  assert.equal(lateLock.calls.view.some(([kind]) => kind === 'closeTeacherHelp'), false);
+
+  for (const failure of [
+    () => { throw { code: 'NETWORK_ERROR', message: 'raw-sync-4826' }; },
+    () => ({ get then() { throw { code: 'NETWORK_ERROR', message: 'raw-then-4826' }; } }),
+  ]) {
+    const fixture = createFixture();
+    fixture.deps.api.teacherStatus = failure;
+    const app = createChildApp(fixture.deps);
+    await app.initialize();
+    fixture.calls.view.length = 0;
+    await app.openTeacherHelp();
+    assert.equal(JSON.stringify(fixture.calls.view).includes('raw-'), false);
+    assert.deepEqual(fixture.calls.view.filter(([kind]) => kind !== 'render'), [
+      ['openTeacherHelp', { unlocked: false }],
+      ['showTeacherHelpError', '老师帮助暂时不可用，请稍后重试'],
+    ]);
+  }
+});
+
+test('teacher text and saved draft enter recovery through legal drafts and one chat registry boundary', async () => {
+  const submitted = createFixture();
+  const response = deferred();
+  const order = [];
+  const save = submitted.deps.store.save;
+  submitted.deps.store.save = snapshot => {
+    order.push(`save:${snapshot.value}`);
+    return save(snapshot);
+  };
+  submitted.deps.api.chat = (input, signal) => {
+    order.push('chat');
+    submitted.calls.api.push(['chat', input, signal]);
+    return response.promise;
+  };
+  const submittedApp = await enterAuthorizedRecovery(submitted);
+  submitted.calls.api.length = 0;
+  submitted.calls.store.length = 0;
+  order.length = 0;
+
+  const sending = submittedApp.submitTeacherText('  我补录了这句话  ');
+  await flushMicrotasks();
+  assert.deepEqual(order, ['save:submitting', 'chat']);
+  const chatCall = submitted.calls.api.find(call => Array.isArray(call) && call[0] === 'chat');
+  assert.equal(chatCall[1].text, '我补录了这句话');
+  assert.equal(chatCall[1].request_id, '00000000-0000-4000-8000-000000000007');
+  assert.equal(submittedApp.getSnapshot().draft.request_id, chatCall[1].request_id);
+  response.resolve(chatResult({ request_id: chatCall[1].request_id }));
+  assert.equal(await sending, undefined);
+
+  const saved = createFixture();
+  saved.deps.api.chat = (input, signal) => {
+    saved.calls.api.push(['chat', input, signal]);
+    return Promise.resolve(chatResult({ request_id: input.request_id }));
+  };
+  const savedApp = await enterAuthorizedRecovery(saved);
+  saved.calls.api.length = 0;
+  saved.calls.store.length = 0;
+  assert.equal(await savedApp.saveTeacherDraft('  请稍后重发  '), undefined);
+  assert.equal(savedApp.getSnapshot().value, 'submission_failed');
+  assert.equal(savedApp.getSnapshot().draft.text, '请稍后重发');
+  assert.deepEqual(savedApp.getSnapshot().error, { code: 'TEACHER_DRAFT_SAVED', retryable: true });
+  assert.equal(saved.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+  const savedRequestId = savedApp.getSnapshot().draft.request_id;
+  assert.equal(await savedApp.retry(), undefined);
+  const retryCall = saved.calls.api.find(call => Array.isArray(call) && call[0] === 'chat');
+  assert.equal(retryCall[1].request_id, savedRequestId);
+  assert.equal(retryCall[1].text, '请稍后重发');
+
+  const doubled = createFixture();
+  const doubledResponse = deferred();
+  doubled.deps.api.chat = (input, signal) => {
+    doubled.calls.api.push(['chat', input, signal]);
+    return doubledResponse.promise;
+  };
+  const doubledApp = await enterAuthorizedRecovery(doubled);
+  doubled.calls.api.length = 0;
+  const first = doubledApp.submitTeacherText('只能发送一次');
+  const second = doubledApp.submitTeacherText('不能覆盖第一次');
+  await flushMicrotasks();
+  const doubledCalls = doubled.calls.api.filter(call => Array.isArray(call) && call[0] === 'chat');
+  assert.equal(doubledCalls.length, 1);
+  assert.equal(doubledCalls[0][1].text, '只能发送一次');
+  assert.equal(await second, undefined);
+  doubledResponse.resolve(chatResult({ request_id: doubledCalls[0][1].request_id }));
+  assert.equal(await first, undefined);
+
+  const broken = createFixture();
+  broken.deps.createDraft = () => { throw new Error('private draft failure'); };
+  const brokenApp = await enterAuthorizedRecovery(broken);
+  broken.calls.api.length = 0;
+  assert.equal(await brokenApp.submitTeacherText('不会发送'), undefined);
+  assert.equal(brokenApp.getSnapshot().value, 'recovery');
+  assert.equal(brokenApp.getSnapshot().error.code, 'DRAFT_CREATION_FAILED');
+  assert.equal(broken.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+});
+
+test('authorized recovery retry, microphone retry, and manual completion use only current safe effects', async () => {
+  const recovered = createFixture();
+  let loadCount = 0;
+  recovered.deps.store.load = () => {
+    recovered.calls.store.push('load');
+    loadCount += 1;
+    return loadCount === 1 ? null : localReadyRecord();
+  };
+  const recoveredApp = await enterAuthorizedRecovery(recovered);
+  recovered.calls.api.length = 0;
+  recovered.calls.store.length = 0;
+  assert.equal(await recoveredApp.retryTeacherRecovery(), undefined);
+  assert.equal(recoveredApp.getSnapshot().value, 'selecting_child');
+  assert.equal(recoveredApp.getSnapshot().teacherUnlocked, true);
+  assert.deepEqual(recovered.calls.api, [['active', 7], 'roster', ['active', 7]]);
+  assert.equal(recovered.calls.store[0][0], 'save');
+  assert.equal(recovered.calls.store[0][1].value, 'recovery');
+  assert.equal(recovered.calls.store[1], 'load');
+
+  const microphone = createFixture();
+  const microphoneOrder = [];
+  const microphoneSave = microphone.deps.store.save;
+  const microphoneStart = microphone.deps.createSpeech;
+  microphone.deps.store.save = snapshot => {
+    microphoneOrder.push(`save:${snapshot.value}`);
+    return microphoneSave(snapshot);
+  };
+  microphone.deps.createSpeech = options => {
+    const speech = microphoneStart(options);
+    const start = speech.start;
+    speech.start = () => {
+      microphoneOrder.push('speech:start');
+      return start.call(speech);
+    };
+    return speech;
+  };
+  const microphoneApp = await enterAuthorizedRecovery(microphone);
+  microphone.calls.view.length = 0;
+  microphoneOrder.length = 0;
+  assert.equal(await microphoneApp.retryMicrophone(), undefined);
+  assert.equal(microphoneApp.getSnapshot().value, 'listening');
+  assert.deepEqual(microphoneOrder, ['save:listening', 'speech:start']);
+  assert.deepEqual(microphone.calls.view.filter(([kind]) => kind !== 'render'), [
+    ['closeTeacherHelp', { clearText: true, restoreFocus: false }],
+  ]);
+
+  const unsafeEnd = createFixture();
+  const unsafeEndApp = await enterAuthorizedRecovery(unsafeEnd);
+  unsafeEnd.calls.api.length = 0;
+  assert.equal(await unsafeEndApp.endWithTeacher(), undefined);
+  assert.equal(unsafeEndApp.getSnapshot().value, 'recovery');
+  assert.equal(unsafeEnd.calls.api.some(call => Array.isArray(call) && call[0] === 'complete'), false);
+
+  const completion = createFixture();
+  let completeAttempt = 0;
+  completion.deps.store.load = () => {
+    completion.calls.store.push('load');
+    return pendingCompletionRecord();
+  };
+  completion.deps.api.getActiveConversation = childId => {
+    completion.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: activeConversation() });
+  };
+  completion.deps.api.complete = (conversationId, lastMessageId, signal) => {
+    completion.calls.api.push(['complete', conversationId, lastMessageId, signal]);
+    completeAttempt += 1;
+    return completeAttempt === 1
+      ? Promise.reject({ code: 'NETWORK_ERROR', retryable: true })
+      : Promise.resolve(completeResult());
+  };
+  completion.deps.api.teacherStatus = () => {
+    completion.calls.api.push('teacherStatus');
+    return Promise.resolve({ configured: true, authenticated: true });
+  };
+  const completionApp = createChildApp(completion.deps);
+  await completionApp.initialize();
+  assert.equal(completionApp.getSnapshot().value, 'recovery');
+  await completionApp.openTeacherHelp();
+  completion.calls.api.length = 0;
+  completion.calls.store.length = 0;
+  completion.calls.view.length = 0;
+  assert.equal(await completionApp.endWithTeacher(), undefined);
+  assert.equal(completionApp.getSnapshot().value, 'completed');
+  const completeCalls = completion.calls.api.filter(call => Array.isArray(call) && call[0] === 'complete');
+  assert.equal(completeCalls.length, 1);
+  assert.equal(completeCalls[0][1], 9);
+  assert.equal(completeCalls[0][2], 42);
+  assert.equal(typeof completeCalls[0][3], 'object');
+  assert.deepEqual(completion.calls.view.filter(([kind]) => kind !== 'render'), [
+    ['closeTeacherHelp', { clearText: true, restoreFocus: false }],
+  ]);
 });
 
 test('bootstrap gate rejection reports fixed maintenance copy before any child resource factory', async () => {

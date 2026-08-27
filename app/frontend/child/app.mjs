@@ -36,7 +36,17 @@ const MACHINE_KEYS = Object.freeze([
 
 const STORE_KEYS = Object.freeze(['load', 'save', 'clear']);
 const TTS_KEYS = Object.freeze(['speak', 'cancel', 'dispose']);
-const VIEW_KEYS = Object.freeze(['render', 'announce', 'focus', 'destroy']);
+const VIEW_KEYS = Object.freeze([
+  'render',
+  'announce',
+  'focus',
+  'openTeacherHelp',
+  'showTeacherHelpUnlocked',
+  'showTeacherHelpError',
+  'clearTeacherPin',
+  'closeTeacherHelp',
+  'destroy',
+]);
 const KEYBOARD_KEYS = Object.freeze(['isInteractiveTarget', 'isDialogActive']);
 const BOOTSTRAP_DEPENDENCY_KEYS = Object.freeze([
   'bootstrapAPI',
@@ -188,16 +198,53 @@ export function createChildApp(deps) {
       return settled;
     }
 
+    function startPassiveEffect(key, work, onFulfilled, onRejected, onFinally = null) {
+      cancelEffect(key);
+      const entry = {
+        active: true,
+        appEpoch,
+        epoch: ++nextEffectEpoch,
+        key,
+      };
+      effects.set(key, entry);
+      const operation = consume(() => {
+        if (!isCurrentEffect(entry)) return CANCELLED;
+        return callExternal(work, null);
+      }, withinBoundary);
+      const settled = operation.then(
+        packet => {
+          if (packet.value === CANCELLED || !isCurrentEffect(entry)) return undefined;
+          return withinBoundary(() => onFulfilled(packet.value, entry));
+        },
+        error => {
+          if (!isCurrentEffect(entry)) return undefined;
+          return withinBoundary(() => onRejected(error, entry));
+        },
+      ).catch(() => undefined).finally(() => {
+        if (effects.get(key) !== entry) return;
+        if (typeof onFinally === 'function') {
+          try {
+            withinBoundary(() => onFinally(entry));
+          } catch {}
+        }
+        if (effects.get(key) === entry) effects.delete(key);
+      });
+      entry.promise = settled;
+      return settled;
+    }
+
     function cancelEffect(key) {
       const entry = effects.get(key);
       if (!entry) return;
       effects.delete(key);
       entry.active = false;
       withinBoundary(() => {
-        try {
-          const value = callExternal(entry.abort, entry.controller);
-          absorbThenable(value);
-        } catch {}
+        if (typeof entry.abort === 'function') {
+          try {
+            const value = callExternal(entry.abort, entry.controller);
+            absorbThenable(value);
+          } catch {}
+        }
         if (key === 'tts') {
           try {
             absorbThenable(callExternal(configured.tts.values.cancel, configured.tts.owner, ['superseded']));
@@ -280,17 +327,17 @@ export function createChildApp(deps) {
       });
     }
 
-    function startActiveRecovery(localRecord, child) {
+    function startActiveRecovery(localRecord, child, retainTeacherAuthorization = false) {
       return startEffect(
         `active:${child.id}`,
         () => configured.api.values.getActiveConversation.call(configured.api.owner, child.id),
-        active => resolveRecovery(localRecord, successRead(child, active)),
-        error => resolveRecovery(localRecord, failureRead(child, normalizeError(error))),
-        () => resolveRecovery(localRecord, failureRead(child, effectControllerError())),
+        active => resolveRecovery(localRecord, successRead(child, active), retainTeacherAuthorization),
+        error => resolveRecovery(localRecord, failureRead(child, normalizeError(error)), retainTeacherAuthorization),
+        () => resolveRecovery(localRecord, failureRead(child, effectControllerError()), retainTeacherAuthorization),
       );
     }
 
-    function resolveRecovery(localRecord, remoteRead) {
+    function resolveRecovery(localRecord, remoteRead, retainTeacherAuthorization = false) {
       if (destroyed || snapshot.value !== 'recovery') return Promise.resolve(undefined);
       let outcome;
       try {
@@ -306,13 +353,27 @@ export function createChildApp(deps) {
         beginRecovery({ code: 'RECOVERY_RESULT_INVALID', retryable: false }, { persist: false });
         return Promise.resolve(undefined);
       }
-      const finish = () => {
-        const resolved = commit({ type: 'RECOVERY_RESOLVED', snapshot: outcome.snapshot });
-        if (!resolved.ok) return undefined;
-        if (outcome.snapshot.value === 'loading_roster') {
-          return scanRoster(null);
+      let resolvedSnapshot = outcome.snapshot;
+      if (retainTeacherAuthorization === true && snapshot.teacherUnlocked === true) {
+        try {
+          resolvedSnapshot = callExternal(
+            configured.machine.values.transition,
+            configured.machine.owner,
+            [resolvedSnapshot, { type: 'TEACHER_UNLOCKED' }],
+          );
+          callExternal(configured.machine.values.assertSnapshot, configured.machine.owner, [resolvedSnapshot]);
+        } catch {
+          beginRecovery({ code: 'RECOVERY_RESULT_INVALID', retryable: false }, { persist: false });
+          return Promise.resolve(undefined);
         }
-        if (outcome.snapshot.value === 'saving_conversation') return startCompletion();
+      }
+      const finish = () => {
+        const resolved = commit({ type: 'RECOVERY_RESOLVED', snapshot: resolvedSnapshot });
+        if (!resolved.ok) return undefined;
+        if (resolvedSnapshot.value === 'loading_roster') {
+          return scanRoster(null, retainTeacherAuthorization);
+        }
+        if (resolvedSnapshot.value === 'saving_conversation') return startCompletion();
         return undefined;
       };
       if (outcome.storageAction === 'keep') return Promise.resolve(finish());
@@ -394,42 +455,42 @@ export function createChildApp(deps) {
       return values;
     }
 
-    function scanRoster(localRecord) {
+    function scanRoster(localRecord, retainTeacherAuthorization = false) {
       return startEffect(
         'roster',
         () => configured.api.values.getTodayRoster.call(configured.api.owner),
-        roster => handleRoster(localRecord, roster),
-        error => handleRosterFailure(localRecord, normalizeError(error)),
-        () => handleRosterFailure(localRecord, effectControllerError()),
+        roster => handleRoster(localRecord, roster, retainTeacherAuthorization),
+        error => handleRosterFailure(localRecord, normalizeError(error), retainTeacherAuthorization),
+        () => handleRosterFailure(localRecord, effectControllerError(), retainTeacherAuthorization),
       );
     }
 
-    function handleRoster(localRecord, roster) {
+    function handleRoster(localRecord, roster, retainTeacherAuthorization = false) {
       let children;
       try {
         children = normalizeRoster(roster);
       } catch {
-        return handleRosterFailure(localRecord, { code: 'NETWORK_ERROR', retryable: false });
+        return handleRosterFailure(localRecord, { code: 'NETWORK_ERROR', retryable: false }, retainTeacherAuthorization);
       }
       if (children.length > 2) {
-        return handleRosterFailure(localRecord, { code: 'ROSTER_CARDINALITY_INVALID', retryable: false });
+        return handleRosterFailure(localRecord, { code: 'ROSTER_CARDINALITY_INVALID', retryable: false }, retainTeacherAuthorization);
       }
       if (children.length === 0) {
         if (localRecord === null) {
           commit({ type: 'ROSTER_LOADED', children });
           return undefined;
         }
-        return resolveRecovery(localRecord, successRead(null, { conversation: null }));
+        return resolveRecovery(localRecord, successRead(null, { conversation: null }), retainTeacherAuthorization);
       }
-      return scanActiveChildren(localRecord, children);
+      return scanActiveChildren(localRecord, children, retainTeacherAuthorization);
     }
 
-    function handleRosterFailure(localRecord, error) {
+    function handleRosterFailure(localRecord, error, retainTeacherAuthorization = false) {
       if (localRecord === null) {
         beginRecovery(error);
         return undefined;
       }
-      return resolveRecovery(localRecord, failureRead(null, error));
+      return resolveRecovery(localRecord, failureRead(null, error), retainTeacherAuthorization);
     }
 
     function normalizeRoster(value) {
@@ -465,15 +526,15 @@ export function createChildApp(deps) {
       });
     }
 
-    function scanActiveChildren(localRecord, children) {
+    function scanActiveChildren(localRecord, children, retainTeacherAuthorization = false) {
       let remaining = children.length;
       let firstFailure = null;
       const reads = [];
       const settle = () => {
         remaining -= 1;
         if (remaining !== 0) return undefined;
-        if (firstFailure !== null) return handleRosterFailure(localRecord, firstFailure);
-        return decideActiveReads(localRecord, children, reads);
+        if (firstFailure !== null) return handleRosterFailure(localRecord, firstFailure, retainTeacherAuthorization);
+        return decideActiveReads(localRecord, children, reads, retainTeacherAuthorization);
       };
       const pending = children.map(child => startEffect(
         `active:${child.id}`,
@@ -505,14 +566,14 @@ export function createChildApp(deps) {
       return descriptor.value;
     }
 
-    function decideActiveReads(localRecord, children, reads) {
+    function decideActiveReads(localRecord, children, reads, retainTeacherAuthorization = false) {
       const activeReads = reads.filter(read => read.conversation !== null);
       if (activeReads.length === 0) {
         if (localRecord === null) {
           commit({ type: 'ROSTER_LOADED', children });
           return undefined;
         }
-        return resolveRecovery(localRecord, successRead(null, { conversation: null }));
+        return resolveRecovery(localRecord, successRead(null, { conversation: null }), retainTeacherAuthorization);
       }
       if (activeReads.length === 1) {
         const selected = activeReads[0];
@@ -523,11 +584,11 @@ export function createChildApp(deps) {
           }, { persist: false });
           if (!entered.ok) return undefined;
         }
-        return resolveRecovery(localRecord, successRead(selected.child, selected.active));
+        return resolveRecovery(localRecord, successRead(selected.child, selected.active), retainTeacherAuthorization);
       }
       return handleRosterFailure(localRecord, {
         code: 'MULTIPLE_ACTIVE_CONVERSATIONS', retryable: false,
-      });
+      }, retainTeacherAuthorization);
     }
 
     function startCompletion() {
@@ -849,6 +910,260 @@ export function createChildApp(deps) {
       return snapshot;
     }
 
+    function openTeacherHelp() {
+      if (publicNoop()) return Promise.resolve(undefined);
+      const invocationEpoch = appEpoch;
+      return initialize().then(() => {
+        if (destroyed || lifecycle !== 'ready' || appEpoch !== invocationEpoch) return undefined;
+        const showLockedFailure = () => {
+          const locked = commit({ type: 'TEACHER_LOCKED' }, { persist: false });
+          if (!locked.ok) return undefined;
+          callExternal(configured.view.values.openTeacherHelp, configured.view.owner, [{ unlocked: false }]);
+          callExternal(configured.view.values.showTeacherHelpError, configured.view.owner, [
+            '老师帮助暂时不可用，请稍后重试',
+          ]);
+          return undefined;
+        };
+        return startPassiveEffect(
+          'teacher-status',
+          () => configured.api.values.teacherStatus.call(configured.api.owner),
+          value => {
+            const status = readAuthStatus(value);
+            if (status === null) return showLockedFailure();
+            const unlocked = status.authenticated === true;
+            const committed = commit({
+              type: unlocked ? 'TEACHER_UNLOCKED' : 'TEACHER_LOCKED',
+            }, { persist: false });
+            if (!committed.ok) return undefined;
+            callExternal(configured.view.values.openTeacherHelp, configured.view.owner, [{ unlocked }]);
+            return undefined;
+          },
+          showLockedFailure,
+        );
+      }, () => undefined).then(() => undefined, () => undefined);
+    }
+
+    function submitTeacherPin(inputPin) {
+      let pin = inputPin;
+      inputPin = '';
+      const invocationEpoch = appEpoch;
+      const clearLocalPin = () => { pin = ''; };
+      const clearInput = () => {
+        try {
+          callExternal(configured.view.values.clearTeacherPin, configured.view.owner);
+        } catch {}
+      };
+      const showError = copy => {
+        try {
+          callExternal(configured.view.values.showTeacherHelpError, configured.view.owner, [copy]);
+        } catch {}
+      };
+      if (publicNoop()) {
+        clearLocalPin();
+        return Promise.resolve(undefined);
+      }
+      if (typeof pin !== 'string' || !/^[0-9]{4,6}$/.test(pin)) {
+        withinBoundary(() => {
+          showError('请输入 4 到 6 位数字 PIN');
+          clearInput();
+        });
+        clearLocalPin();
+        return Promise.resolve(undefined);
+      }
+      const authenticate = () => consume(
+        () => callExternal(configured.api.values.teacherStatus, configured.api.owner),
+        withinBoundary,
+      ).then(packet => {
+        const status = readAuthStatus(packet.value);
+        if (status === null) throw Object.freeze({ code: 'AUTH_STATE_CHANGED', retryable: false });
+        const method = status.configured
+          ? configured.api.values.teacherUnlock
+          : configured.api.values.teacherSetup;
+        return consume(() => callExternal(method, configured.api.owner, [pin]), withinBoundary);
+      }).then(packet => packet.value);
+      const rejectAuth = error => {
+        commit({ type: 'TEACHER_LOCKED' }, { persist: false });
+        showError(teacherAuthErrorCopy(error));
+        return undefined;
+      };
+      return initialize().then(() => {
+        if (destroyed || lifecycle !== 'ready' || appEpoch !== invocationEpoch) {
+          if (!destroyed) withinBoundary(clearInput);
+          return undefined;
+        }
+        return startPassiveEffect(
+          'teacher-auth',
+          authenticate,
+          value => {
+            const status = readAuthStatus(value);
+            if (status === null || status.configured !== true || status.authenticated !== true) {
+              return rejectAuth(Object.freeze({ code: 'AUTH_STATE_CHANGED', retryable: false }));
+            }
+            const unlocked = commit({ type: 'TEACHER_UNLOCKED' }, { persist: false });
+            if (!unlocked.ok) return undefined;
+            callExternal(configured.view.values.showTeacherHelpUnlocked, configured.view.owner);
+            return undefined;
+          },
+          rejectAuth,
+          clearInput,
+        );
+      }, () => undefined).then(() => undefined, () => undefined).finally(clearLocalPin);
+    }
+
+    function submitTeacherText(text) {
+      return commitTeacherDraft(text, {
+        control: 'teacherTextDisabled',
+        eventType: 'TEACHER_TEXT_SUBMITTED',
+        submit: true,
+      });
+    }
+
+    function saveTeacherDraft(text) {
+      return commitTeacherDraft(text, {
+        control: 'teacherDraftDisabled',
+        eventType: 'TEACHER_DRAFT_SAVED',
+        submit: false,
+      });
+    }
+
+    function commitTeacherDraft(text, { control, eventType, submit }) {
+      if (publicNoop()) return Promise.resolve(undefined);
+      return initialize().then(() => {
+        if (destroyed || lifecycle !== 'ready') return undefined;
+        let controls;
+        try {
+          controls = callExternal(configured.machine.values.controlsFor, configured.machine.owner, [snapshot]);
+        } catch {
+          return undefined;
+        }
+        if (!controlEnabled(controls, control)) return undefined;
+        let draft;
+        try {
+          draft = callExternal(configured.createDraft, null, [text, {
+            uuid: configured.uuid,
+            now: configured.now,
+          }]);
+        } catch {
+          beginRecovery({ code: 'DRAFT_CREATION_FAILED', retryable: false });
+          return undefined;
+        }
+        const committed = commit({ type: eventType, draft });
+        if (!committed.ok) {
+          if (committed.reason === 'transition') {
+            beginRecovery({ code: 'DRAFT_CREATION_FAILED', retryable: false });
+          }
+          return undefined;
+        }
+        return submit ? startChat() : undefined;
+      }, () => undefined).then(() => undefined, () => undefined);
+    }
+
+    function retryTeacherRecovery() {
+      if (publicNoop()) return Promise.resolve(undefined);
+      return initialize().then(() => {
+        if (destroyed || lifecycle !== 'ready') return undefined;
+        let controls;
+        try {
+          controls = callExternal(configured.machine.values.controlsFor, configured.machine.owner, [snapshot]);
+        } catch {
+          return undefined;
+        }
+        if (!controlEnabled(controls, 'teacherRecoveryRetryDisabled')) return undefined;
+        const committed = commit({ type: 'TEACHER_RECOVERY_RETRY' });
+        if (!committed.ok) return undefined;
+        return startEffect(
+          'recovery',
+          () => configured.store.values.load.call(configured.store.owner),
+          localRecord => {
+            const child = safeLocalChild(localRecord);
+            return child === null
+              ? scanRoster(localRecord, true)
+              : startActiveRecovery(localRecord, child, true);
+          },
+          () => {
+            beginRecovery({ code: 'LOCAL_STORAGE_FAILED', retryable: false }, { persist: false });
+            return undefined;
+          },
+          () => {
+            beginRecovery(effectControllerError(), { persist: false });
+            return undefined;
+          },
+        );
+      }, () => undefined).then(() => undefined, () => undefined);
+    }
+
+    function retryMicrophone() {
+      return commitTeacherHandoff('teacherMicrophoneRetryDisabled', 'TEACHER_RETRY_MICROPHONE', startSpeech);
+    }
+
+    function endWithTeacher() {
+      return commitTeacherHandoff('teacherCompleteDisabled', 'TEACHER_COMPLETE_REQUESTED', startCompletion);
+    }
+
+    function commitTeacherHandoff(control, eventType, startWork) {
+      if (publicNoop()) return Promise.resolve(undefined);
+      return initialize().then(() => {
+        if (destroyed || lifecycle !== 'ready') return undefined;
+        let controls;
+        try {
+          controls = callExternal(configured.machine.values.controlsFor, configured.machine.owner, [snapshot]);
+        } catch {
+          return undefined;
+        }
+        if (!controlEnabled(controls, control)) return undefined;
+        const committed = commit({ type: eventType });
+        if (!committed.ok) return undefined;
+        try {
+          callExternal(configured.view.values.closeTeacherHelp, configured.view.owner, [{
+            clearText: true,
+            restoreFocus: false,
+          }]);
+        } catch {}
+        return startWork();
+      }, () => undefined).then(() => undefined, () => undefined);
+    }
+
+    function lockTeacherHelp() {
+      if (publicNoop()) return Promise.resolve(undefined);
+      const invocationEpoch = appEpoch;
+      const clearInput = () => {
+        try {
+          callExternal(configured.view.values.clearTeacherPin, configured.view.owner);
+        } catch {}
+      };
+      const rejectLock = error => {
+        try {
+          callExternal(configured.view.values.showTeacherHelpError, configured.view.owner, [
+            teacherAuthErrorCopy(error),
+          ]);
+        } catch {}
+        return undefined;
+      };
+      return initialize().then(() => {
+        if (destroyed || lifecycle !== 'ready' || appEpoch !== invocationEpoch) return undefined;
+        return startPassiveEffect(
+          'teacher-lock',
+          () => configured.api.values.teacherLock.call(configured.api.owner),
+          value => {
+            const status = readAuthStatus(value);
+            if (status === null || status.authenticated !== false) {
+              return rejectLock(Object.freeze({ code: 'AUTH_STATE_CHANGED', retryable: false }));
+            }
+            commit({ type: 'TEACHER_LOCKED' }, { persist: false });
+            try {
+              callExternal(configured.view.values.closeTeacherHelp, configured.view.owner, [{
+                clearText: true,
+                restoreFocus: true,
+              }]);
+            } catch {}
+            return undefined;
+          },
+          rejectLock,
+          clearInput,
+        );
+      }, () => undefined).then(() => undefined, () => undefined);
+    }
+
     function destroy() {
       if (destroyed || criticalDepth !== 0) return undefined;
       withinBoundary(() => {
@@ -870,6 +1185,14 @@ export function createChildApp(deps) {
       reset,
       handleGlobalKeydown,
       getSnapshot,
+      openTeacherHelp,
+      submitTeacherPin,
+      submitTeacherText,
+      saveTeacherDraft,
+      retryTeacherRecovery,
+      retryMicrophone,
+      endWithTeacher,
+      lockTeacherHelp,
       destroy,
     });
   } catch {
@@ -911,7 +1234,14 @@ export async function bootstrapBrowserChildApp(deps) {
         onRecordToggle: () => forwardingLive && app !== null ? app.recordToggle() : undefined,
         onRetry: () => forwardingLive && app !== null ? app.retry() : undefined,
         onReset: () => forwardingLive && app !== null ? app.reset() : undefined,
-        onOpenTeacherHelp: null,
+        onOpenTeacherHelp: () => forwardingLive && app !== null ? app.openTeacherHelp() : undefined,
+        onSubmitTeacherPin: pin => forwardingLive && app !== null ? app.submitTeacherPin(pin) : undefined,
+        onSubmitTeacherText: text => forwardingLive && app !== null ? app.submitTeacherText(text) : undefined,
+        onSaveTeacherDraft: text => forwardingLive && app !== null ? app.saveTeacherDraft(text) : undefined,
+        onRetryTeacherRecovery: () => forwardingLive && app !== null ? app.retryTeacherRecovery() : undefined,
+        onRetryMicrophone: () => forwardingLive && app !== null ? app.retryMicrophone() : undefined,
+        onEndWithTeacher: () => forwardingLive && app !== null ? app.endWithTeacher() : undefined,
+        onLockTeacherHelp: () => forwardingLive && app !== null ? app.lockTeacherHelp() : undefined,
       });
       view = validateView(configured.values.createView.call(
         configured.owner,
@@ -1248,6 +1578,38 @@ function normalizeError(value) {
   return Object.freeze({ code, retryable });
 }
 
+function readAuthStatus(value) {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+  try {
+    if (Reflect.getPrototypeOf(value) !== Object.prototype) return null;
+    const keys = Reflect.ownKeys(value);
+    if (keys.length !== 2 || !keys.includes('configured') || !keys.includes('authenticated')) return null;
+    const configured = Reflect.getOwnPropertyDescriptor(value, 'configured');
+    const authenticated = Reflect.getOwnPropertyDescriptor(value, 'authenticated');
+    if (configured === undefined || authenticated === undefined
+      || !Object.hasOwn(configured, 'value') || !Object.hasOwn(authenticated, 'value')
+      || typeof configured.value !== 'boolean' || typeof authenticated.value !== 'boolean'
+      || (configured.value === false && authenticated.value === true)) {
+      return null;
+    }
+    return Object.freeze({
+      configured: configured.value,
+      authenticated: authenticated.value,
+    });
+  } catch {
+    return null;
+  }
+}
+
+function teacherAuthErrorCopy(value) {
+  const { code } = normalizeError(value);
+  if (code === 'PIN_INVALID') return 'PIN 不正确，请重新输入';
+  if (code === 'PIN_ALREADY_CONFIGURED' || code === 'AUTH_STATE_CHANGED') {
+    return '老师帮助状态已变化，请关闭后重新打开';
+  }
+  return '老师帮助暂时不可用，请稍后重试';
+}
+
 function readSpeechEvent(value) {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return null;
   try {
@@ -1283,9 +1645,13 @@ function readKeydownEvent(value) {
 }
 
 function recordControlEnabled(value) {
+  return controlEnabled(value, 'recordDisabled');
+}
+
+function controlEnabled(value, key) {
   if (value === null || (typeof value !== 'object' && typeof value !== 'function')) return false;
   try {
-    const descriptor = Reflect.getOwnPropertyDescriptor(value, 'recordDisabled');
+    const descriptor = Reflect.getOwnPropertyDescriptor(value, key);
     return descriptor !== undefined && Object.hasOwn(descriptor, 'value') && descriptor.value === false;
   } catch {
     return false;

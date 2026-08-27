@@ -212,7 +212,7 @@ test('rejects representative illegal state and event pairs', () => {
     [createInitialSnapshot(), { type: 'ROSTER_LOADED', children: [] }],
     [createInitialSnapshot({ value: 'ready' }), { type: 'SPEECH_FINAL', draft: draft() }],
     [createInitialSnapshot({ value: 'submission_failed', child: child(), draft: draft(), error: error({ retryable: false }) }), { type: 'RETRY_SUBMIT' }],
-    [completedSnapshot(), { type: 'TEACHER_UNLOCKED' }],
+    [completedSnapshot({ teacherUnlocked: true }), { type: 'TEACHER_RECOVERY_RETRY' }],
     [createInitialSnapshot(), { type: 'BEGIN_RECOVERY' }],
   ]) {
     assert.throws(() => transition(snapshot, event), /Illegal transition/);
@@ -524,4 +524,140 @@ test('recovery unlock remains child-locked and reset creates a clean nested snap
   assert.equal(reset.messages.length, 0);
   assert.notEqual(reset.roster, recovery.roster);
   assert.notEqual(reset.messages, recovery.messages);
+});
+
+test('teacher authorization and recovery-only events retain the frozen child boundary', () => {
+  const stateSnapshot = value => createInitialSnapshot({
+    value,
+    ...(value === 'submitting' ? { child: child(), draft: draft() } : {}),
+    ...(value === 'submission_failed' ? { child: child(), draft: draft(), error: error() } : {}),
+    ...(['saving_conversation', 'completed'].includes(value) ? {
+      child: child(),
+      conversationId: 9,
+      lastMessageId: 42,
+      messages: [{ id: 42, role: 'diary', text: '真棒！' }],
+    } : {}),
+  });
+
+  for (const value of STATES) {
+    const locked = stateSnapshot(value);
+    const unlocked = transition(locked, { type: 'TEACHER_UNLOCKED' });
+    assert.equal(unlocked.value, value);
+    assert.equal(unlocked.teacherUnlocked, true);
+    assert.deepEqual({ ...unlocked, teacherUnlocked: false }, locked);
+    const relocked = transition(unlocked, { type: 'TEACHER_LOCKED' });
+    assert.deepEqual(relocked, locked);
+    assert.equal(Object.isFrozen(unlocked), true);
+  }
+
+  const recovery = createInitialSnapshot({
+    value: 'recovery',
+    child: child(),
+    teacherUnlocked: true,
+    error: error(),
+  });
+  const retried = transition(recovery, { type: 'TEACHER_RECOVERY_RETRY' });
+  assert.deepEqual(retried, recovery);
+  assert.notEqual(retried, recovery);
+
+  const submitted = transition(recovery, { type: 'TEACHER_TEXT_SUBMITTED', draft: draft() });
+  assert.equal(submitted.value, 'submitting');
+  assert.deepEqual(submitted.draft, draft());
+  assert.equal(submitted.error, null);
+
+  const savedDraft = transition(recovery, { type: 'TEACHER_DRAFT_SAVED', draft: draft() });
+  assert.equal(savedDraft.value, 'submission_failed');
+  assert.deepEqual(savedDraft.draft, draft());
+  assert.deepEqual(savedDraft.error, { code: 'TEACHER_DRAFT_SAVED', retryable: true });
+
+  const listening = transition(recovery, { type: 'TEACHER_RETRY_MICROPHONE' });
+  assert.equal(listening.value, 'listening');
+  assert.equal(listening.stopRequested, false);
+  assert.equal(listening.error, null);
+
+  const boundedRecovery = createInitialSnapshot({
+    value: 'recovery',
+    child: child(),
+    teacherUnlocked: true,
+    conversationId: 9,
+    lastMessageId: 42,
+    messages: [{ id: 42, role: 'diary', text: '真棒！' }],
+    error: error(),
+  });
+  const completing = transition(boundedRecovery, { type: 'TEACHER_COMPLETE_REQUESTED' });
+  assert.equal(completing.value, 'saving_conversation');
+  assert.equal(completing.shouldComplete, true);
+  assert.equal(completing.error, null);
+
+  const recoveryEvents = [
+    { type: 'TEACHER_RECOVERY_RETRY' },
+    { type: 'TEACHER_TEXT_SUBMITTED', draft: draft() },
+    { type: 'TEACHER_DRAFT_SAVED', draft: draft() },
+    { type: 'TEACHER_RETRY_MICROPHONE' },
+    { type: 'TEACHER_COMPLETE_REQUESTED' },
+  ];
+  for (const event of recoveryEvents) {
+    assert.throws(() => transition(createInitialSnapshot({ value: 'recovery', child: child() }), event), /Illegal transition/);
+    assert.throws(() => transition(createInitialSnapshot({ value: 'ready', child: child(), teacherUnlocked: true }), event), /Illegal transition/);
+  }
+  for (const event of recoveryEvents.slice(1, 4)) {
+    assert.throws(() => transition(createInitialSnapshot({
+      value: 'recovery', child: child(), teacherUnlocked: true, draft: draft(), error: error(),
+    }), event), /Illegal transition/);
+    assert.throws(() => transition(createInitialSnapshot({
+      value: 'recovery', child: child(), teacherUnlocked: true, shouldComplete: true, error: error(),
+    }), event), /Illegal transition/);
+  }
+  assert.throws(() => transition(recovery, { type: 'TEACHER_COMPLETE_REQUESTED' }), /Illegal transition/);
+});
+
+test('teacher controls derive from unlocked safe recovery without another busy field', () => {
+  const safe = createInitialSnapshot({
+    value: 'recovery', child: child(), teacherUnlocked: true, error: error(),
+  });
+  const safeControls = controlsFor(safe);
+  assert.equal(safeControls.teacherTextDisabled, false);
+  assert.equal(safeControls.teacherDraftDisabled, false);
+  assert.equal(safeControls.teacherRecoveryRetryDisabled, false);
+  assert.equal(safeControls.teacherMicrophoneRetryDisabled, false);
+  assert.equal(safeControls.teacherCompleteDisabled, true);
+  assert.deepEqual({
+    busy: safeControls.busy,
+    recordAction: safeControls.recordAction,
+    recordDisabled: safeControls.recordDisabled,
+    textDisabled: safeControls.textDisabled,
+    retryDisabled: safeControls.retryDisabled,
+  }, {
+    busy: true,
+    recordAction: 'start',
+    recordDisabled: true,
+    textDisabled: true,
+    retryDisabled: true,
+  });
+
+  const bounded = controlsFor(createInitialSnapshot({
+    value: 'recovery',
+    child: child(),
+    teacherUnlocked: true,
+    conversationId: 9,
+    lastMessageId: 42,
+    messages: [{ id: 42, role: 'diary', text: '真棒！' }],
+    error: error(),
+  }));
+  assert.equal(bounded.teacherCompleteDisabled, false);
+
+  for (const snapshot of [
+    createInitialSnapshot({ value: 'recovery', child: child(), error: error() }),
+    createInitialSnapshot({ value: 'ready', child: child(), teacherUnlocked: true }),
+    createInitialSnapshot({ value: 'recovery', child: child(), teacherUnlocked: true, draft: draft(), error: error() }),
+    createInitialSnapshot({ value: 'recovery', child: child(), teacherUnlocked: true, shouldComplete: true, error: error() }),
+  ]) {
+    const controls = controlsFor(snapshot);
+    assert.equal(controls.teacherTextDisabled, true);
+    assert.equal(controls.teacherDraftDisabled, true);
+    assert.equal(controls.teacherMicrophoneRetryDisabled, true);
+    assert.equal(controls.teacherRecoveryRetryDisabled, !(snapshot.value === 'recovery' && snapshot.teacherUnlocked));
+  }
+  assert.equal(Object.hasOwn(safe, 'busyLocked'), false);
+  assert.equal(Object.isFrozen(safeControls), true);
 });
