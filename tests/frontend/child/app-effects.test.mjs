@@ -340,11 +340,16 @@ function localReadyRecord() {
   };
 }
 
-async function enterAuthorizedRecovery(fixture, teacherStatus = null, activeReader = null) {
-  fixture.deps.api.getTodayRoster = () => {
+async function enterAuthorizedRecovery(
+  fixture,
+  teacherStatus = null,
+  activeReader = null,
+  rosterReader = null,
+) {
+  fixture.deps.api.getTodayRoster = rosterReader ?? (() => {
     fixture.calls.api.push('roster');
     return Promise.resolve([childRecord()]);
-  };
+  });
   fixture.deps.api.getActiveConversation = activeReader ?? (childId => {
     fixture.calls.api.push(['active', childId]);
     return Promise.resolve({ conversation: null });
@@ -896,6 +901,50 @@ test('teacher auth effects share epoch cancellation and cannot leak raw values o
     false,
     'a cancelled status result must not start unlock',
   );
+
+  const supersedingAuth = createFixture();
+  const firstSupersededStatus = deferred();
+  const secondUnlock = deferred();
+  let supersedingStatusWork = () => Promise.resolve({ configured: true, authenticated: true });
+  supersedingAuth.deps.api.teacherUnlock = pin => {
+    supersedingAuth.calls.api.push(['teacherUnlock', pin]);
+    return secondUnlock.promise;
+  };
+  const supersedingAuthApp = await enterAuthorizedRecovery(
+    supersedingAuth,
+    () => supersedingStatusWork(),
+  );
+  supersedingAuth.calls.api.length = 0;
+  supersedingAuth.calls.view.length = 0;
+  supersedingStatusWork = () => firstSupersededStatus.promise;
+  const oldPinRequest = supersedingAuthApp.submitTeacherPin('1111');
+  await flushMicrotasks();
+  supersedingStatusWork = () => Promise.resolve({ configured: true, authenticated: false });
+  const currentPinRequest = supersedingAuthApp.submitTeacherPin('2222');
+  await flushMicrotasks();
+  assert.deepEqual(
+    supersedingAuth.calls.api.filter(call => Array.isArray(call) && call[0] === 'teacherUnlock'),
+    [['teacherUnlock', '2222']],
+  );
+  assert.equal(
+    supersedingAuth.calls.view.filter(([kind]) => kind === 'clearTeacherPin').length,
+    0,
+    'superseding an old auth request must not clear the current DOM PIN',
+  );
+  secondUnlock.resolve({ configured: true, authenticated: true });
+  await currentPinRequest;
+  assert.equal(
+    supersedingAuth.calls.view.filter(([kind]) => kind === 'clearTeacherPin').length,
+    1,
+    'only the current auth request clears the current DOM PIN on settlement',
+  );
+  firstSupersededStatus.resolve({ configured: true, authenticated: false });
+  await oldPinRequest;
+  assert.equal(
+    supersedingAuth.calls.view.filter(([kind]) => kind === 'clearTeacherPin').length,
+    1,
+    'the superseded auth settlement must remain inert',
+  );
 });
 
 test('teacher text and saved draft enter recovery through legal drafts and one chat registry boundary', async () => {
@@ -1030,6 +1079,101 @@ test('authorized recovery retry, microphone retry, and manual completion use onl
   );
   secondLoad.resolve(localReadyRecord());
   await Promise.all([firstRetry, secondRetry]);
+
+  const supersededRoster = createFixture();
+  const oldRoster = deferred();
+  const currentRosterLoad = deferred();
+  let rosterLoadWork = () => null;
+  let rosterAPIWork = () => Promise.resolve([childRecord()]);
+  let rosterReads = 0;
+  supersededRoster.deps.store.load = () => {
+    supersededRoster.calls.store.push('load');
+    return rosterLoadWork();
+  };
+  const supersededRosterApp = await enterAuthorizedRecovery(
+    supersededRoster,
+    null,
+    null,
+    () => rosterAPIWork(),
+  );
+  rosterAPIWork = () => {
+    rosterReads += 1;
+    supersededRoster.calls.api.push('roster');
+    return oldRoster.promise;
+  };
+  supersededRoster.calls.store.length = 0;
+  supersededRoster.calls.api.length = 0;
+  const oldRosterRetry = supersededRosterApp.retryTeacherRecovery();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(rosterReads, 1);
+  rosterLoadWork = () => currentRosterLoad.promise;
+  const currentRosterRetry = supersededRosterApp.retryTeacherRecovery();
+  await flushMicrotasks();
+  const rosterWritesBeforeLateResult = supersededRoster.calls.store.filter(
+    call => Array.isArray(call) && call[0] === 'save',
+  ).length;
+  oldRoster.resolve([childRecord()]);
+  await flushMicrotasks();
+  assert.equal(supersededRosterApp.getSnapshot().value, 'recovery');
+  assert.equal(
+    supersededRoster.calls.api.filter(call => Array.isArray(call) && call[0] === 'active').length,
+    0,
+    'a superseded roster result must not start an active-conversation continuation',
+  );
+  assert.equal(
+    supersededRoster.calls.store.filter(call => Array.isArray(call) && call[0] === 'save').length,
+    rosterWritesBeforeLateResult,
+  );
+  currentRosterLoad.resolve(localReadyRecord());
+  await Promise.all([oldRosterRetry, currentRosterRetry]);
+
+  const supersededPair = createFixture();
+  const activeSeven = deferred();
+  const activeEight = deferred();
+  const currentPairLoad = deferred();
+  let pairLoadWork = () => null;
+  let pairRosterWork = () => Promise.resolve([childRecord()]);
+  let pairActiveWork = () => Promise.resolve({ conversation: null });
+  supersededPair.deps.store.load = () => {
+    supersededPair.calls.store.push('load');
+    return pairLoadWork();
+  };
+  const supersededPairApp = await enterAuthorizedRecovery(
+    supersededPair,
+    null,
+    childId => pairActiveWork(childId),
+    () => pairRosterWork(),
+  );
+  pairRosterWork = () => Promise.resolve([
+    childRecord(7, '小雨'),
+    childRecord(8, '乐乐'),
+  ]);
+  pairActiveWork = childId => {
+    supersededPair.calls.api.push(['active', childId]);
+    return childId === 7 ? activeSeven.promise : activeEight.promise;
+  };
+  supersededPair.calls.store.length = 0;
+  supersededPair.calls.api.length = 0;
+  const oldPairRetry = supersededPairApp.retryTeacherRecovery();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(supersededPair.calls.api, [['active', 7], ['active', 8]]);
+  pairLoadWork = () => currentPairLoad.promise;
+  const currentPairRetry = supersededPairApp.retryTeacherRecovery();
+  await flushMicrotasks();
+  const pairWritesBeforeLateResults = supersededPair.calls.store.filter(
+    call => Array.isArray(call) && call[0] === 'save',
+  ).length;
+  activeSeven.resolve({ conversation: { ...activeConversation(), child_id: 7 } });
+  activeEight.resolve({ conversation: { ...activeConversation(), id: 10, child_id: 8 } });
+  await flushMicrotasks();
+  assert.equal(supersededPairApp.getSnapshot().value, 'recovery');
+  assert.equal(
+    supersededPair.calls.store.filter(call => Array.isArray(call) && call[0] === 'save').length,
+    pairWritesBeforeLateResults,
+    'superseded multi-active continuations must not merge or persist',
+  );
+  currentPairLoad.resolve(localReadyRecord());
+  await Promise.all([oldPairRetry, currentPairRetry]);
 
   const microphone = createFixture();
   const microphoneOrder = [];

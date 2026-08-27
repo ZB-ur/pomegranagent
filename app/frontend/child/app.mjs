@@ -1089,9 +1089,9 @@ export function createChildApp(deps) {
           },
           rejectAuth,
           clearInput,
-          () => {
+          (_entry, reason) => {
             clearLocalPin();
-            clearInput();
+            if (reason !== 'superseded') clearInput();
           },
         );
       }, () => undefined).then(() => undefined, () => undefined).finally(clearLocalPin);
