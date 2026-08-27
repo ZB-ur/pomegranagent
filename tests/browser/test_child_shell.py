@@ -14,6 +14,7 @@ ROOT = Path(__file__).resolve().parents[2]
 BROWSER_ENTRY = ROOT / "app/frontend/child/browser.mjs"
 CHILD_SERVER = ROOT / "tests/browser/child_server.py"
 VIEWPORTS = [{"width": 1024, "height": 576}, {"width": 1280, "height": 720}]
+VIEWPORT_IDS = ["1024x576", "1280x720"]
 
 
 def browser_source() -> str:
@@ -582,7 +583,7 @@ def test_page_specific_routes_cannot_widen_loopback_policy(child_page):
     ).exists()
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_keyboard_modality_blocks_native_editable_and_modal_space(child_page, viewport):
     prepare_child_page(
         child_page,
@@ -594,8 +595,8 @@ def test_keyboard_modality_blocks_native_editable_and_modal_space(child_page, vi
     record = wait_for_active_ready(page)
 
     record.press("Space")
-    page.wait_for_function("window.__childSpeech.starts === 1")
-    assert page.evaluate("window.__childSpeech.starts") == 1
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+    assert page.evaluate("window.__childTest.recognition.starts") == 1
 
     page.evaluate(
         """
@@ -616,7 +617,7 @@ def test_keyboard_modality_blocks_native_editable_and_modal_space(child_page, vi
     )
     for selector in ("#synthetic-disabled", "#synthetic-link", "#synthetic-editable"):
         page.dispatch_event(selector, "keydown", {"code": "Space", "key": " "})
-    assert page.evaluate("window.__childSpeech.starts") == 1
+    assert page.evaluate("window.__childTest.recognition.starts") == 1
 
     page.evaluate(
         """
@@ -631,17 +632,19 @@ def test_keyboard_modality_blocks_native_editable_and_modal_space(child_page, vi
         """
     )
     page.keyboard.press("Space")
-    assert page.evaluate("window.__childSpeech.starts") == 1
+    assert page.evaluate("window.__childTest.recognition.starts") == 1
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_empty_roster_is_honest_and_has_no_cards(child_page, viewport):
     requested = prepare_child_page(child_page, viewport, roster=[])
     page = child_page.page
     page.get_by_text("今天还未排班，请老师帮忙", exact=True).first.wait_for()
     help_button = page.get_by_role("button", name="老师帮忙", exact=True)
     assert help_button.is_visible()
-    assert help_button.is_disabled()
+    assert help_button.is_enabled()
+    help_button.focus()
+    assert page.evaluate("document.activeElement?.id") == "teacher-help-button"
     assert page.locator(".child-card").count() == 0
     assert page.get_by_role("main").count() == 1
     assert page.get_by_role("heading", level=1).count() == 1
@@ -652,7 +655,7 @@ def test_empty_roster_is_honest_and_has_no_cards(child_page, viewport):
     assert "/api/tts" not in business_urls
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_active_conversation_shell_is_semantic(child_page, viewport):
     prepare_child_page(
         child_page,
@@ -672,7 +675,7 @@ def test_active_conversation_shell_is_semantic(child_page, viewport):
     assert page.get_by_role("button", name="开始说话", exact=True).is_visible()
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_space_is_single_action_for_native_and_global_paths(child_page, viewport):
     prepare_child_page(
         child_page,
@@ -683,21 +686,26 @@ def test_space_is_single_action_for_native_and_global_paths(child_page, viewport
     page = child_page.page
     record = wait_for_active_ready(page)
     record.press("Space")
-    page.wait_for_function("window.__childSpeech.starts === 1")
-    assert page.evaluate("window.__childSpeech.starts") == 1
-    record.press("Space")
-    page.wait_for_function("window.__childSpeech.stops === 1")
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+    assert page.evaluate("window.__childTest.recognition.starts") == 1
+    page.locator("#record-button").press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
+    page.evaluate("window.__childTest.recognition.emitEnd()")
     page.get_by_role("button", name="开始说话", exact=True).wait_for()
 
     page.locator("#app-title").focus()
     page.keyboard.press("Space")
-    page.wait_for_function("window.__childSpeech.starts === 2")
+    page.wait_for_function("window.__childTest.recognition.starts === 2")
     page.keyboard.press("Space")
-    page.wait_for_function("window.__childSpeech.stops === 2")
-    assert page.evaluate("window.__childSpeech") == {"starts": 2, "stops": 2}
+    page.wait_for_function("window.__childTest.recognition.stops === 2")
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.get_by_role("button", name="开始说话", exact=True).wait_for()
+    assert page.evaluate(
+        "({ starts: window.__childTest.recognition.starts, stops: window.__childTest.recognition.stops })"
+    ) == {"starts": 2, "stops": 2}
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_keyboard_focus_visible_uses_start_to_ready_flow(child_page, viewport):
     page = child_page.page
     page.set_viewport_size(viewport)
@@ -728,7 +736,7 @@ def test_keyboard_focus_visible_uses_start_to_ready_flow(child_page, viewport):
     assert style["color"] not in {"rgba(0, 0, 0, 0)", "transparent"}
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_projection_is_reachable_without_horizontal_or_control_clipping(child_page, viewport):
     prepare_child_page(
         child_page,
@@ -778,7 +786,7 @@ def test_projection_is_reachable_without_horizontal_or_control_clipping(child_pa
         assert box["y"] + box["height"] <= viewport["height"]
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_child_health_validation_fallback_preserves_foundation_maintenance(child_page, viewport):
     page = child_page.page
     page.set_viewport_size(viewport)

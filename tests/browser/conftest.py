@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.metadata
 import importlib.util
 import json
+import logging
 import os
 from pathlib import Path
 import re
@@ -15,6 +16,8 @@ from urllib.parse import urlsplit
 from urllib.request import urlopen
 
 import pytest
+
+from tests.browser.child_fakes import install_controlled_child_fakes
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -237,8 +240,45 @@ def business_route_installer():
     return install_fail_closed_business_routes
 
 
+@pytest.fixture
+def unused_tcp_port(free_tcp_port):
+    return free_tcp_port
+
+
+@pytest.fixture(scope="session", autouse=True)
+def browser_parent_logging_guard(tmp_path_factory):
+    real_log = (ROOT / "logs" / "app.log").resolve()
+    if not real_log.parent.is_dir():
+        pytest.fail(
+            f"browser preflight NO-GO: missing real log directory {real_log.parent}",
+            pytrace=False,
+        )
+    before = real_log.read_bytes() if real_log.exists() else None
+    root_logger = logging.getLogger()
+    removed_real_handlers = []
+    for handler in tuple(root_logger.handlers):
+        base_filename = getattr(handler, "baseFilename", None)
+        if base_filename is not None and Path(base_filename).resolve() == real_log:
+            root_logger.removeHandler(handler)
+            removed_real_handlers.append(handler)
+
+    disposable_log = tmp_path_factory.mktemp("browser-parent-logs") / "pytest.log"
+    disposable_handler = logging.FileHandler(disposable_log, encoding="utf-8")
+    root_logger.addHandler(disposable_handler)
+    try:
+        yield disposable_log
+    finally:
+        after = real_log.read_bytes() if real_log.exists() else None
+        root_logger.removeHandler(disposable_handler)
+        disposable_handler.close()
+        for handler in removed_real_handlers:
+            root_logger.addHandler(handler)
+        assert after == before, "browser parent process changed the real application log"
+
+
 @pytest.fixture(scope="session")
-def chromium_browser():
+def chromium_browser(browser_parent_logging_guard):
+    del browser_parent_logging_guard
     gate_error = None
     try:
         require_gate_one()
@@ -369,21 +409,7 @@ def child_page(chromium_browser, child_server):
     )
     install_fail_closed_business_routes(context, port=child_server.port)
     page = context.new_page()
-    page.add_init_script(
-        """
-        sessionStorage.clear();
-        window.__childSpeech = { starts: 0, stops: 0 };
-        class SyntheticRecognition {
-          start() { window.__childSpeech.starts += 1; }
-          stop() { window.__childSpeech.stops += 1; if (this.onend) this.onend(); }
-          abort() { if (this.onend) this.onend(); }
-        }
-        window.SpeechRecognition = SyntheticRecognition;
-        window.webkitSpeechRecognition = SyntheticRecognition;
-        window.speechSynthesis = { speak(utterance) { if (utterance.onend) utterance.onend(); }, cancel() {} };
-        window.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
-        """
-    )
+    install_controlled_child_fakes(page)
     harness = ChildPageHarness(page=page, context=context, browser=browser, server=child_server)
     try:
         yield harness

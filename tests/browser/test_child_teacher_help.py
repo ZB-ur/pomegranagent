@@ -6,6 +6,7 @@ import pytest
 
 
 VIEWPORTS = [{"width": 1024, "height": 576}, {"width": 1280, "height": 720}]
+VIEWPORT_IDS = ["1024x576", "1280x720"]
 
 SYNTHETIC_CHILD = {"id": 1, "name": "测试幼儿", "nickname": "小芽", "avatar": None}
 SYNTHETIC_ACTIVE = {
@@ -22,32 +23,6 @@ SYNTHETIC_ACTIVE = {
         ],
     }
 }
-
-
-@pytest.fixture
-def unused_tcp_port(free_tcp_port):
-    return free_tcp_port
-
-
-def install_teacher_help_fakes(page) -> None:
-    page.add_init_script(
-        """
-        window.__teacherRecognition = { instances: [], starts: 0, stops: 0 };
-        class TeacherRecognition {
-          constructor() { window.__teacherRecognition.instances.push(this); }
-          start() { window.__teacherRecognition.starts += 1; }
-          stop() { window.__teacherRecognition.stops += 1; if (this.onend) this.onend(); }
-          abort() { if (this.onend) this.onend(); }
-        }
-        window.SpeechRecognition = TeacherRecognition;
-        window.webkitSpeechRecognition = TeacherRecognition;
-        window.speechSynthesis = {
-          speak(utterance) { queueMicrotask(() => utterance.onend && utterance.onend()); },
-          cancel() {},
-        };
-        window.SpeechSynthesisUtterance = class { constructor(text) { this.text = text; } };
-        """
-    )
 
 
 def route_child_api(harness, exact_fixture_url, state=None):
@@ -176,16 +151,9 @@ def enter_ready_recovery(harness, viewport, *, active=True) -> None:
     record = page.get_by_role("button", name="开始说话", exact=True)
     record.wait_for()
     record.click()
-    page.wait_for_function("window.__teacherRecognition.instances.length > 0")
-    page.evaluate(
-        """
-        () => {
-          const current = window.__teacherRecognition.instances.at(-1);
-          current.onerror && current.onerror({ error: 'not-allowed' });
-          current.onend && current.onend();
-        }
-        """
-    )
+    page.wait_for_function("window.__childTest.recognition.instances.length > 0")
+    page.evaluate("window.__childTest.recognition.emitError('not-allowed')")
+    page.evaluate("window.__childTest.recognition.emitEnd()")
     page.get_by_role("button", name="老师帮忙", exact=True).wait_for()
 
 
@@ -194,11 +162,10 @@ def open_teacher_dialog(page) -> None:
     page.locator("#teacher-help-dialog[open]").wait_for()
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_microphone_denial_focuses_visible_teacher_help_then_opens_dialog(
     child_page, exact_fixture_url, viewport
 ):
-    install_teacher_help_fakes(child_page.page)
     route_child_api(child_page, exact_fixture_url)
     route_teacher_auth(child_page, exact_fixture_url)
     enter_ready_recovery(child_page, viewport)
@@ -210,11 +177,10 @@ def test_microphone_denial_focuses_visible_teacher_help_then_opens_dialog(
     assert page.locator("#teacher-pin").is_visible()
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_pin_setup_uses_adapter_auth_and_never_persists_or_renders_the_pin(
     child_page, exact_fixture_url, viewport
 ):
-    install_teacher_help_fakes(child_page.page)
     route_child_api(child_page, exact_fixture_url)
     auth = route_teacher_auth(child_page, exact_fixture_url)
     enter_ready_recovery(child_page, viewport)
@@ -230,11 +196,10 @@ def test_teacher_pin_setup_uses_adapter_auth_and_never_persists_or_renders_the_p
     assert sentinel not in page.evaluate("JSON.stringify(sessionStorage)")
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_pin_failure_uses_fixed_copy_and_clears_input_without_raw_server_detail(
     child_page, exact_fixture_url, viewport
 ):
-    install_teacher_help_fakes(child_page.page)
     route_child_api(child_page, exact_fixture_url)
     auth = route_teacher_auth(child_page, exact_fixture_url)
     enter_ready_recovery(child_page, viewport)
@@ -248,11 +213,10 @@ def test_teacher_pin_failure_uses_fixed_copy_and_clears_input_without_raw_server
     assert "raw-secret-detail" not in page.locator("body").inner_text()
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_relock_calls_auth_lock_clears_dialog_fields_and_restores_help_focus(
     child_page, exact_fixture_url, viewport
 ):
-    install_teacher_help_fakes(child_page.page)
     route_child_api(child_page, exact_fixture_url)
     auth = route_teacher_auth(child_page, exact_fixture_url, {
         "configured": True, "authenticated": True, "calls": [], "failure": None,
@@ -269,11 +233,10 @@ def test_teacher_relock_calls_auth_lock_clears_dialog_fields_and_restores_help_f
     assert "机密补录-4826" not in page.evaluate("JSON.stringify(sessionStorage)")
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_text_failure_retains_text_and_retry_reuses_one_request_id(
     child_page, exact_fixture_url, viewport
 ):
-    install_teacher_help_fakes(child_page.page)
     api = route_child_api(child_page, exact_fixture_url, {"chat_failures": 1})
     route_teacher_auth(child_page, exact_fixture_url, {
         "configured": True, "authenticated": True, "calls": [], "failure": None,
@@ -287,17 +250,19 @@ def test_teacher_text_failure_retains_text_and_retry_reuses_one_request_id(
     page.get_by_role("button", name="重新发送这句话", exact=True).wait_for()
     assert page.locator("#teacher-text").input_value() == copy
     page.locator("#teacher-submit-text").click()
+    page.wait_for_function("window.__childTest.audio.instances.length === 1")
+    page.evaluate("window.__childTest.audio.emitPlaying(0)")
+    page.evaluate("window.__childTest.audio.emitEnded(0)")
     page.locator("#record-button").wait_for()
     assert len(api["chat_bodies"]) == 2
     assert api["chat_bodies"][0]["request_id"] == api["chat_bodies"][1]["request_id"]
     assert [body["text"] for body in api["chat_bodies"]] == [copy, copy]
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_recovery_actions_preserve_boundaries_and_complete_only_when_safe(
     child_page, exact_fixture_url, viewport
 ):
-    install_teacher_help_fakes(child_page.page)
     api = route_child_api(child_page, exact_fixture_url)
     route_teacher_auth(child_page, exact_fixture_url, {
         "configured": True, "authenticated": True, "calls": [], "failure": None,
@@ -308,17 +273,20 @@ def test_teacher_recovery_actions_preserve_boundaries_and_complete_only_when_saf
     page.locator("#teacher-actions").wait_for(state="visible")
     assert page.locator("#teacher-end-session").is_enabled()
     active_reads = api["active_reads"]
-    page.locator("#teacher-retry-recovery").click()
-    page.wait_for_timeout(300)
+    with page.expect_request_finished(
+        lambda request: "/api/children/1/active-conversation" in request.url
+    ) as finished:
+        page.locator("#teacher-retry-recovery").click()
+    assert exact_fixture_url(finished.value.url, child_page.server.port)
     assert api["active_reads"] > active_reads
     state = page.locator(".child-view").get_attribute("data-state")
     assert state == "recovery"
     assert page.locator("#teacher-actions").is_visible()
     assert page.locator("#teacher-retry-microphone").is_enabled()
-    starts = page.evaluate("window.__teacherRecognition.starts")
+    starts = page.evaluate("window.__childTest.recognition.starts")
     page.locator("#teacher-retry-microphone").click()
-    page.wait_for_function(f"window.__teacherRecognition.starts > {starts}")
-    page.evaluate("window.__teacherRecognition.instances.at(-1).onerror({error:'not-allowed'})")
+    page.wait_for_function(f"window.__childTest.recognition.starts > {starts}")
+    page.evaluate("window.__childTest.recognition.emitError('not-allowed')")
     page.wait_for_function("document.querySelector('.child-view')?.dataset.state === 'recovery'")
     open_teacher_dialog(page)
     page.locator("#teacher-end-session").click()
@@ -326,11 +294,10 @@ def test_teacher_recovery_actions_preserve_boundaries_and_complete_only_when_saf
     assert api["complete_bodies"] == [{"expected_last_message_id": 102}]
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS)
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_dialog_traps_focus_blocks_global_space_and_restores_on_escape(
     child_page, exact_fixture_url, viewport
 ):
-    install_teacher_help_fakes(child_page.page)
     route_child_api(child_page, exact_fixture_url)
     route_teacher_auth(child_page, exact_fixture_url, {
         "configured": True, "authenticated": True, "calls": [], "failure": None,
@@ -338,7 +305,7 @@ def test_teacher_dialog_traps_focus_blocks_global_space_and_restores_on_escape(
     enter_ready_recovery(child_page, viewport)
     page = child_page.page
     open_teacher_dialog(page)
-    starts = page.evaluate("window.__teacherRecognition.starts")
+    starts = page.evaluate("window.__childTest.recognition.starts")
     page.locator("#teacher-text").focus()
     page.keyboard.press("Shift+Tab")
     assert page.evaluate("document.activeElement?.id") == "teacher-help-close"
@@ -346,6 +313,6 @@ def test_teacher_dialog_traps_focus_blocks_global_space_and_restores_on_escape(
     assert page.evaluate("document.activeElement?.id") == "teacher-text"
     page.locator("#teacher-help-title").focus()
     page.keyboard.press("Space")
-    assert page.evaluate("window.__teacherRecognition.starts") == starts
+    assert page.evaluate("window.__childTest.recognition.starts") == starts
     page.keyboard.press("Escape")
     assert page.evaluate("document.activeElement?.id") == "teacher-help-button"
