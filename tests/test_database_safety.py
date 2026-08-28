@@ -93,6 +93,23 @@ def test_lowest_level_ai_test_breaker_fails_before_the_provider_transport(monkey
     assert outbound == []
 
 
+def test_pytest_application_logging_uses_only_the_disposable_runtime_file():
+    """Import-time application logging must never retain the real application log."""
+    from conftest import (
+        APPLICATION_FILE_HANDLER_INSTALLED,
+        REAL_APPLICATION_LOG_PATH,
+        TEST_APPLICATION_LOG_PATH,
+        TEST_RUNTIME_DIR,
+        root_file_handler_paths,
+    )
+
+    handler_paths = root_file_handler_paths()
+    assert REAL_APPLICATION_LOG_PATH not in handler_paths
+    if APPLICATION_FILE_HANDLER_INSTALLED:
+        assert TEST_APPLICATION_LOG_PATH in handler_paths
+        assert TEST_APPLICATION_LOG_PATH.is_relative_to(TEST_RUNTIME_DIR)
+
+
 def test_concurrent_retry_does_not_leave_schema_reflection_on_a_stale_connection(tmp_path: Path):
     """The shared test engine must clear retained pool connections between resets."""
     result = subprocess.run(
@@ -164,3 +181,26 @@ def test_pytest_subprocess_does_not_change_application_db(tmp_path: Path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert _sha256(application_db) == before
+
+
+def test_review_atomic_pytest_subprocess_does_not_change_the_real_application_log(tmp_path: Path):
+    """A disposable TestClient pytest process must leave the incident log byte-identical."""
+    real_log = (ROOT / "logs" / "app.log").resolve()
+    before = real_log.read_bytes() if real_log.exists() else None
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "tests/test_review_atomicity.py::test_teacher_review_routes_require_a_session_before_queue_detail_or_write",
+        ],
+        cwd=ROOT,
+        env=_safe_pytest_subprocess_env(tmp_path / "review-atomic-subprocess.db"),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    after = real_log.read_bytes() if real_log.exists() else None
+    assert after == before
