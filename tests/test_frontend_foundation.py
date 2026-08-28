@@ -43,7 +43,9 @@ def test_teacher_assets_hold_runtime_auth_and_no_direct_fetch_contract():
     html = (ROOT / "app/frontend/teacher.html").read_text(encoding="utf-8")
     app = (ROOT / "app/frontend/teacher/app.js").read_text(encoding="utf-8")
     css = (ROOT / "app/frontend/teacher/styles.css").read_text(encoding="utf-8")
-    assert "fetch(" not in html + app
+    router = (ROOT / "app/frontend/teacher/router.mjs").read_text(encoding="utf-8")
+    legacy = (ROOT / "app/frontend/teacher/legacy-routes.mjs").read_text(encoding="utf-8")
+    assert "fetch(" not in html + app + router + legacy
     assert "window.DuckAPI.ready()" in app
     assert "window.DuckAuth.status()" in app
     assert "window.DuckAuth.setup(" in app
@@ -54,6 +56,50 @@ def test_teacher_assets_hold_runtime_auth_and_no_direct_fetch_contract():
     assert ":focus-visible" in css
     assert "min-height: 44px" in css or "min-block-size: 44px" in css
     assert "prefers-reduced-motion: reduce" in css
+
+
+def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_legacy_module():
+    app = (ROOT / "app/frontend/teacher/app.js").read_text(encoding="utf-8")
+    router = (ROOT / "app/frontend/teacher/router.mjs").read_text(encoding="utf-8")
+    legacy = (ROOT / "app/frontend/teacher/legacy-routes.mjs").read_text(encoding="utf-8")
+    expected_routes = {"overview", "children", "ducks", "roster", "review", "growth", "search"}
+    expected_endpoints = {
+        "/api/analysis/overview",
+        "/api/children",
+        "/api/children/",
+        "/api/ducks",
+        "/api/ducks/",
+        "/api/roster/auto",
+        "/api/roster",
+        "/api/conversations",
+        "/api/conversations/",
+        "/api/assessments/",
+        "/api/analysis/growth?child_id=",
+    }
+
+    assert "import { createTeacherRouter } from './router.mjs';" in app
+    assert "import { createLegacyTeacherRoutes } from './legacy-routes.mjs';" in app
+    assert "defaultRoute: 'overview'" in app
+    assert "teacherRouter.start()" in app
+    assert "teacherRouter.stop()" in app
+    assert "const views = {}" not in app
+    assert "function show(" not in app
+    assert "function buildView(" not in app
+    assert "function routeFromHash(" not in app
+    assert "bootstrapVersionGate" not in app
+    assert "/api/" not in app
+    assert "DuckAPI" not in router + legacy
+    assert "DuckAuth" not in router + legacy
+    assert set(re.findall(r"['\"](/api/[^'\"]*)['\"]", legacy)) == expected_endpoints
+    assert set(re.findall(r"route: '([a-z]+)'", app)) == expected_routes
+    for route in expected_routes:
+        assert f"{route}," in legacy or f"{route} }}" in legacy
+    assert "signal" in legacy
+    assert "isCurrent" in legacy
+    assert "加载失败，请重新进入此页面。" in legacy
+    assert "error.message" not in app + router + legacy
+    assert "innerHTML = error" not in app + router + legacy
+    assert "textContent = error" not in app + router + legacy
 
 
 def test_auth_adapter_loads_immediately_after_api_client_on_both_pages():
@@ -82,7 +128,7 @@ def test_child_empty_roster_copy_is_owned_by_the_semantic_view():
 
 
 def test_pages_do_not_call_fetch_directly():
-    for filename in ("index.html", "teacher.html", "teacher/app.js"):
+    for filename in ("index.html", "teacher.html", "teacher/app.js", "teacher/router.mjs", "teacher/legacy-routes.mjs"):
         html = (ROOT / "app" / "frontend" / filename).read_text(encoding="utf-8")
         assert "fetch(" not in html
 
@@ -114,4 +160,5 @@ def test_teacher_navigation_requires_both_runtime_and_authentication_and_can_rel
     assert "unlockTeacherPage" in app
     assert "window.DuckAuth.lock()" in app
     assert "教师端已锁定，重新输入 PIN 后可继续。" in app
-    assert "Object.values(views).forEach((view) => view.remove());" in app
+    assert "teacherRouter.stop()" in app
+    assert "teacherRouter = null" in app

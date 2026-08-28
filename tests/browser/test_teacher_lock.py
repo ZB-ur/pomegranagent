@@ -95,12 +95,20 @@ def test_teacher_locked_bootstrap_makes_only_runtime_and_auth_requests(teacher_b
 def test_teacher_first_setup_and_manual_lock_stay_in_the_same_document(teacher_browser, viewport):
     _context, page = open_teacher_page(teacher_browser, viewport)
     page.get_by_role("heading", name="首次设置教师 PIN", exact=True).wait_for()
-    initial_url = page.url
+    initial = urlsplit(page.url)
     setup_teacher(page)
-    assert page.url == initial_url
+    authenticated = urlsplit(page.url)
+    assert (authenticated.scheme, authenticated.netloc, authenticated.path) == (initial.scheme, initial.netloc, initial.path)
+    assert authenticated.fragment == "overview"
     assert not any(button.is_disabled() for button in page.locator("#nav button").all())
     lock_teacher(page)
-    assert page.url == initial_url
+    locked = urlsplit(page.url)
+    assert (locked.scheme, locked.netloc, locked.path, locked.fragment) == (
+        authenticated.scheme,
+        authenticated.netloc,
+        authenticated.path,
+        "overview",
+    )
     assert all(button.is_disabled() for button in page.locator("#nav button").all())
     assert page.get_by_role("heading", name="概览", exact=True).count() == 0
     assert page.get_by_role("heading", name="教师端已锁定", exact=True).count() == 1
@@ -159,6 +167,46 @@ def test_teacher_lock_failure_preserves_authenticated_view_and_announces_error(t
     assert not any(button.is_disabled() for button in page.locator("#nav button").all())
     assert page.get_by_role("button", name="立即锁定", exact=True).is_enabled()
     assert "raw-lock-detail-2468" not in page.locator("body").inner_text()
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_post_lock_status_failure_is_safe_and_has_no_route_ownership(teacher_browser, viewport):
+    _context, page = open_teacher_page(teacher_browser, viewport)
+    setup_teacher(page)
+    requests = []
+    errors = []
+    page.on("request", lambda request: requests.append(request))
+    page.on("pageerror", lambda error: errors.append(str(error)))
+
+    def fail_post_lock_status(route):
+        route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({
+                "error": {
+                    "code": "AUTH_STATUS_UNAVAILABLE",
+                    "message": "raw-post-lock-status-detail-2468",
+                }
+            }),
+        )
+
+    page.route(f"{teacher_browser.server.base_url}/api/auth/status", fail_post_lock_status)
+    page.get_by_role("button", name="立即锁定", exact=True).click()
+    page.get_by_text("教师端暂不可用，请稍后重试。", exact=True).wait_for()
+    assert "raw-post-lock-status-detail-2468" not in page.locator("body").inner_text()
+    assert all(button.is_disabled() for button in page.locator("#nav button").all())
+    assert page.locator("form").count() == 0
+    assert page.get_by_role("heading", name="概览", exact=True).count() == 0
+    assert page.get_by_role("heading", name="幼儿管理", exact=True).count() == 0
+    assert page.get_by_role("heading", name="小鸭管理", exact=True).count() == 0
+    page.get_by_role("button", name="概览", exact=True).click(force=True)
+    page.wait_for_timeout(100)
+    paths = application_paths(requests, teacher_browser.server.base_url)
+    assert {path for path in paths if path.startswith("/api/")} == {
+        "/api/auth/lock",
+        "/api/auth/status",
+    }
+    assert errors == []
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
