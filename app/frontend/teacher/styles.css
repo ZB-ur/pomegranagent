@@ -71,6 +71,42 @@ textarea { width: 100%; min-height: 46px; }
 .teacher-chart { overflow-x: auto; }
 .teacher-chart-inner { min-width: 700px; }
 .teacher-detail-top { margin-top: 10px; }
+.today-view { display: grid; gap: 16px; max-width: 980px; }
+.today-header { display: grid; gap: 6px; }
+.today-eyebrow { color: var(--brand-dark); font-size: 14px; font-weight: 700; letter-spacing: .08em; }
+.today-header h1 { font-size: 30px; line-height: 1.25; }
+.today-date { font-size: 14px; }
+.today-auth { color: var(--green); font-size: 14px; }
+.today-panel { min-width: 0; }
+.today-panel h2 { margin-bottom: 10px; }
+.today-panel-status { min-height: 22px; }
+.today-panel-body { display: grid; gap: 10px; }
+.today-list { display: grid; gap: 8px; }
+.today-panel-link, .today-roster-link, .today-review-link, .today-panel-retry, .today-analysis-retry {
+  align-items: center;
+  display: inline-flex;
+  min-height: 44px;
+  min-width: 44px;
+}
+.today-panel-link, .today-roster-link, .today-review-link {
+  color: var(--brand-dark);
+  text-decoration-thickness: 2px;
+  width: fit-content;
+}
+.today-queue-row { border-top: 1px solid var(--border); display: grid; gap: 6px; padding-top: 10px; }
+.today-row-name { font-weight: 700; }
+.today-row-details { align-items: center; display: flex; flex-wrap: wrap; gap: 3px; }
+.today-analysis-retry, .today-panel-retry { justify-content: center; width: fit-content; }
+.today-retry-feedback { color: var(--red); min-height: 22px; }
+.today-start-link {
+  align-items: center;
+  display: inline-flex;
+  justify-content: center;
+  min-height: 44px;
+  min-width: 44px;
+  text-decoration: none;
+  width: fit-content;
+}
 
 button, input, select, textarea { min-height: 44px; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {

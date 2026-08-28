@@ -113,6 +113,7 @@ async function settle() {
 }
 
 const names = ['overview', 'children', 'ducks', 'roster', 'review', 'growth', 'search'];
+const legacyNames = ['children', 'ducks', 'roster', 'review', 'growth', 'search'];
 
 function makeRoutes(overrides = {}) {
   return Object.fromEntries(names.map(name => [name, context => {
@@ -437,7 +438,9 @@ test('all legacy route entries invoke the injected request with their route sign
   });
 
   try {
-    for (const route of names) {
+    assert.deepEqual(Object.keys(routes).sort(), legacyNames.slice().sort());
+    assert.equal(routes.overview, undefined);
+    for (const route of legacyNames) {
       const controller = new AbortController();
       routes[route]({
         root: { replaceChildren() {} },
@@ -451,7 +454,6 @@ test('all legacy route entries invoke the injected request with their route sign
     await settle();
 
     assert.deepEqual(new Set(calls.map(call => call.path)), new Set([
-      '/api/analysis/overview',
       '/api/children',
       '/api/ducks',
       '/api/roster',

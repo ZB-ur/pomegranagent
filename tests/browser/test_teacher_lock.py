@@ -33,7 +33,7 @@ def open_teacher_page(teacher_browser, viewport):
 def setup_teacher(page, *, pin: str = PIN) -> None:
     page.get_by_label("设置教师 PIN", exact=True).fill(pin)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
-    page.get_by_role("heading", name="概览", exact=True).wait_for()
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
     assert page.locator("form").count() == 0
     assert page.locator("#teacher-pin").count() == 0
 
@@ -85,7 +85,7 @@ def test_teacher_locked_bootstrap_makes_only_runtime_and_auth_requests(teacher_b
         "/api/auth/status",
     }
     assert "/version.json" in paths
-    assert page.get_by_role("heading", name="概览", exact=True).count() == 0
+    assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert page.get_by_role("heading", name="幼儿管理", exact=True).count() == 0
     assert page.get_by_role("heading", name="值日审阅", exact=True).count() == 0
     assert all(button.is_disabled() for button in page.locator("#nav button").all())
@@ -99,7 +99,7 @@ def test_teacher_first_setup_and_manual_lock_stay_in_the_same_document(teacher_b
     setup_teacher(page)
     authenticated = urlsplit(page.url)
     assert (authenticated.scheme, authenticated.netloc, authenticated.path) == (initial.scheme, initial.netloc, initial.path)
-    assert authenticated.fragment == "overview"
+    assert authenticated.fragment == "today"
     assert not any(button.is_disabled() for button in page.locator("#nav button").all())
     lock_teacher(page)
     locked = urlsplit(page.url)
@@ -107,10 +107,10 @@ def test_teacher_first_setup_and_manual_lock_stay_in_the_same_document(teacher_b
         authenticated.scheme,
         authenticated.netloc,
         authenticated.path,
-        "overview",
+        "today",
     )
     assert all(button.is_disabled() for button in page.locator("#nav button").all())
-    assert page.get_by_role("heading", name="概览", exact=True).count() == 0
+    assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert page.get_by_role("heading", name="教师端已锁定", exact=True).count() == 1
 
 
@@ -126,7 +126,7 @@ def test_teacher_wrong_pin_is_safe_focuses_input_and_never_persists_material(tea
     assert page.get_by_role("button", name="解锁", exact=True).is_enabled()
     assert page.evaluate("document.activeElement?.id") == "teacher-pin"
     assert input_box.input_value() == "1111"
-    assert page.get_by_role("heading", name="概览", exact=True).count() == 0
+    assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert_pin_absent(page, "1111")
 
 
@@ -141,7 +141,7 @@ def test_teacher_fresh_context_requires_unlock_without_cookie_seeding(teacher_br
     page_b.set_viewport_size(viewport)
     page_b.goto(f"{teacher_browser.server.base_url}/teacher.html", wait_until="domcontentloaded")
     page_b.get_by_label("教师 PIN", exact=True).wait_for()
-    assert page_b.get_by_role("heading", name="概览", exact=True).count() == 0
+    assert page_b.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert all(button.is_disabled() for button in page_b.locator("#nav button").all())
 
 
@@ -163,7 +163,7 @@ def test_teacher_lock_failure_preserves_authenticated_view_and_announces_error(t
     page.get_by_role("button", name="立即锁定", exact=True).click()
     page.locator("#teacher-lock-feedback").get_by_text("暂时无法锁定，请稍后重试。", exact=True).wait_for()
     assert len(lock_requests) == 1
-    assert page.get_by_role("heading", name="概览", exact=True).count() == 1
+    assert page.get_by_role("heading", name="今日任务", exact=True).count() == 1
     assert not any(button.is_disabled() for button in page.locator("#nav button").all())
     assert page.get_by_role("button", name="立即锁定", exact=True).is_enabled()
     assert "raw-lock-detail-2468" not in page.locator("body").inner_text()
@@ -196,10 +196,10 @@ def test_teacher_post_lock_status_failure_is_safe_and_has_no_route_ownership(tea
     assert "raw-post-lock-status-detail-2468" not in page.locator("body").inner_text()
     assert all(button.is_disabled() for button in page.locator("#nav button").all())
     assert page.locator("form").count() == 0
-    assert page.get_by_role("heading", name="概览", exact=True).count() == 0
+    assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert page.get_by_role("heading", name="幼儿管理", exact=True).count() == 0
     assert page.get_by_role("heading", name="小鸭管理", exact=True).count() == 0
-    page.get_by_role("button", name="概览", exact=True).click(force=True)
+    page.get_by_role("button", name="今日任务", exact=True).click(force=True)
     page.wait_for_timeout(100)
     paths = application_paths(requests, teacher_browser.server.base_url)
     assert {path for path in paths if path.startswith("/api/")} == {
@@ -236,7 +236,7 @@ def test_teacher_runtime_failure_keeps_maintenance_and_makes_zero_auth_or_busine
     assert not any(path.startswith("/api/auth/") for path in paths)
     assert {path for path in paths if path.startswith("/api/")} == {"/api/health"}
     assert page.locator("#nav").count() == 0
-    assert page.get_by_role("heading", name="概览", exact=True).count() == 0
+    assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -270,7 +270,7 @@ def test_teacher_auth_status_failure_is_safe_and_makes_zero_business_requests(te
         "/api/auth/status",
     }
     assert all(button.is_disabled() for button in page.locator("#nav button").all())
-    assert page.get_by_role("heading", name="概览", exact=True).count() == 0
+    assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert page.get_by_role("heading", name="幼儿管理", exact=True).count() == 0
     assert page.get_by_role("heading", name="值日审阅", exact=True).count() == 0
 
@@ -291,7 +291,7 @@ def test_teacher_pagehide_clears_pin_and_success_paths_leave_no_pin_material(tea
     assert page.get_by_label("教师 PIN", exact=True).input_value() == ""
     page.get_by_label("教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="解锁", exact=True).click()
-    page.get_by_role("heading", name="概览", exact=True).wait_for()
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
     assert page.locator("form").count() == 0
     assert page.locator("#teacher-pin").count() == 0
     assert_pin_absent(page, PIN)

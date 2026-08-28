@@ -22,7 +22,7 @@ def open_teacher(teacher_browser, viewport, fragment: str = ""):
     return context, page
 
 
-def setup_teacher(page, heading: str = "概览") -> None:
+def setup_teacher(page, heading: str = "今日任务") -> None:
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("heading", name=heading, exact=True).wait_for()
@@ -43,18 +43,18 @@ def assert_focused_heading(page, label: str) -> None:
     assert page.evaluate("node => document.activeElement === node", heading.element_handle())
 
 
-def assert_same_document_with_overview(page, teacher_browser) -> None:
+def assert_same_document_with_today(page, teacher_browser) -> None:
     parsed = urlsplit(page.url)
     origin = urlsplit(teacher_browser.server.base_url)
     assert (parsed.scheme, parsed.netloc, parsed.path) == (origin.scheme, origin.netloc, "/teacher.html")
-    assert parsed.fragment == "overview"
+    assert parsed.fragment == "today"
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_hash_click_back_forward_active_and_focus(teacher_browser, viewport):
     _context, page = open_teacher(teacher_browser, viewport)
     setup_teacher(page)
-    assert_same_document_with_overview(page, teacher_browser)
+    assert_same_document_with_today(page, teacher_browser)
 
     page.get_by_role("button", name="幼儿管理", exact=True).click()
     page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
@@ -88,8 +88,8 @@ def test_teacher_canonicalizes_empty_and_unknown_hash_only_after_authentication(
     page.get_by_label("设置教师 PIN", exact=True).wait_for()
     assert urlsplit(page.url).fragment in ("", "bogus")
     setup_teacher(page)
-    assert_same_document_with_overview(page, teacher_browser)
-    assert active_route(page) == "概览"
+    assert_same_document_with_today(page, teacher_browser)
+    assert active_route(page) == "今日任务"
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -111,38 +111,38 @@ def test_teacher_growth_fragment_query_is_preserved_and_requests_the_selected_ch
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_teacher_clicking_current_overview_refetches_without_creating_history(teacher_browser, viewport):
+def test_teacher_clicking_current_today_refetches_without_creating_history(teacher_browser, viewport):
     _context, page = open_teacher(teacher_browser, viewport)
     reads = []
-    page.on("request", lambda request: reads.append(request.url) if urlsplit(request.url).path == "/api/analysis/overview" else None)
+    page.on("request", lambda request: reads.append(request.url) if urlsplit(request.url).path == "/api/roster/today" else None)
     setup_teacher(page)
     before_history = page.evaluate("history.length")
-    with page.expect_request(f"{teacher_browser.server.base_url}/api/analysis/overview"):
-        page.get_by_role("button", name="概览", exact=True).click()
-    page.get_by_role("heading", name="概览", exact=True).wait_for()
+    with page.expect_request(f"{teacher_browser.server.base_url}/api/roster/today"):
+        page.get_by_role("button", name="今日任务", exact=True).click()
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
     assert len(reads) >= 2
     assert page.evaluate("history.length") == before_history
-    assert_same_document_with_overview(page, teacher_browser)
+    assert_same_document_with_today(page, teacher_browser)
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_teacher_navigation_aborts_held_overview_without_late_dom_mutation(teacher_browser, viewport):
+def test_teacher_navigation_aborts_held_today_without_late_dom_mutation(teacher_browser, viewport):
     _context, page = open_teacher(teacher_browser, viewport)
     held = []
     failures = []
     page.on("requestfailed", lambda request: failures.append(request.url))
 
-    def hold_overview(route):
+    def hold_today(route):
         assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
         held.append(route)
 
-    page.route(f"{teacher_browser.server.base_url}/api/analysis/overview", hold_overview)
+    page.route(f"{teacher_browser.server.base_url}/api/roster/today", hold_today)
     setup_teacher(page)
     assert len(held) == 1
     page.get_by_role("button", name="幼儿管理", exact=True).click()
     page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
     page.wait_for_timeout(100)
-    old_url = f"{teacher_browser.server.base_url}/api/analysis/overview"
+    old_url = f"{teacher_browser.server.base_url}/api/roster/today"
     assert old_url in failures
     assert urlsplit(page.url).fragment == "children"
     assert active_route(page) == "幼儿管理"
@@ -169,32 +169,32 @@ def test_teacher_rapid_navigation_keeps_only_the_newest_route_and_no_page_error(
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_manual_lock_aborts_route_and_unlock_starts_one_fresh_route_load(teacher_browser, viewport):
     _context, page = open_teacher(teacher_browser, viewport)
-    overview_routes = []
+    today_routes = []
     failures = []
     page.on("requestfailed", lambda request: failures.append(request.url))
 
-    def hold_first_overview(route):
+    def hold_first_today(route):
         assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
-        overview_routes.append(route)
-        if len(overview_routes) > 1:
+        today_routes.append(route)
+        if len(today_routes) > 1:
             route.fulfill(status=200, content_type="application/json", body="[]")
 
-    page.route(f"{teacher_browser.server.base_url}/api/analysis/overview", hold_first_overview)
+    page.route(f"{teacher_browser.server.base_url}/api/roster/today", hold_first_today)
     setup_teacher(page)
-    assert len(overview_routes) == 1
+    assert len(today_routes) == 1
     page.get_by_role("button", name="立即锁定", exact=True).click()
     page.get_by_label("教师 PIN", exact=True).wait_for()
     page.wait_for_timeout(100)
-    assert f"{teacher_browser.server.base_url}/api/analysis/overview" in failures
-    assert page.get_by_role("heading", name="概览", exact=True).count() == 0
+    assert f"{teacher_browser.server.base_url}/api/roster/today" in failures
+    assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert all(button.is_disabled() for button in page.locator("#nav button").all())
 
     page.get_by_label("教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="解锁", exact=True).click()
-    page.get_by_role("heading", name="概览", exact=True).wait_for()
-    assert len(overview_routes) == 2
-    assert active_route(page) == "概览"
-    assert_same_document_with_overview(page, teacher_browser)
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
+    assert len(today_routes) == 2
+    assert active_route(page) == "今日任务"
+    assert_same_document_with_today(page, teacher_browser)
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -211,9 +211,9 @@ def test_teacher_legacy_review_and_search_errors_are_fixed_and_navigable(teacher
     assert "Field required" not in body
     assert "AbortError" not in body
     assert errors == []
-    page.get_by_role("button", name="概览", exact=True).click()
-    page.get_by_role("heading", name="概览", exact=True).wait_for()
-    assert active_route(page) == "概览"
+    page.get_by_role("button", name="今日任务", exact=True).click()
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
+    assert active_route(page) == "今日任务"
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -242,6 +242,6 @@ def test_teacher_legacy_hard_delete_error_is_fixed_and_navigable(teacher_browser
     assert "已禁用永久删除" not in body
     assert "删除成功" not in body
     assert errors == []
-    page.get_by_role("button", name="概览", exact=True).click()
-    page.get_by_role("heading", name="概览", exact=True).wait_for()
-    assert active_route(page) == "概览"
+    page.get_by_role("button", name="今日任务", exact=True).click()
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
+    assert active_route(page) == "今日任务"

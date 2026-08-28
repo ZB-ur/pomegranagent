@@ -60,11 +60,12 @@ def test_teacher_assets_hold_runtime_auth_and_no_direct_fetch_contract():
 
 def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_legacy_module():
     app = (ROOT / "app/frontend/teacher/app.js").read_text(encoding="utf-8")
+    html = (ROOT / "app/frontend/teacher.html").read_text(encoding="utf-8")
     router = (ROOT / "app/frontend/teacher/router.mjs").read_text(encoding="utf-8")
     legacy = (ROOT / "app/frontend/teacher/legacy-routes.mjs").read_text(encoding="utf-8")
-    expected_routes = {"overview", "children", "ducks", "roster", "review", "growth", "search"}
+    expected_routes = {"today", "children", "ducks", "roster", "review", "growth", "search"}
+    expected_legacy_routes = {"children", "ducks", "roster", "review", "growth", "search"}
     expected_endpoints = {
-        "/api/analysis/overview",
         "/api/children",
         "/api/children/",
         "/api/ducks",
@@ -79,7 +80,10 @@ def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_leg
 
     assert "import { createTeacherRouter } from './router.mjs';" in app
     assert "import { createLegacyTeacherRoutes } from './legacy-routes.mjs';" in app
-    assert "defaultRoute: 'overview'" in app
+    assert "import { createTodayRoute } from './views/today.mjs';" in app
+    assert "defaultRoute: 'today'" in app
+    assert 'data-v="today"' in html
+    assert '>今日任务</button>' in html
     assert "teacherRouter.start()" in app
     assert "teacherRouter.stop()" in app
     assert "const views = {}" not in app
@@ -92,8 +96,10 @@ def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_leg
     assert "DuckAuth" not in router + legacy
     assert set(re.findall(r"['\"](/api/[^'\"]*)['\"]", legacy)) == expected_endpoints
     assert set(re.findall(r"route: '([a-z]+)'", app)) == expected_routes
-    for route in expected_routes:
+    for route in expected_legacy_routes:
         assert f"{route}," in legacy or f"{route} }}" in legacy
+    assert "overview" not in legacy
+    assert "/api/analysis/overview" not in app + legacy
     assert "signal" in legacy
     assert "isCurrent" in legacy
     assert "加载失败，请重新进入此页面。" in legacy

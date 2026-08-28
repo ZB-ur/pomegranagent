@@ -23,13 +23,6 @@ function tableCell(document, ...children) {
   return node;
 }
 
-function metric(document, number, label) {
-  const value = typeof number === 'number' ? Math.round(number * 100) / 100 : number;
-  return createElement(document, 'div', { class: 'card metric' },
-    createElement(document, 'div', { class: 'num' }, String(value)),
-    createElement(document, 'div', { class: 'label' }, label));
-}
-
 function beginRoute(document, request, context, title) {
   const view = createElement(document, 'div', { class: 'view active' });
   view.append(createElement(document, 'h2', null, title));
@@ -99,23 +92,6 @@ function drawGrowth(document, wrap, data) {
 export function createLegacyTeacherRoutes({ request, document, alert }) {
   if (typeof request !== 'function' || !document?.createElement || typeof alert !== 'function') {
     throw new TypeError('Legacy teacher routes require request, document, and alert dependencies.');
-  }
-
-  function overview(context) {
-    const { view, scopedRequest } = beginRoute(document, request, context, '概览');
-    const metrics = createElement(document, 'div', { class: 'metrics' });
-    view.append(metrics, createElement(document, 'div', { class: 'card' },
-      createElement(document, 'div', { class: 'muted' }, '从左侧导航进入各功能模块。日常流程：值日排班 → 幼儿端对话 → 值日审阅确认评估 → 查看成长曲线。')));
-    scopedRequest('/api/analysis/overview', {}, rows => {
-      const total = rows.length;
-      const conversations = rows.reduce((sum, row) => sum + row.conversations, 0);
-      const assessed = rows.filter(row => row.latest_overall != null).length;
-      metrics.innerHTML = '';
-      metrics.append(
-        metric(document, total, '幼儿人数'), metric(document, conversations, '累计会话'), metric(document, assessed, '已评估'),
-        metric(document, rows.reduce((sum, row) => sum + (row.latest_overall || 0), 0) / (assessed || 1), '平均综合分'),
-      );
-    });
   }
 
   function children(context) {
@@ -386,5 +362,5 @@ export function createLegacyTeacherRoutes({ request, document, alert }) {
     load();
   }
 
-  return { overview, children, ducks, roster, review, growth, search };
+  return { children, ducks, roster, review, growth, search };
 }

@@ -1,10 +1,11 @@
 import { createTeacherRouter } from './router.mjs';
 import { createLegacyTeacherRoutes } from './legacy-routes.mjs';
+import { createTodayRoute } from './views/today.mjs';
 
 const main = document.getElementById('main');
 const nav = document.getElementById('nav');
 const teacherRouteManifest = [
-  { route: 'overview' },
+  { route: 'today' },
   { route: 'children' },
   { route: 'ducks' },
   { route: 'roster' },
@@ -83,23 +84,37 @@ function authenticationErrorCopy(error) {
 
 function startTeacherRouter() {
   if (!runtimeReady || !teacherAuthenticated) return;
+  migrateOverviewHash();
   if (!teacherRouter) {
     const legacyRoutes = createLegacyTeacherRoutes({
       request: (path, options) => window.DuckAPI.request(path, options),
       document,
       alert: (...args) => window.alert(...args),
     });
-    const routes = Object.fromEntries(teacherRouteManifest.map(({ route }) => [route, legacyRoutes[route]]));
+    const today = createTodayRoute({
+      request: (path, options) => window.DuckAPI.request(path, options),
+      document,
+    });
+    const routes = Object.fromEntries(teacherRouteManifest.map(({ route }) => [
+      route,
+      route === 'today' ? today : legacyRoutes[route],
+    ]));
     teacherRouter = createTeacherRouter({
       window,
       root: main,
       nav,
       routes,
-      defaultRoute: 'overview',
+      defaultRoute: 'today',
       onError: () => {},
     });
   }
   return teacherRouter.start();
+}
+
+function migrateOverviewHash() {
+  const raw = String(window.location.hash || '');
+  if (raw !== '#overview' && !raw.startsWith('#overview?')) return;
+  window.history.replaceState(null, '', `#today${raw.slice('#overview'.length)}`);
 }
 
 async function bootstrapTeacherPage() {
