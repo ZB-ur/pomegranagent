@@ -1,6 +1,7 @@
 import { createTeacherRouter } from './router.mjs';
 import { createLegacyTeacherRoutes } from './legacy-routes.mjs';
 import { createTodayRoute } from './views/today.mjs';
+import { createReviewRoute } from './views/review.mjs';
 
 const main = document.getElementById('main');
 const nav = document.getElementById('nav');
@@ -95,9 +96,14 @@ function startTeacherRouter() {
       request: (path, options) => window.DuckAPI.request(path, options),
       document,
     });
+    const review = createReviewRoute({
+      request: (path, options) => window.DuckAPI.request(path, options),
+      document,
+      createAbortController: () => new AbortController(),
+    });
     const routes = Object.fromEntries(teacherRouteManifest.map(({ route }) => [
       route,
-      route === 'today' ? today : legacyRoutes[route],
+      route === 'today' ? today : route === 'review' ? review : legacyRoutes[route],
     ]));
     teacherRouter = createTeacherRouter({
       window,

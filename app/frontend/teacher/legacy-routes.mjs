@@ -225,88 +225,6 @@ export function createLegacyTeacherRoutes({ request, document, alert }) {
     reload();
   }
 
-  function review(context) {
-    const { view, scopedRequest } = beginRoute(document, request, context, '值日审阅');
-    const list = createElement(document, 'div');
-    const detail = createElement(document, 'div');
-    const openDetail = conversationId => scopedRequest('/api/conversations/' + conversationId, {}, data => {
-      detail.innerHTML = '';
-      const card = createElement(document, 'div', { class: 'card' });
-      card.append(createElement(document, 'h2', null, `会话 #${data.id} 详情`), createElement(document, 'b', null, '对话记录'));
-      const messages = createElement(document, 'div', { class: 'teacher-scroll' });
-      data.messages.forEach(message => messages.append(createElement(document, 'div', { class: `bubble ${message.role === 'child' ? 'c' : 'd'}` }, `${message.role === 'child' ? '幼儿：' : '日记本：'}${message.text}`)));
-      card.append(messages, createElement(document, 'b', null, '饲养流水（可修正）'));
-      const logsBox = createElement(document, 'div');
-      (data.feeding_logs || []).forEach(log => {
-        const category = createElement(document, 'select');
-        ['喂食', '清洁', '观察', '其它'].forEach(item => category.append(new Option(item, item)));
-        category.value = log.category;
-        const content = createElement(document, 'input', { value: log.content, class: 'teacher-flex' });
-        logsBox.append(createElement(document, 'div', { class: 'row' }, category, content));
-      });
-      card.append(logsBox, createElement(document, 'b', null, '情绪'));
-      const emotion = createElement(document, 'select');
-      ['开心', '平静', '疲惫', '期待', '其它'].forEach(item => emotion.append(new Option(item, item)));
-      if (data.emotion) emotion.value = data.emotion.emotion;
-      const intensity = createElement(document, 'input', { type: 'number', min: 1, max: 5, value: data.emotion ? data.emotion.intensity : 3, class: 'teacher-narrow' });
-      card.append(createElement(document, 'div', { class: 'row teacher-row-top' }, '情绪', emotion, '强度(1-5)', intensity));
-      const scoreState = {};
-      if (data.assessment) {
-        card.append(createElement(document, 'b', null, '能力评估（可调整后确认）'));
-        const scoreBox = createElement(document, 'div');
-        data.assessment.scores.forEach(score => {
-          scoreState[score.dimension_id] = score.score;
-          const name = createElement(document, 'span', { class: 'name' }, score.dimension_name);
-          const stars = createElement(document, 'div', { class: 'stars' });
-          const reason = createElement(document, 'textarea', { placeholder: '评分理由（引用对话原句）' });
-          reason.value = score.reason || '';
-          const row = createElement(document, 'div', { class: 'score-box' }, name);
-          for (let value = 1; value <= 5; value += 1) {
-            const star = createElement(document, 'button', { onclick: () => { scoreState[score.dimension_id] = value; renderStars(); } }, '★');
-            stars.append(star);
-          }
-          function renderStars() { [...stars.children].forEach((star, index) => star.classList.toggle('on', index < scoreState[score.dimension_id])); }
-          renderStars();
-          row.append(stars);
-          scoreBox.append(row, reason);
-        });
-        const saveReview = () => {
-          const body = {
-            feeding_logs: data.feeding_logs.map((log, index) => ({ id: log.id, category: logsBox.children[index].children[0].value, content: logsBox.children[index].children[1].value })),
-            emotion: { emotion: emotion.value, intensity: +intensity.value },
-          };
-          scopedRequest('/api/conversations/' + data.id + '/logs', { method: 'PATCH', body }, () => alert('已保存修正'));
-        };
-        const confirmAssessment = () => {
-          const scores = {};
-          Object.keys(scoreState).forEach(key => { scores[key] = { score: scoreState[key] }; });
-          scopedRequest('/api/assessments/' + data.assessment.id + '/confirm', { method: 'POST', body: { scores } }, () => {
-            alert('评估已确认');
-            openDetail(data.id);
-          });
-        };
-        card.append(scoreBox, createElement(document, 'div', { class: 'row teacher-row-actions' },
-          createElement(document, 'button', { class: 'btn', onclick: saveReview }, '保存修正'),
-          createElement(document, 'button', { class: 'btn green', onclick: confirmAssessment }, '确认评估')));
-      }
-      detail.append(card);
-    });
-    view.append(list, detail);
-    scopedRequest('/api/conversations', {}, rows => {
-      list.innerHTML = '';
-      const table = createElement(document, 'table');
-      table.append(createElement(document, 'tr', null,
-        tableHeading(document, 'ID'), tableHeading(document, '日期'), tableHeading(document, '状态'), tableHeading(document, '结束原因'), tableHeading(document, '操作')));
-      rows.forEach(conversation => {
-        const reasons = { max_rounds: '达到轮次', complete: '信息充分', manual: '手动结束' };
-        table.append(createElement(document, 'tr', null,
-          tableCell(document, conversation.id), tableCell(document, conversation.date), tableCell(document, conversation.status), tableCell(document, reasons[conversation.end_reason] || conversation.end_reason || '-'),
-          tableCell(document, createElement(document, 'button', { class: 'btn small', onclick: () => openDetail(conversation.id) }, '审阅'))));
-      });
-      list.append(createElement(document, 'div', { class: 'card' }, table));
-    });
-  }
-
   function growth(context) {
     const { view, scopedRequest } = beginRoute(document, request, context, '能力成长曲线');
     const select = createElement(document, 'select');
@@ -362,5 +280,5 @@ export function createLegacyTeacherRoutes({ request, document, alert }) {
     load();
   }
 
-  return { children, ducks, roster, review, growth, search };
+  return { children, ducks, roster, growth, search };
 }

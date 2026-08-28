@@ -113,7 +113,7 @@ async function settle() {
 }
 
 const names = ['overview', 'children', 'ducks', 'roster', 'review', 'growth', 'search'];
-const legacyNames = ['children', 'ducks', 'roster', 'review', 'growth', 'search'];
+const legacyNames = ['children', 'ducks', 'roster', 'growth', 'search'];
 
 function makeRoutes(overrides = {}) {
   return Object.fromEntries(names.map(name => [name, context => {

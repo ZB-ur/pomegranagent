@@ -64,7 +64,7 @@ def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_leg
     router = (ROOT / "app/frontend/teacher/router.mjs").read_text(encoding="utf-8")
     legacy = (ROOT / "app/frontend/teacher/legacy-routes.mjs").read_text(encoding="utf-8")
     expected_routes = {"today", "children", "ducks", "roster", "review", "growth", "search"}
-    expected_legacy_routes = {"children", "ducks", "roster", "review", "growth", "search"}
+    expected_legacy_routes = {"children", "ducks", "roster", "growth", "search"}
     expected_endpoints = {
         "/api/children",
         "/api/children/",
@@ -74,13 +74,13 @@ def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_leg
         "/api/roster",
         "/api/conversations",
         "/api/conversations/",
-        "/api/assessments/",
         "/api/analysis/growth?child_id=",
     }
 
     assert "import { createTeacherRouter } from './router.mjs';" in app
     assert "import { createLegacyTeacherRoutes } from './legacy-routes.mjs';" in app
     assert "import { createTodayRoute } from './views/today.mjs';" in app
+    assert "import { createReviewRoute } from './views/review.mjs';" in app
     assert "defaultRoute: 'today'" in app
     assert 'data-v="today"' in html
     assert '>今日任务</button>' in html
@@ -99,6 +99,9 @@ def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_leg
     for route in expected_legacy_routes:
         assert f"{route}," in legacy or f"{route} }}" in legacy
     assert "overview" not in legacy
+    assert "function review(" not in legacy
+    assert "/logs" not in legacy
+    assert "/assessments/" not in legacy
     assert "/api/analysis/overview" not in app + legacy
     assert "signal" in legacy
     assert "isCurrent" in legacy

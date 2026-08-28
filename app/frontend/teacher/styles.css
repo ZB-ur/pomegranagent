@@ -107,6 +107,27 @@ textarea { width: 100%; min-height: 46px; }
   text-decoration: none;
   width: fit-content;
 }
+.review-view { display: grid; gap: 16px; min-width: 0; }
+.review-view > h1 { font-size: 30px; line-height: 1.25; }
+.review-shell { display: grid; gap: 16px; grid-template-columns: 300px minmax(0, 1fr); min-width: 0; }
+.review-panel, .review-queue-body, .review-detail-body, .review-workspace, .review-transcript, .review-results, .review-scores { min-width: 0; }
+.review-queue-body, .review-detail-body, .review-result-group, .review-scores { display: grid; gap: 12px; }
+.review-queue-status { min-height: 22px; }
+.review-queue-row { border-top: 1px solid var(--border); display: grid; gap: 4px; padding-top: 10px; }
+.review-queue-link, .review-return-today, .review-detail-reload { align-items: center; display: inline-flex; min-height: 44px; min-width: 44px; width: fit-content; }
+.review-queue-link, .review-return-today { color: var(--brand-dark); text-decoration-thickness: 2px; }
+.review-detail-reload { justify-content: center; }
+.review-detail-header { display: grid; gap: 8px; }
+.review-workspace { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+.review-transcript, .review-results, .review-scores { display: grid; gap: 10px; }
+.review-message-log { display: grid; gap: 8px; max-height: 420px; overflow-y: auto; }
+.review-message { border-radius: 10px; display: grid; gap: 4px; overflow-wrap: anywhere; padding: 10px 12px; }
+.review-message-child { background: #dbeafe; }
+.review-message-diary { background: #fff7e0; }
+.review-speaker { font-weight: 700; }
+.review-message-text, .review-row-metadata { overflow-wrap: anywhere; }
+.review-result-group, .review-score-row { border-top: 1px solid var(--border); padding-top: 10px; }
+.review-score-row { display: grid; gap: 4px; }
 
 button, input, select, textarea { min-height: 44px; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
@@ -119,6 +140,10 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
   main { padding: 20px; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .card { overflow-wrap: anywhere; }
+}
+
+@media (max-width: 899px) {
+  .review-shell, .review-workspace { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {

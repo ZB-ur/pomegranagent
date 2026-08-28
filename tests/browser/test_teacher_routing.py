@@ -198,8 +198,9 @@ def test_teacher_manual_lock_aborts_route_and_unlock_starts_one_fresh_route_load
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-@pytest.mark.parametrize("fragment, heading", [("#review", "值日审阅"), ("#search", "明细检索")])
-def test_teacher_legacy_review_and_search_errors_are_fixed_and_navigable(teacher_browser, viewport, fragment, heading):
+def test_teacher_legacy_search_error_is_fixed_and_navigable(teacher_browser, viewport):
+    fragment = "#search"
+    heading = "明细检索"
     _context, page = open_teacher(teacher_browser, viewport, fragment)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
