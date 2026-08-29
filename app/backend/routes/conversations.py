@@ -6,7 +6,7 @@ from datetime import datetime, timezone
 from typing import Literal
 
 import httpx
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -23,6 +23,7 @@ from ..services.chat import (
     record_chat_failure,
 )
 from ..services.completion import complete_conversation
+from ..services.history import list_conversation_history
 from ..services.reviews import get_review_detail, list_review_queue, save_review
 
 
@@ -127,6 +128,60 @@ def review_queue(
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> list[schemas.ConversationQueueItem]:
     return list_review_queue(db, queue=queue)
+
+
+def _history_query(request: Request) -> tuple[int, int | None, int | None]:
+    allowed = {"limit", "child_id", "before_id"}
+    pairs = request.query_params.multi_items()
+    keys = [key for key, _value in pairs]
+    invalid = sorted({key for key in keys if key not in allowed})
+    duplicates = sorted({key for key in allowed if keys.count(key) > 1})
+    if invalid or duplicates:
+        fields = {
+            f"query.{key}": ["不支持或重复的查询参数"]
+            for key in [*invalid, *duplicates]
+        }
+        raise APIError(422, "VALIDATION_ERROR", "请求字段校验失败", fields)
+
+    values = dict(pairs)
+
+    def positive(name: str, default: int | None = None) -> int | None:
+        raw = values.get(name)
+        if raw is None:
+            return default
+        try:
+            parsed = int(raw)
+        except (TypeError, ValueError):
+            parsed = 0
+        maximum = 50 if name == "limit" else None
+        if parsed < 1 or (maximum is not None and parsed > maximum):
+            raise APIError(
+                422,
+                "VALIDATION_ERROR",
+                "请求字段校验失败",
+                {f"query.{name}": ["参数超出允许范围"]},
+            )
+        return parsed
+
+    return positive("limit", 20), positive("child_id"), positive("before_id")
+
+
+@router.get(
+    "/api/conversations/history",
+    response_model=schemas.ConversationHistoryPage,
+)
+def conversation_history(
+    request: Request,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+) -> schemas.ConversationHistoryPage:
+    limit, child_id, before_id = _history_query(request)
+    return list_conversation_history(
+        db,
+        limit=limit,
+        child_id=child_id,
+        before_id=before_id,
+    )
 
 
 @router.get(

@@ -97,6 +97,22 @@ def test_teacher_growth_fragment_query_is_preserved_and_requests_the_selected_ch
     _context, page = open_teacher(teacher_browser, viewport, "#growth?child_id=7")
     growth_requests = []
     page.on("request", lambda request: growth_requests.append(request.url) if "/api/analysis/growth" in request.url else None)
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='[{"id":7,"name":"小雨","nickname":"雨雨","avatar":null,"active":true,"deactivated_at":null,"future_roster_entries":0,"has_active_conversation":false}]',
+        ),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/analysis/growth?child_id=7",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body='{"child_id":7,"dimensions":[]}',
+        ),
+    )
 
     setup_teacher(page, "能力成长曲线")
     assert page.url == f"{teacher_browser.server.base_url}/teacher.html#growth?child_id=7"
@@ -198,51 +214,43 @@ def test_teacher_manual_lock_aborts_route_and_unlock_starts_one_fresh_route_load
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_teacher_legacy_search_error_is_fixed_and_navigable(teacher_browser, viewport):
+def test_teacher_history_search_is_safe_and_navigable(teacher_browser, viewport):
     fragment = "#search"
     heading = "明细检索"
     _context, page = open_teacher(teacher_browser, viewport, fragment)
-    errors = []
-    page.on("pageerror", lambda error: errors.append(str(error)))
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(status=200, content_type="application/json", body="[]"),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/conversations/history?limit=20",
+        lambda route: route.fulfill(status=200, content_type="application/json", body='{"items":[],"next_before_id":null}'),
+    )
     setup_teacher(page, heading)
-    alert = page.locator("#main [role='alert']")
-    alert.get_by_text(FAILURE_COPY, exact=True).wait_for()
-    assert alert.count() == 1
-    body = page.locator("body").inner_text()
-    assert "Field required" not in body
-    assert "AbortError" not in body
-    assert errors == []
+    page.get_by_text("暂无历史记录", exact=True).wait_for()
+    assert page.locator("#main [role='alert']").count() == 0
     page.get_by_role("button", name="今日任务", exact=True).click()
     page.get_by_role("heading", name="今日任务", exact=True).wait_for()
     assert active_route(page) == "今日任务"
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_teacher_legacy_hard_delete_error_is_fixed_and_navigable(teacher_browser, viewport):
+def test_teacher_management_exposes_reversible_state_without_delete(teacher_browser, viewport):
     _context, page = open_teacher(teacher_browser, viewport)
-    errors = []
-    page.on("pageerror", lambda error: errors.append(str(error)))
-
     def ducks(route):
         assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
         route.fulfill(
             status=200,
             content_type="application/json",
-            body='[{"id":1,"name":"测试小鸭","avatar":null,"status":"健康","note":null,"active":true,"deactivated_at":null}]',
+            body='[{"id":1,"name":"测试小鸭","avatar":null,"status":"健康","note":null,"active":true,"deactivated_at":null,"historical_feeding_log_count":0}]',
         )
 
-    page.route(f"{teacher_browser.server.base_url}/api/ducks", ducks)
+    page.route(f"{teacher_browser.server.base_url}/api/ducks?include_inactive=true", ducks)
     setup_teacher(page)
     page.get_by_role("button", name="小鸭管理", exact=True).click()
     page.get_by_role("heading", name="小鸭管理", exact=True).wait_for()
-    page.get_by_role("button", name="删除", exact=True).click()
-    alert = page.locator("#main [role='alert']")
-    alert.get_by_text(FAILURE_COPY, exact=True).wait_for()
-    assert alert.count() == 1
-    body = page.locator("body").inner_text()
-    assert "已禁用永久删除" not in body
-    assert "删除成功" not in body
-    assert errors == []
+    page.get_by_role("button", name="停用：测试小鸭", exact=True).wait_for()
+    assert page.get_by_role("button", name="删除", exact=True).count() == 0
     page.get_by_role("button", name="今日任务", exact=True).click()
     page.get_by_role("heading", name="今日任务", exact=True).wait_for()
     assert active_route(page) == "今日任务"

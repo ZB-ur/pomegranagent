@@ -140,6 +140,30 @@ textarea { width: 100%; min-height: 46px; }
 .review-actions { background: var(--panel); bottom: 0; display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 0 16px; position: sticky; z-index: 1; }
 .review-actions .btn { min-height: 44px; min-width: 44px; }
 
+.management-view, .reports-view { display: grid; gap: 16px; min-width: 0; }
+.management-view > h1, .reports-view > h1 { font-size: 30px; line-height: 1.25; }
+.management-form { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; }
+.teacher-field { display: grid; gap: 6px; min-width: 0; }
+.teacher-field > input, .teacher-field > select, .teacher-field > textarea { min-width: 0; width: 100%; }
+.management-form > button, .management-form > fieldset { grid-column: 1 / -1; }
+.management-list { display: grid; gap: 12px; min-width: 0; }
+.management-card { display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.management-card h2, .management-card p { flex-basis: 100%; }
+.management-status { min-height: 22px; }
+.management-undo { align-items: center; background: #fff7e0; bottom: 18px; display: flex; flex-wrap: wrap; gap: 12px; padding: 14px; position: sticky; z-index: 2; }
+.duck-archive, .report-history-row { overflow-wrap: anywhere; }
+.roster-view fieldset { border: 1px solid var(--border); border-radius: 10px; display: flex; flex-wrap: wrap; gap: 10px; padding: 12px; }
+.roster-view fieldset .teacher-field { align-items: center; display: flex; min-height: 44px; }
+.report-chart { min-width: 0; overflow-x: auto; }
+.report-chart svg { display: block; max-width: 100%; min-width: 620px; }
+.report-legend { font-weight: 600; overflow-wrap: anywhere; }
+.report-history { display: grid; gap: 12px; min-width: 0; }
+.report-history-row { display: grid; gap: 8px; }
+.report-history-row a, .report-load-more { align-items: center; display: inline-flex; min-height: 44px; min-width: 44px; width: fit-content; }
+.management-view dialog { border: 0; border-radius: 14px; margin: auto; max-width: min(520px, calc(100vw - 32px)); padding: 22px; }
+.management-view dialog::backdrop { background: rgba(15, 23, 42, .5); }
+.management-view dialog button { margin: 14px 10px 0 0; }
+
 button, input, select, textarea { min-height: 44px; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
   outline: 3px solid #ffb800;
@@ -156,6 +180,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 @media (max-width: 899px) {
   .review-shell, .review-workspace { grid-template-columns: minmax(0, 1fr); }
   .review-feeding-editor { grid-template-columns: minmax(0, 1fr); }
+  .management-form { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {

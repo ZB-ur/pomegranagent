@@ -1,7 +1,8 @@
 import { createTeacherRouter } from './router.mjs';
-import { createLegacyTeacherRoutes } from './legacy-routes.mjs';
 import { createTodayRoute } from './views/today.mjs';
 import { createReviewRoute } from './views/review.mjs';
+import { createManagementRoutes } from './views/management.mjs';
+import { createReportRoutes } from './views/reports.mjs';
 import { createDirtyGuard } from './dirty-guard.mjs';
 
 const main = document.getElementById('main');
@@ -89,10 +90,17 @@ function startTeacherRouter() {
   if (!runtimeReady || !teacherAuthenticated) return;
   migrateOverviewHash();
   if (!teacherRouter) {
-    const legacyRoutes = createLegacyTeacherRoutes({
+    const managementRoutes = createManagementRoutes({
       request: (path, options) => window.DuckAPI.request(path, options),
       document,
-      alert: (...args) => window.alert(...args),
+      createAbortController: () => new AbortController(),
+      createRequestId: () => window.crypto.randomUUID(),
+    });
+    const reportRoutes = createReportRoutes({
+      request: (path, options) => window.DuckAPI.request(path, options),
+      document,
+      createAbortController: () => new AbortController(),
+      navigate: fragment => { window.location.hash = fragment; },
     });
     const today = createTodayRoute({
       request: (path, options) => window.DuckAPI.request(path, options),
@@ -106,7 +114,9 @@ function startTeacherRouter() {
     });
     const routes = Object.fromEntries(teacherRouteManifest.map(({ route }) => [
       route,
-      route === 'today' ? today : route === 'review' ? review : legacyRoutes[route],
+      route === 'today' ? today
+        : route === 'review' ? review
+          : managementRoutes[route] || reportRoutes[route],
     ]));
     teacherRouter = createTeacherRouter({
       window,

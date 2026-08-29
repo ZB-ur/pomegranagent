@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from app.backend import models, schemas
 from app.backend.api_errors import APIError
 from app.backend.database import SessionLocal, engine
+from app.backend.routes.roster import router as roster_router
 from app.backend.services import roster as roster_service
 
 
@@ -148,6 +149,28 @@ def test_today_is_public_empty_and_uses_one_join_query(client, db_session):
     assert response.status_code == 200
     assert response.json() == []
     assert len(statements) == 1
+
+
+def test_teacher_roster_list_has_strict_response_model_and_rejects_query_aliases(
+    client,
+    db_session,
+):
+    child = _child(db_session, name="历史值日", active=False)
+    _roster(db_session, roster_date="2026-08-24", child_id=child.id, cycle="2026-W34")
+    _unlock(client)
+
+    response = client.get("/api/roster")
+
+    assert response.status_code == 200
+    assert response.json() == [{
+        "id": 1,
+        "cycle": "2026-W34",
+        "date": "2026-08-24",
+        "child_id": child.id,
+    }]
+    route = next(route for route in roster_router.routes if route.path == "/api/roster")
+    assert route.response_model == list[schemas.RosterListItem]
+    _error(client.get("/api/roster?cycle=2026-W34"), status=422, code="VALIDATION_ERROR")
 
 
 def test_teacher_roster_routes_lock_before_legacy_tombstone_and_tombstone_never_writes(
@@ -759,8 +782,8 @@ def test_daily_commit_failure_rolls_back_replacement_and_ledger_from_a_fresh_ses
         assert fresh.get(models.RosterRequest, request_id) is None
 
 
-def test_teacher_list_is_cycle_filterable_and_deterministic_and_path_is_iso_date(client, db_session):
-    """Catches nondeterministic teacher lists or a dynamic route that accepts non-date paths."""
+def test_teacher_list_is_unfiltered_deterministic_and_path_is_iso_date(client, db_session):
+    """Catches ambiguous list filters or a dynamic route that accepts non-date paths."""
     first = _child(db_session, name="甲")
     second = _child(db_session, name="乙")
     _roster(db_session, roster_date="2026-08-25", child_id=first.id, cycle="A")
@@ -781,7 +804,7 @@ def test_teacher_list_is_cycle_filterable_and_deterministic_and_path_is_iso_date
         ("2026-08-24", 3),
         ("2026-08-25", 1),
     ]
-    assert [row["cycle"] for row in filtered.json()] == ["A", "A"]
+    _error(filtered, status=422, code="VALIDATION_ERROR")
     _error(invalid_date, status=422, code="VALIDATION_ERROR")
     assert db_session.scalars(select(models.RosterRequest)).all() == []
 

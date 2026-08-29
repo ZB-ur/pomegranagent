@@ -2,7 +2,6 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { createTeacherRouter } from '../../../app/frontend/teacher/router.mjs';
-import { createLegacyTeacherRoutes } from '../../../app/frontend/teacher/legacy-routes.mjs';
 
 class Events {
   #listeners = new Map();
@@ -113,7 +112,6 @@ async function settle() {
 }
 
 const names = ['overview', 'children', 'ducks', 'roster', 'review', 'growth', 'search'];
-const legacyNames = ['children', 'ducks', 'roster', 'growth', 'search'];
 
 function makeRoutes(overrides = {}) {
   return Object.fromEntries(names.map(name => [name, context => {
@@ -469,65 +467,4 @@ test('stop prevents late loader and confirmation effects and is idempotent', asy
   assert.equal(router.current(), null);
   assert.deepEqual(errors, []);
   assert.ok(nav.buttons.every(button => button.getAttribute('aria-current') === null));
-});
-
-test('all legacy route entries invoke the injected request with their route signal', async () => {
-  const calls = [];
-  const pending = new Promise(() => {});
-  const originalOption = globalThis.Option;
-  globalThis.Option = class Option {
-    constructor(text, value) {
-      this.text = text;
-      this.value = value;
-    }
-  };
-  const document = {
-    createElement(tagName) {
-      return {
-        tagName: tagName.toUpperCase(),
-        children: [],
-        classList: { add() {}, remove() {}, toggle() {} },
-        style: {},
-        append(...children) { this.children.push(...children); },
-        replaceChildren(...children) { this.children = children; },
-        setAttribute() {},
-        addEventListener() {},
-      };
-    },
-  };
-  const routes = createLegacyTeacherRoutes({
-    document,
-    alert() {},
-    request(path, options) {
-      calls.push({ path, options });
-      return pending;
-    },
-  });
-
-  try {
-    assert.deepEqual(Object.keys(routes).sort(), legacyNames.slice().sort());
-    assert.equal(routes.overview, undefined);
-    for (const route of legacyNames) {
-      const controller = new AbortController();
-      routes[route]({
-        root: { replaceChildren() {} },
-        route,
-        params: new URLSearchParams(),
-        signal: controller.signal,
-        epoch: 1,
-        isCurrent: () => true,
-      });
-    }
-    await settle();
-
-    assert.deepEqual(new Set(calls.map(call => call.path)), new Set([
-      '/api/children',
-      '/api/ducks',
-      '/api/roster',
-      '/api/conversations',
-    ]));
-    assert.ok(calls.every(call => call.options.signal instanceof AbortSignal));
-  } finally {
-    globalThis.Option = originalOption;
-  }
 });

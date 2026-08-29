@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from datetime import date, datetime, timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -22,18 +22,28 @@ def today_roster(db: Session = Depends(get_db)) -> list[schemas.RosterTodayChild
     return get_today_roster(db, today=date.today())
 
 
-@router.get("/api/roster")
+@router.get("/api/roster", response_model=list[schemas.RosterListItem])
 def list_roster(
-    cycle: str | None = None,
+    request: Request,
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
-):
+) -> list[schemas.RosterListItem]:
+    if request.query_params:
+        raise APIError(
+            422,
+            "VALIDATION_ERROR",
+            "请求字段校验失败",
+            {"query": ["排班列表不接受查询参数"]},
+        )
     query = select(models.DutyRoster)
-    if cycle is not None:
-        query = query.where(models.DutyRoster.cycle == cycle)
     rows = db.scalars(query.order_by(models.DutyRoster.date, models.DutyRoster.id)).all()
     return [
-        {"id": row.id, "cycle": row.cycle, "date": row.date, "child_id": row.child_id}
+        schemas.RosterListItem(
+            id=row.id,
+            cycle=row.cycle.strip(),
+            date=row.date,
+            child_id=row.child_id,
+        )
         for row in rows
     ]
 

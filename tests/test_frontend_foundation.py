@@ -44,8 +44,9 @@ def test_teacher_assets_hold_runtime_auth_and_no_direct_fetch_contract():
     app = (ROOT / "app/frontend/teacher/app.js").read_text(encoding="utf-8")
     css = (ROOT / "app/frontend/teacher/styles.css").read_text(encoding="utf-8")
     router = (ROOT / "app/frontend/teacher/router.mjs").read_text(encoding="utf-8")
-    legacy = (ROOT / "app/frontend/teacher/legacy-routes.mjs").read_text(encoding="utf-8")
-    assert "fetch(" not in html + app + router + legacy
+    management = (ROOT / "app/frontend/teacher/views/management.mjs").read_text(encoding="utf-8")
+    reports = (ROOT / "app/frontend/teacher/views/reports.mjs").read_text(encoding="utf-8")
+    assert "fetch(" not in html + app + router + management + reports
     assert "window.DuckAPI.ready()" in app
     assert "window.DuckAuth.status()" in app
     assert "window.DuckAuth.setup(" in app
@@ -58,27 +59,17 @@ def test_teacher_assets_hold_runtime_auth_and_no_direct_fetch_contract():
     assert "prefers-reduced-motion: reduce" in css
 
 
-def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_legacy_module():
+def test_teacher_composes_safe_management_and_reports_without_legacy_routes():
     app = (ROOT / "app/frontend/teacher/app.js").read_text(encoding="utf-8")
     html = (ROOT / "app/frontend/teacher.html").read_text(encoding="utf-8")
     router = (ROOT / "app/frontend/teacher/router.mjs").read_text(encoding="utf-8")
-    legacy = (ROOT / "app/frontend/teacher/legacy-routes.mjs").read_text(encoding="utf-8")
+    management = (ROOT / "app/frontend/teacher/views/management.mjs").read_text(encoding="utf-8")
+    reports = (ROOT / "app/frontend/teacher/views/reports.mjs").read_text(encoding="utf-8")
     expected_routes = {"today", "children", "ducks", "roster", "review", "growth", "search"}
-    expected_legacy_routes = {"children", "ducks", "roster", "growth", "search"}
-    expected_endpoints = {
-        "/api/children",
-        "/api/children/",
-        "/api/ducks",
-        "/api/ducks/",
-        "/api/roster/auto",
-        "/api/roster",
-        "/api/conversations",
-        "/api/conversations/",
-        "/api/analysis/growth?child_id=",
-    }
 
     assert "import { createTeacherRouter } from './router.mjs';" in app
-    assert "import { createLegacyTeacherRoutes } from './legacy-routes.mjs';" in app
+    assert "import { createManagementRoutes } from './views/management.mjs';" in app
+    assert "import { createReportRoutes } from './views/reports.mjs';" in app
     assert "import { createTodayRoute } from './views/today.mjs';" in app
     assert "import { createReviewRoute } from './views/review.mjs';" in app
     assert "import { createDirtyGuard } from './dirty-guard.mjs';" in app
@@ -96,23 +87,17 @@ def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_leg
     assert "function routeFromHash(" not in app
     assert "bootstrapVersionGate" not in app
     assert "/api/" not in app
-    assert "DuckAPI" not in router + legacy
-    assert "DuckAuth" not in router + legacy
-    assert set(re.findall(r"['\"](/api/[^'\"]*)['\"]", legacy)) == expected_endpoints
+    assert "DuckAPI" not in router + management + reports
+    assert "DuckAuth" not in router + management + reports
     assert set(re.findall(r"route: '([a-z]+)'", app)) == expected_routes
-    for route in expected_legacy_routes:
-        assert f"{route}," in legacy or f"{route} }}" in legacy
-    assert "overview" not in legacy
-    assert "function review(" not in legacy
-    assert "/logs" not in legacy
-    assert "/assessments/" not in legacy
-    assert "/api/analysis/overview" not in app + legacy
-    assert "signal" in legacy
-    assert "isCurrent" in legacy
-    assert "加载失败，请重新进入此页面。" in legacy
-    assert "error.message" not in app + router + legacy
-    assert "innerHTML = error" not in app + router + legacy
-    assert "textContent = error" not in app + router + legacy
+    assert not (ROOT / "app/frontend/teacher/legacy-routes.mjs").exists()
+    assert "/api/analysis/overview" not in app + reports
+    assert "method: 'DELETE'" not in management + reports
+    assert "alert(" not in management + reports
+    assert "error.message" not in app + router + management + reports
+    assert "innerHTML" not in management + reports
+    assert "globalThis" not in management + reports
+    assert "createRequestId: () => window.crypto.randomUUID()" in app
 
 
 def test_auth_adapter_loads_immediately_after_api_client_on_both_pages():
@@ -141,7 +126,7 @@ def test_child_empty_roster_copy_is_owned_by_the_semantic_view():
 
 
 def test_pages_do_not_call_fetch_directly():
-    for filename in ("index.html", "teacher.html", "teacher/app.js", "teacher/router.mjs", "teacher/legacy-routes.mjs"):
+    for filename in ("index.html", "teacher.html", "teacher/app.js", "teacher/router.mjs", "teacher/views/management.mjs", "teacher/views/reports.mjs"):
         html = (ROOT / "app" / "frontend" / filename).read_text(encoding="utf-8")
         assert "fetch(" not in html
 

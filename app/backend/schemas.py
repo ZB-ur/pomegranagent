@@ -163,6 +163,13 @@ class RosterTodayChild(StrictResponseModel):
     avatar: str | None = None
 
 
+class RosterListItem(StrictResponseModel):
+    id: PositiveInt
+    cycle: str = Field(min_length=1, max_length=64)
+    date: date
+    child_id: PositiveInt
+
+
 class ConversationMessage(StrictResponseModel):
     id: PositiveInt
     role: Literal["child", "diary"]
@@ -231,6 +238,25 @@ class ConversationQueueItem(StrictResponseModel):
     analysis_status: AnalysisJobStatus
     review_status: ReviewStatus
     revision: int = Field(ge=0)
+
+
+class ConversationHistoryItem(StrictResponseModel):
+    id: PositiveInt
+    child: ChildIdentity
+    date: date
+    completed_at: datetime
+    status: Literal["ended"]
+    end_reason: ConversationEndReason
+    message_count: int = Field(ge=1)
+    round: int = Field(ge=0)
+    analysis_status: AnalysisJobStatus
+    review_status: ReviewStatus
+    revision: int = Field(ge=0)
+
+
+class ConversationHistoryPage(StrictResponseModel):
+    items: list[ConversationHistoryItem]
+    next_before_id: PositiveInt | None = None
 
 
 class AnalysisError(StrictResponseModel):
