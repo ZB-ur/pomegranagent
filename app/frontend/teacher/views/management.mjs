@@ -313,6 +313,7 @@ export function createManagementRoutes(dependencies) {
       const key = `${kind}-${item.id}`;
       if (mutation) return;
       mutation = key;
+      let restoreFocus = false;
       if (action) action.disabled = true;
       try {
         const response = await scope.run(`/api/${isChild ? 'children' : 'ducks'}/${item.id}/${active ? 'reactivate' : 'deactivate'}`, { method: 'POST' });
@@ -323,13 +324,20 @@ export function createManagementRoutes(dependencies) {
       } catch (error) {
         if (scope.alive() && !active && isChild && errorCode(error) === 'ACTIVE_CONVERSATION_EXISTS') {
           await reload();
-          if (scope.alive()) showFailure('当前会话状态已变化，已刷新幼儿列表。');
+          if (scope.alive()) {
+            showFailure('当前会话状态已变化，已刷新幼儿列表。');
+            restoreFocus = true;
+          }
         } else if (scope.alive()) {
           showFailure(!active && isChild ? '暂时无法停用该幼儿，请刷新后重试。' : fixedFailure);
+          restoreFocus = true;
         }
       } finally {
         mutation = null;
-        if (action && scope.alive()) action.disabled = false;
+        if (action && scope.alive()) {
+          action.disabled = false;
+          if (restoreFocus && action.isConnected) action.focus();
+        }
       }
     };
 
@@ -536,6 +544,8 @@ export function createManagementRoutes(dependencies) {
 
     const submitMutation = async (kind, snapshot) => {
       if (busy) return;
+      const action = kind === 'daily' ? manualButton : autoButton;
+      let restoreFocus = false;
       setBusy(true);
       retained = snapshot;
       try {
@@ -552,8 +562,17 @@ export function createManagementRoutes(dependencies) {
         status.textContent = '排班已保存';
         await reload();
       } catch (_error) {
-        if (scope.alive()) { status.setAttribute('role', 'alert'); status.textContent = '排班保存失败，请使用相同内容重试。'; }
-      } finally { if (scope.alive()) setBusy(false); }
+        if (scope.alive()) {
+          status.setAttribute('role', 'alert');
+          status.textContent = '排班保存失败，请使用相同内容重试。';
+          restoreFocus = true;
+        }
+      } finally {
+        if (scope.alive()) {
+          setBusy(false);
+          if (restoreFocus && action.isConnected) action.focus();
+        }
+      }
     };
     manual.addEventListener('submit', event => {
       event.preventDefault();

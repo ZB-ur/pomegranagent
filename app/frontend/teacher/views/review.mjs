@@ -639,7 +639,7 @@ function releaseEditor(state) {
   try { state.dirtyGuard.release(); } catch (_error) {}
 }
 
-function editorView(state, detail, successCopy = null) {
+function editorView(state, detail) {
   const form = createElement(state.document, 'form', { class: 'review-editor', 'data-review-form': '' });
   const formState = {
     form,
@@ -732,11 +732,10 @@ function editorView(state, detail, successCopy = null) {
     state.dirtyGuard.activate(snapshot);
     state.dirtyGuard.markClean(snapshot);
   } catch (_error) {}
-  if (successCopy) formState.status.replaceChildren(successCopy);
   return form;
 }
 
-function renderDetailLoaded(state, detail, successCopy = null) {
+function renderDetailLoaded(state, detail, successCopy = null, retainedStatus = null) {
   releaseEditor(state);
   state.detailPanel.removeAttribute('aria-busy');
   const name = displayName(detail.child);
@@ -753,8 +752,15 @@ function renderDetailLoaded(state, detail, successCopy = null) {
   const workspace = createElement(state.document, 'div', { class: 'review-workspace' },
     transcriptView(state, detail.messages), detail.review === null
       ? unavailableResultsView(state, detail.analysis.status)
-      : editorView(state, detail, successCopy));
+      : editorView(state, detail));
+  const replacementStatus = state.formState?.status || null;
+  if (retainedStatus && replacementStatus) state.detailPanel.append(retainedStatus);
   state.detailBody.replaceChildren(header, workspace);
+  if (retainedStatus && replacementStatus) {
+    replacementStatus.replaceWith(retainedStatus);
+    state.formState.status = retainedStatus;
+  }
+  if (successCopy && state.formState) state.formState.status.replaceChildren(successCopy);
 }
 
 export function createReviewRoute(dependencies) {
@@ -954,7 +960,14 @@ export function createReviewRoute(dependencies) {
           mutationRecord = null;
           saveInFlight = false;
           state.loadedDetail = nextDetail;
-          renderDetailLoaded(state, nextDetail, action === 'confirm' ? '审阅已确认' : '全部修改已保存');
+          renderDetailLoaded(
+            state,
+            nextDetail,
+            action === 'confirm' ? '审阅已确认' : '全部修改已保存',
+            formState.status,
+          );
+          const actionIndex = action === 'confirm' ? 1 : 0;
+          state.formState?.actions[actionIndex]?.focus?.();
           void loadQueue();
           return undefined;
         })
@@ -966,6 +979,10 @@ export function createReviewRoute(dependencies) {
           setFormDisabled(formState, false);
           const failure = classifySaveError(error, formState);
           showFormErrors(formState, failure.fields, failure.copy);
+          if (!failure.fields.length) {
+            const actionIndex = action === 'confirm' ? 1 : 0;
+            formState.actions[actionIndex]?.focus?.();
+          }
           return undefined;
         });
     };

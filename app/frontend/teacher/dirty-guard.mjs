@@ -64,6 +64,7 @@ export function createDirtyGuard(dependencies) {
   let dialog = null;
   let pendingConfirmation = null;
   let resolveConfirmation = null;
+  let confirmationTrigger = null;
 
   const isDirty = () => active && cleanSnapshot !== currentSnapshot;
 
@@ -78,12 +79,15 @@ export function createDirtyGuard(dependencies) {
   const finishConfirmation = (allowed, discard) => {
     const resolve = resolveConfirmation;
     const pending = pendingConfirmation;
+    const trigger = confirmationTrigger;
     resolveConfirmation = null;
     pendingConfirmation = null;
+    confirmationTrigger = null;
     disposeDialog();
     if (discard) {
       cleanSnapshot = currentSnapshot;
     }
+    if (!allowed && trigger?.isConnected) safeCall(() => trigger.focus());
     if (pending && resolve) resolve(allowed);
   };
 
@@ -127,9 +131,12 @@ export function createDirtyGuard(dependencies) {
       resolveConfirmation = resolve;
     });
     try {
+      confirmationTrigger = documentApi.activeElement;
       const nextDialog = documentApi.createElement('dialog');
       const heading = documentApi.createElement('h2');
+      heading.setAttribute('id', 'teacher-dirty-dialog-heading');
       heading.append('有未保存的修改');
+      nextDialog.setAttribute('aria-labelledby', 'teacher-dirty-dialog-heading');
       const continueButton = documentApi.createElement('button');
       continueButton.setAttribute('type', 'button');
       continueButton.append('继续编辑');
@@ -146,6 +153,7 @@ export function createDirtyGuard(dependencies) {
       documentApi.body.append(nextDialog);
       dialog = nextDialog;
       if (typeof nextDialog.showModal === 'function') nextDialog.showModal();
+      safeCall(() => continueButton.focus());
     } catch (_error) {
       finishConfirmation(false, false);
     }
