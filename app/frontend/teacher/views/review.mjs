@@ -13,7 +13,9 @@ const REVIEW_KEYS = ['feeding_logs', 'emotion', 'insight', 'scores', 'overall'];
 const FEEDING_LOG_KEYS = ['id', 'category', 'content', 'duck_id'];
 const EMOTION_KEYS = ['emotion', 'intensity', 'note'];
 const SCORE_KEYS = ['dimension_id', 'dimension_name', 'score', 'reason'];
-const DEPENDENCY_KEYS = ['request', 'document', 'createAbortController'];
+const DEPENDENCY_KEYS = ['request', 'document', 'createAbortController', 'dirtyGuard'];
+const DIRTY_GUARD_METHODS = ['activate', 'update', 'markClean', 'isDirty', 'confirmLeave', 'release'];
+const ACKNOWLEDGEMENT_KEYS = ['saved', 'conversation_id', 'review_status', 'revision', 'saved_at', 'review'];
 const END_REASONS = new Set(['max_rounds', 'complete', 'manual']);
 const ANALYSIS_STATUSES = new Set(['pending', 'processing', 'succeeded', 'failed']);
 const REVIEW_STATUSES = new Set(['pending', 'draft', 'confirmed', 'unavailable']);
@@ -148,17 +150,56 @@ function validateReviewDocument(value) {
 
 function validateDependencies(dependencies) {
   const record = readOwnDataRecord(dependencies, DEPENDENCY_KEYS);
+  let guard;
   try {
     if (typeof record.request !== 'function' || !record.document
         || typeof record.document.createElement !== 'function'
-        || typeof record.createAbortController !== 'function') {
+        || typeof record.createAbortController !== 'function' || !record.dirtyGuard) {
       throw invalidReviewContract();
     }
+    guard = readOwnDataRecord(record.dirtyGuard, DIRTY_GUARD_METHODS);
+    if (!DIRTY_GUARD_METHODS.every(name => typeof guard[name] === 'function')) throw invalidReviewContract();
     validateAbortController(record.createAbortController());
   } catch (_error) {
     throw invalidReviewContract();
   }
-  return record;
+  return { ...record, dirtyGuard: guard };
+}
+
+export function validateReviewAcknowledgement(selectedId, submittedRevision, action, value) {
+  try {
+    if (!isPositiveInteger(selectedId) || !isNonnegativeInteger(submittedRevision)
+        || !['save_draft', 'confirm'].includes(action)) throw invalidReviewContract();
+    const acknowledgement = readOwnDataRecord(value, ACKNOWLEDGEMENT_KEYS);
+    const expectedStatus = action === 'confirm' ? 'confirmed' : 'draft';
+    if (acknowledgement.saved !== true || acknowledgement.conversation_id !== selectedId
+        || acknowledgement.review_status !== expectedStatus
+        || !isPositiveInteger(acknowledgement.revision) || acknowledgement.revision <= submittedRevision
+        || !isParseableDate(acknowledgement.saved_at)) {
+      throw invalidReviewContract();
+    }
+    const review = validateReviewDocument(acknowledgement.review);
+    return { ...acknowledgement, review };
+  } catch (_error) {
+    throw invalidReviewContract();
+  }
+}
+
+export function applyReviewAcknowledgement(currentDetail, acknowledgement) {
+  try {
+    const rawDetail = readOwnDataRecord(currentDetail, DETAIL_KEYS);
+    const detail = validateReviewDetail(rawDetail.id, currentDetail);
+    const action = acknowledgement && acknowledgement.review_status === 'confirmed' ? 'confirm' : 'save_draft';
+    const saved = validateReviewAcknowledgement(detail.id, detail.revision, action, acknowledgement);
+    return {
+      ...detail,
+      revision: saved.revision,
+      review_status: saved.review_status,
+      review: saved.review,
+    };
+  } catch (_error) {
+    throw invalidReviewContract();
+  }
 }
 
 function validateAbortController(controller) {
@@ -308,17 +349,19 @@ function detailReloadButton(state) {
     class: 'btn gray review-detail-reload', type: 'button',
   }, '重新加载此会话');
   button.addEventListener('click', () => {
-    if (state.selectedId !== null) void state.loadDetail(state.selectedId);
+    if (state.selectedId !== null) void state.reloadDetail?.();
   });
   return button;
 }
 
 function renderDetailInstruction(state) {
+  releaseEditor(state);
   state.detailPanel.removeAttribute('aria-busy');
   state.detailBody.replaceChildren(createElement(state.document, 'p', { class: 'muted' }, '请从左侧待审阅队列选择一条会话。'));
 }
 
 function renderDetailLoading(state, selectedId) {
+  releaseEditor(state);
   state.detailPanel.setAttribute('aria-busy', 'true');
   state.detailBody.replaceChildren(createElement(state.document, 'p', {
     class: 'review-detail-status muted', role: 'status', 'aria-live': 'polite',
@@ -326,6 +369,7 @@ function renderDetailLoading(state, selectedId) {
 }
 
 function renderDetailError(state, selectedId) {
+  releaseEditor(state);
   state.detailPanel.removeAttribute('aria-busy');
   state.detailBody.replaceChildren(
     createElement(state.document, 'p', { class: 'review-detail-error', role: 'alert' }, '加载失败，请重试。'),
@@ -389,7 +433,311 @@ function scoreView(state, review) {
   return scores;
 }
 
-function renderDetailLoaded(state, detail) {
+function makeControl(document, tag, attrs, value) {
+  const control = createElement(document, tag, attrs);
+  if (value !== undefined) control.value = String(value);
+  return control;
+}
+
+function makeField(state, labelText, control, errorKey) {
+  const field = createElement(state.document, 'div', { class: 'review-form-field' });
+  const controlId = `review-${errorKey.replace(/[^a-zA-Z0-9_-]/g, '-')}`;
+  const errorId = `${controlId}-error`;
+  control.setAttribute('id', controlId);
+  control.setAttribute('aria-describedby', errorId);
+  const label = createElement(state.document, 'label', { for: controlId }, labelText);
+  const error = createElement(state.document, 'p', {
+    id: errorId, class: 'review-field-error', role: 'alert', 'data-review-error': errorKey,
+  });
+  field.append(label, control, error);
+  state.formState.errorNodes.set(errorKey, { control, error });
+  return field;
+}
+
+function selectedScore(controls) {
+  const selected = controls.radios.find(radio => radio.checked);
+  return selected ? Number(selected.value) : null;
+}
+
+function editableReviewDocument(formState) {
+  return {
+    feeding_logs: formState.feeding.map(row => ({
+      id: row.id,
+      category: row.category.value,
+      content: String(row.content.value || '').trim(),
+      duck_id: row.duck_id,
+    })),
+    emotion: {
+      emotion: String(formState.emotion.emotion.value || '').trim(),
+      intensity: Number(formState.emotion.intensity.value),
+      note: String(formState.emotion.note.value || '').trim() || null,
+    },
+    insight: String(formState.insight.value || '').trim(),
+    scores: formState.scores.map(row => ({
+      dimension_id: row.dimension_id,
+      score: selectedScore(row),
+      reason: String(row.reason.value || '').trim(),
+    })),
+  };
+}
+
+function canonicalEditableSnapshot(formState) {
+  return JSON.stringify(editableReviewDocument(formState));
+}
+
+function clearFormErrors(formState) {
+  formState.summary.replaceChildren();
+  for (const { control, error } of formState.errorNodes.values()) {
+    control.removeAttribute('aria-invalid');
+    error.replaceChildren();
+  }
+}
+
+function showFormErrors(formState, errors, summaryCopy = '请检查表单内容。') {
+  clearFormErrors(formState);
+  formState.summary.replaceChildren(summaryCopy);
+  let first = null;
+  for (const { key, copy } of errors) {
+    const target = formState.errorNodes.get(key);
+    if (!target) continue;
+    target.control.setAttribute('aria-invalid', 'true');
+    target.error.replaceChildren(copy);
+    if (!first) first = target.control;
+  }
+  first?.focus?.();
+}
+
+function validateEditableReview(formState, action) {
+  const document = editableReviewDocument(formState);
+  const errors = [];
+  for (const [index, row] of document.feeding_logs.entries()) {
+    if (!FEEDING_CATEGORIES.has(row.category)) errors.push({ key: `feeding.${index}.category`, copy: '请选择有效分类。' });
+    if (!row.content) errors.push({ key: `feeding.${index}.content`, copy: '请填写饲养记录。' });
+  }
+  if (!document.emotion.emotion) errors.push({ key: 'emotion.emotion', copy: '请填写情绪。' });
+  if (!Number.isInteger(document.emotion.intensity) || document.emotion.intensity < 1 || document.emotion.intensity > 5) {
+    errors.push({ key: 'emotion.intensity', copy: '请输入 1 至 5 的整数。' });
+  }
+  if (!document.insight) errors.push({ key: 'insight', copy: '请填写教育洞察。' });
+  for (const [index, row] of document.scores.entries()) {
+    if (!Number.isInteger(row.score) || row.score < 1 || row.score > 5) {
+      errors.push({ key: `scores.${index}.score`, copy: '请选择 1 至 5 分。' });
+    }
+    if (action === 'confirm' && !row.reason) {
+      errors.push({ key: `scores.${index}.reason`, copy: '请填写评分理由。' });
+    }
+  }
+  return { document, errors };
+}
+
+function setFormDisabled(formState, disabled) {
+  for (const row of formState.feeding) {
+    row.category.disabled = disabled;
+    row.content.disabled = disabled;
+  }
+  formState.emotion.emotion.disabled = disabled;
+  formState.emotion.intensity.disabled = disabled;
+  formState.emotion.note.disabled = disabled;
+  formState.insight.disabled = disabled;
+  for (const row of formState.scores) {
+    row.reason.disabled = disabled;
+    for (const radio of row.radios) radio.disabled = disabled;
+  }
+  for (const button of formState.actions) button.disabled = disabled;
+}
+
+function safeErrorProjection(error) {
+  try {
+    if (error === null || typeof error !== 'object' || Array.isArray(error)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(error);
+    for (const name of ['status', 'code']) {
+      const descriptor = descriptors[name];
+      if (!descriptor || !Object.prototype.hasOwnProperty.call(descriptor, 'value')) return null;
+    }
+    if (!Number.isInteger(descriptors.status.value) || typeof descriptors.code.value !== 'string') return null;
+    const fieldDescriptor = descriptors.fieldErrors;
+    if (!fieldDescriptor || !Object.prototype.hasOwnProperty.call(fieldDescriptor, 'value')) return null;
+    return {
+      status: descriptors.status.value,
+      code: descriptors.code.value,
+      fieldErrors: fieldDescriptor.value,
+    };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function projectFieldErrors(formState, value) {
+  try {
+    if (value === null || typeof value !== 'object' || Array.isArray(value)) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    const fields = [];
+    let summary = false;
+    for (const key of Reflect.ownKeys(descriptors)) {
+      if (typeof key !== 'string') return null;
+      const descriptor = descriptors[key];
+      if (!Object.prototype.hasOwnProperty.call(descriptor, 'value') || !Array.isArray(descriptor.value)) return null;
+      let path = key;
+      if (path.startsWith('body.')) path = path.slice('body.'.length);
+      if (path.startsWith('body.')) return null;
+      if (path === 'feeding_logs' || path === 'emotion' || path === 'scores') {
+        summary = true;
+        continue;
+      }
+      const feeding = /^feeding_logs\.(0|[1-9]\d*)\.(category|content)$/.exec(path);
+      if (feeding) {
+        const index = Number(feeding[1]);
+        if (index >= formState.feeding.length) return null;
+        fields.push({ key: `feeding.${index}.${feeding[2]}`, copy: '请检查此项。' });
+        continue;
+      }
+      if (['emotion.emotion', 'emotion.intensity', 'emotion.note'].includes(path)) {
+        fields.push({ key: path, copy: '请检查此项。' });
+        continue;
+      }
+      if (path === 'insight') {
+        fields.push({ key: 'insight', copy: '请检查此项。' });
+        continue;
+      }
+      const score = /^scores\.(0|[1-9]\d*)\.(score|reason)$/.exec(path);
+      if (score) {
+        const index = Number(score[1]);
+        if (index >= formState.scores.length) return null;
+        fields.push({ key: `scores.${index}.${score[2]}`, copy: '请检查此项。' });
+        continue;
+      }
+      return null;
+    }
+    return { fields, summary };
+  } catch (_error) {
+    return null;
+  }
+}
+
+function classifySaveError(error, formState) {
+  const projection = safeErrorProjection(error);
+  if (!projection) return { copy: '保存失败，请稍后重试。', fields: [] };
+  if (projection.status === 409 && projection.code === 'REVIEW_REVISION_CONFLICT') {
+    return { copy: '该审阅已在别处更新，请复制当前修改后重新加载。', fields: [] };
+  }
+  if (projection.status === 422 && ['REVIEW_VALIDATION_FAILED', 'VALIDATION_ERROR'].includes(projection.code)) {
+    const mapped = projectFieldErrors(formState, projection.fieldErrors);
+    if (!mapped) return { copy: '部分内容未通过校验，请检查后重试。', fields: [] };
+    return { copy: '部分内容未通过校验，请检查后重试。', fields: mapped.fields };
+  }
+  if (projection.status === 401 && projection.code === 'TEACHER_AUTH_REQUIRED') {
+    return { copy: '教师会话已失效，请先重新解锁。', fields: [] };
+  }
+  if (projection.status === 404 && projection.code === 'CONVERSATION_NOT_FOUND') {
+    return { copy: '该会话已不可审阅，请重新加载队列。', fields: [] };
+  }
+  return { copy: '保存失败，请稍后重试。', fields: [] };
+}
+
+function releaseEditor(state) {
+  state.formState = null;
+  try { state.dirtyGuard.release(); } catch (_error) {}
+}
+
+function editorView(state, detail, successCopy = null) {
+  const form = createElement(state.document, 'form', { class: 'review-editor', 'data-review-form': '' });
+  const formState = {
+    form,
+    detail,
+    feeding: [],
+    emotion: {},
+    insight: null,
+    scores: [],
+    actions: [],
+    errorNodes: new Map(),
+    summary: createElement(state.document, 'p', { class: 'review-form-summary', role: 'alert' }),
+    status: createElement(state.document, 'p', { class: 'review-save-status', role: 'status', 'aria-live': 'polite' }),
+  };
+  state.formState = formState;
+  form.append(createElement(state.document, 'h2', null, '结构化结果'), formState.summary, formState.status);
+  const feedingSection = createElement(state.document, 'section', { class: 'review-editor-section' },
+    createElement(state.document, 'h3', null, '饲养记录'));
+  for (const [index, row] of detail.review.feeding_logs.entries()) {
+    const category = makeControl(state.document, 'select', null, row.category);
+    for (const value of ['喂食', '清洁', '观察', '其它']) {
+      const option = createElement(state.document, 'option', { value }, value);
+      option.selected = value === row.category;
+      category.append(option);
+    }
+    const content = makeControl(state.document, 'textarea', null, row.content);
+    const item = { id: row.id, duck_id: row.duck_id, category, content };
+    formState.feeding.push(item);
+    const group = createElement(state.document, 'div', { class: 'review-feeding-editor' });
+    group.append(
+      makeField(state, `饲养记录 ${index + 1} 分类`, category, `feeding.${index}.category`),
+      makeField(state, `饲养记录 ${index + 1} 内容`, content, `feeding.${index}.content`),
+    );
+    feedingSection.append(group);
+  }
+  form.append(feedingSection);
+  const emotionSection = createElement(state.document, 'section', { class: 'review-editor-section' },
+    createElement(state.document, 'h3', null, '情绪与洞察'));
+  formState.emotion.emotion = makeControl(state.document, 'input', { type: 'text' }, detail.review.emotion.emotion);
+  formState.emotion.intensity = makeControl(state.document, 'input', { type: 'number', min: '1', max: '5' }, detail.review.emotion.intensity);
+  formState.emotion.note = makeControl(state.document, 'textarea', null, detail.review.emotion.note || '');
+  formState.insight = makeControl(state.document, 'textarea', null, detail.review.insight);
+  emotionSection.append(
+    makeField(state, '情绪', formState.emotion.emotion, 'emotion.emotion'),
+    makeField(state, '情绪强度', formState.emotion.intensity, 'emotion.intensity'),
+    makeField(state, '情绪备注', formState.emotion.note, 'emotion.note'),
+    makeField(state, '教育洞察', formState.insight, 'insight'),
+  );
+  form.append(emotionSection, createElement(state.document, 'h2', null, '能力评估'));
+  for (const [index, score] of detail.review.scores.entries()) {
+    const fieldset = createElement(state.document, 'fieldset', { class: 'review-score-editor', 'data-dimension-id': String(score.dimension_id) });
+    fieldset.append(createElement(state.document, 'legend', null, score.dimension_name));
+    const row = { dimension_id: score.dimension_id, radios: [], reason: null };
+    const radios = createElement(state.document, 'div', { class: 'review-score-radios' });
+    for (let value = 1; value <= 5; value += 1) {
+      const radioId = `review-score-${score.dimension_id}-${value}`;
+      const radio = makeControl(state.document, 'input', {
+        id: radioId, type: 'radio', name: `review-score-${score.dimension_id}`, value: String(value),
+      }, value);
+      radio.checked = score.score === value;
+      const label = createElement(state.document, 'label', { for: radioId }, `${score.dimension_name} ${value} 分`);
+      radios.append(radio, label);
+      row.radios.push(radio);
+    }
+    row.reason = makeControl(state.document, 'textarea', null, score.reason);
+    formState.scores.push(row);
+    fieldset.append(radios, makeField(state, `${score.dimension_name}评分理由`, row.reason, `scores.${index}.reason`));
+    const scoreErrorId = `review-scores-${index}-score-error`;
+    const scoreError = createElement(state.document, 'p', { id: scoreErrorId, class: 'review-field-error', role: 'alert', 'data-review-error': `scores.${index}.score` });
+    for (const radio of row.radios) radio.setAttribute('aria-describedby', scoreErrorId);
+    formState.errorNodes.set(`scores.${index}.score`, { control: row.radios[0], error: scoreError });
+    fieldset.append(scoreError);
+    form.append(fieldset);
+  }
+  const actions = createElement(state.document, 'div', { class: 'review-actions' });
+  const draft = createElement(state.document, 'button', { class: 'btn review-save-draft', type: 'button' }, '保存草稿');
+  const confirm = createElement(state.document, 'button', { class: 'btn green review-save-confirm', type: 'button' }, '保存并确认');
+  formState.actions.push(draft, confirm);
+  draft.addEventListener('click', () => { void state.submitReview?.(formState, 'save_draft'); });
+  confirm.addEventListener('click', () => { void state.submitReview?.(formState, 'confirm'); });
+  actions.append(draft, confirm);
+  form.append(actions);
+  const updateDirty = () => {
+    if (state.formState !== formState) return;
+    try { state.dirtyGuard.update(canonicalEditableSnapshot(formState)); } catch (_error) {}
+  };
+  form.addEventListener('input', updateDirty);
+  form.addEventListener('change', updateDirty);
+  const snapshot = canonicalEditableSnapshot(formState);
+  try {
+    state.dirtyGuard.activate(snapshot);
+    state.dirtyGuard.markClean(snapshot);
+  } catch (_error) {}
+  if (successCopy) formState.status.replaceChildren(successCopy);
+  return form;
+}
+
+function renderDetailLoaded(state, detail, successCopy = null) {
+  releaseEditor(state);
   state.detailPanel.removeAttribute('aria-busy');
   const name = displayName(detail.child);
   const header = createElement(state.document, 'header', { class: 'review-detail-header' },
@@ -405,8 +753,8 @@ function renderDetailLoaded(state, detail) {
   const workspace = createElement(state.document, 'div', { class: 'review-workspace' },
     transcriptView(state, detail.messages), detail.review === null
       ? unavailableResultsView(state, detail.analysis.status)
-      : resultsView(state, detail.review));
-  state.detailBody.replaceChildren(header, workspace, ...(detail.review === null ? [] : [scoreView(state, detail.review)]));
+      : editorView(state, detail, successCopy));
+  state.detailBody.replaceChildren(header, workspace);
 }
 
 export function createReviewRoute(dependencies) {
@@ -438,10 +786,14 @@ export function createReviewRoute(dependencies) {
       detailPanel,
       detailBody,
       selectedId,
+      dirtyGuard: validated.dirtyGuard,
       loadQueue: null,
       loadDetail: null,
+      reloadDetail: null,
+      submitReview: null,
       queueRows: null,
       loadedDetail: null,
+      formState: null,
     };
     if (selectedId === null) renderDetailInstruction(state);
 
@@ -450,6 +802,9 @@ export function createReviewRoute(dependencies) {
     let detailSequence = 0;
     let queueRecord = null;
     let detailRecord = null;
+    let mutationSequence = 0;
+    let mutationRecord = null;
+    let saveInFlight = false;
     const current = () => !cleaned && !signal.aborted && isCurrent();
     const detach = record => {
       if (!record) return;
@@ -465,10 +820,36 @@ export function createReviewRoute(dependencies) {
       else signal.addEventListener('abort', onOuterAbort);
       return { controller, onOuterAbort };
     };
+    const detachMutation = (record, abort = true) => {
+      if (!record) return;
+      try { signal.removeEventListener('abort', record.onOuterAbort); } catch (_error) {}
+      if (abort) {
+        try { record.controller.abort(); } catch (_error) {}
+      }
+    };
+    const freshMutationRecord = () => {
+      const controller = validateAbortController(validated.createAbortController());
+      const onOuterAbort = () => {
+        try { controller.abort(); } catch (_error) {}
+      };
+      if (signal.aborted) onOuterAbort();
+      else signal.addEventListener('abort', onOuterAbort);
+      return { controller, onOuterAbort };
+    };
+    const invalidateMutation = () => {
+      mutationSequence += 1;
+      detachMutation(mutationRecord);
+      mutationRecord = null;
+      saveInFlight = false;
+    };
     const ownsQueue = (record, sequence) => current() && queueSequence === sequence && queueRecord === record
       && !record.controller.signal.aborted;
     const ownsDetail = (record, sequence, conversationId) => current() && detailSequence === sequence
       && detailRecord === record && selectedId === conversationId && !record.controller.signal.aborted;
+    const ownsMutation = (record, sequence, formState, conversationId, revision) => current()
+      && mutationSequence === sequence && mutationRecord === record && state.formState === formState
+      && selectedId === conversationId && state.loadedDetail?.revision === revision
+      && !record.controller.signal.aborted;
     const hasChildMismatch = (rows, loadedDetail) => {
       if (!Array.isArray(rows) || !loadedDetail || selectedId === null) return false;
       const queueRow = rows.find(row => row.id === selectedId);
@@ -478,6 +859,7 @@ export function createReviewRoute(dependencies) {
       detailSequence += 1;
       detach(detailRecord);
       detailRecord = null;
+      invalidateMutation();
       state.loadedDetail = null;
       renderDetailError(state, selectedId);
     };
@@ -519,9 +901,79 @@ export function createReviewRoute(dependencies) {
           return undefined;
         });
     };
+    const submitReview = (formState, action) => {
+      if (!current() || saveInFlight || state.formState !== formState || !state.loadedDetail
+          || selectedId === null || state.loadedDetail.id !== selectedId) return Promise.resolve();
+      clearFormErrors(formState);
+      formState.status.replaceChildren();
+      const validatedForm = validateEditableReview(formState, action);
+      if (validatedForm.errors.length) {
+        showFormErrors(formState, validatedForm.errors);
+        try { state.dirtyGuard.update(canonicalEditableSnapshot(formState)); } catch (_error) {}
+        return Promise.resolve();
+      }
+      const detailId = state.loadedDetail.id;
+      const submittedRevision = state.loadedDetail.revision;
+      const payload = {
+        revision: submittedRevision,
+        feeding_logs: validatedForm.document.feeding_logs,
+        emotion: validatedForm.document.emotion,
+        insight: validatedForm.document.insight,
+        scores: validatedForm.document.scores,
+        action,
+      };
+      const sequence = ++mutationSequence;
+      let record;
+      try {
+        record = freshMutationRecord();
+        mutationRecord = record;
+      } catch (_error) {
+        showFormErrors(formState, [], '保存失败，请稍后重试。');
+        return Promise.resolve();
+      }
+      saveInFlight = true;
+      setFormDisabled(formState, true);
+      formState.status.replaceChildren('正在保存…');
+      return Promise.resolve()
+        .then(() => {
+          if (!ownsMutation(record, sequence, formState, detailId, submittedRevision)) return undefined;
+          return validated.request(`/api/conversations/${detailId}/review`, {
+            method: 'PUT',
+            body: payload,
+            signal: record.controller.signal,
+            timeoutMs: 15000,
+            sequenceKey: 'teacher-review-mutation',
+          });
+        })
+        .then(result => {
+          if (!ownsMutation(record, sequence, formState, detailId, submittedRevision)) return undefined;
+          const acknowledgement = validateReviewAcknowledgement(detailId, submittedRevision, action, result);
+          const nextDetail = applyReviewAcknowledgement(state.loadedDetail, acknowledgement);
+          if (!ownsMutation(record, sequence, formState, detailId, submittedRevision)) return undefined;
+          detachMutation(record, false);
+          mutationRecord = null;
+          saveInFlight = false;
+          state.loadedDetail = nextDetail;
+          renderDetailLoaded(state, nextDetail, action === 'confirm' ? '审阅已确认' : '全部修改已保存');
+          void loadQueue();
+          return undefined;
+        })
+        .catch(error => {
+          if (!ownsMutation(record, sequence, formState, detailId, submittedRevision)) return undefined;
+          saveInFlight = false;
+          mutationRecord = null;
+          detachMutation(record, false);
+          setFormDisabled(formState, false);
+          const failure = classifySaveError(error, formState);
+          showFormErrors(formState, failure.fields, failure.copy);
+          return undefined;
+        });
+    };
     const loadDetail = conversationId => {
       detach(detailRecord);
       detailRecord = null;
+      invalidateMutation();
+      state.loadedDetail = null;
       const sequence = ++detailSequence;
       if (!current() || selectedId !== conversationId) return Promise.resolve();
       renderDetailLoading(state, conversationId);
@@ -560,6 +1012,18 @@ export function createReviewRoute(dependencies) {
     };
     state.loadQueue = loadQueue;
     state.loadDetail = loadDetail;
+    state.submitReview = submitReview;
+    state.reloadDetail = async () => {
+      const conversationId = selectedId;
+      if (conversationId === null || !current()) return false;
+      let allowed = false;
+      try { allowed = await state.dirtyGuard.confirmLeave(); } catch (_error) {}
+      if (!allowed || !current() || selectedId !== conversationId) return false;
+      invalidateMutation();
+      releaseEditor(state);
+      await loadDetail(conversationId);
+      return true;
+    };
     void loadQueue();
     if (selectedId !== null) void loadDetail(selectedId);
     return {
@@ -568,11 +1032,13 @@ export function createReviewRoute(dependencies) {
         cleaned = true;
         queueSequence += 1;
         detailSequence += 1;
+        invalidateMutation();
         detach(queueRecord);
         detach(detailRecord);
         queueRecord = null;
         detailRecord = null;
         state.loadedDetail = null;
+        releaseEditor(state);
       },
     };
   };

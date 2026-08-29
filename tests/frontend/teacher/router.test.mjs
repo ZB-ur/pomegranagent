@@ -268,6 +268,73 @@ test('clicking the current route refreshes with a new epoch without writing hist
   assert.equal(window.location.hash, '#overview');
 });
 
+test('clicking the active route awaits leave confirmation and only the latest shared intent may refresh', async () => {
+  const window = new FakeWindow('#overview');
+  const root = new FakeRoot();
+  const nav = new FakeNav(names);
+  const leave = deferred();
+  const epochs = [];
+  const router = createTeacherRouter({
+    window,
+    root,
+    nav,
+    confirmLeave: () => leave.promise,
+    routes: makeRoutes({ overview: context => { epochs.push(context.epoch); context.root.heading = heading('overview'); } }),
+  });
+
+  await router.start();
+  nav.click('overview');
+  nav.click('overview');
+  await settle();
+  assert.deepEqual(epochs, [1]);
+  leave.resolve(true);
+  await settle();
+  assert.deepEqual(epochs, [1, 2]);
+  assert.equal(window.location.hash, '#overview');
+});
+
+test('continuing active-route editing and an intervening hashchange invalidate stale active refresh intents', async () => {
+  const window = new FakeWindow('#overview');
+  const root = new FakeRoot();
+  const nav = new FakeNav(names);
+  const confirmations = [];
+  const epochs = [];
+  const router = createTeacherRouter({
+    window,
+    root,
+    nav,
+    confirmLeave: () => {
+      const next = deferred();
+      confirmations.push(next);
+      return next.promise;
+    },
+    routes: makeRoutes({
+      overview: context => { epochs.push(`overview:${context.epoch}`); context.root.heading = heading('overview'); },
+      children: context => { epochs.push(`children:${context.epoch}`); context.root.heading = heading('children'); },
+    }),
+  });
+
+  await router.start();
+  nav.click('overview');
+  await settle();
+  assert.equal(confirmations.length, 1);
+  confirmations[0].resolve(false);
+  await settle();
+  assert.deepEqual(epochs, ['overview:1']);
+
+  nav.click('overview');
+  await settle();
+  window.changeHash('#children');
+  await settle();
+  assert.equal(confirmations.length, 3);
+  confirmations[1].resolve(true);
+  await settle();
+  assert.deepEqual(epochs, ['overview:1']);
+  confirmations[2].resolve(true);
+  await settle();
+  assert.deepEqual(epochs, ['overview:1', 'children:2']);
+});
+
 test('only the newest pending leave confirmation may start a route', async () => {
   const window = new FakeWindow('#overview');
   const root = new FakeRoot();

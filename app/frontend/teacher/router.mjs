@@ -250,8 +250,7 @@ export function createTeacherRouter({
     const route = button?.dataset?.v;
     if (!started || button?.disabled || typeof routes[route] !== 'function') return;
     if (active?.route === route) {
-      if (window.location.hash !== active.full && !replaceHash(active.full)) return;
-      void refresh().catch(report);
+      void refreshActiveAfterConfirmation().catch(report);
       return;
     }
     window.location.hash = `#${route}`;
@@ -264,6 +263,30 @@ export function createTeacherRouter({
       params: new URLSearchParams(active.params.toString()),
       epoch: active.epoch,
     };
+  };
+
+  const refreshActiveAfterConfirmation = async () => {
+    if (!started || !active) return false;
+    const captured = active;
+    const thisIntent = ++intent;
+    if (window.location.hash !== captured.full && !replaceHash(captured.full)) return false;
+    let allowed = false;
+    try {
+      allowed = await confirmLeave(current(), {
+        route: captured.route,
+        params: new URLSearchParams(captured.params.toString()),
+      });
+    } catch (error) {
+      report(error);
+    }
+    if (!started || thisIntent !== intent || active !== captured || captured.disposed) return false;
+    if (!allowed) return false;
+    return accept({
+      route: captured.route,
+      params: new URLSearchParams(captured.params.toString()),
+      full: captured.full,
+      canonical: false,
+    });
   };
 
   const start = () => {

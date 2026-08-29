@@ -2,9 +2,11 @@ import { createTeacherRouter } from './router.mjs';
 import { createLegacyTeacherRoutes } from './legacy-routes.mjs';
 import { createTodayRoute } from './views/today.mjs';
 import { createReviewRoute } from './views/review.mjs';
+import { createDirtyGuard } from './dirty-guard.mjs';
 
 const main = document.getElementById('main');
 const nav = document.getElementById('nav');
+const reviewDirtyGuard = createDirtyGuard({ window, document });
 const teacherRouteManifest = [
   { route: 'today' },
   { route: 'children' },
@@ -100,6 +102,7 @@ function startTeacherRouter() {
       request: (path, options) => window.DuckAPI.request(path, options),
       document,
       createAbortController: () => new AbortController(),
+      dirtyGuard: reviewDirtyGuard,
     });
     const routes = Object.fromEntries(teacherRouteManifest.map(({ route }) => [
       route,
@@ -111,6 +114,7 @@ function startTeacherRouter() {
       nav,
       routes,
       defaultRoute: 'today',
+      confirmLeave: () => reviewDirtyGuard.confirmLeave(),
       onError: () => {},
     });
   }

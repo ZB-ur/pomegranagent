@@ -176,9 +176,11 @@ def test_teacher_review_deep_link_renders_split_read_only_shell_before_parallel_
     assert detail_panel.get_by_role("heading", name="结构化结果", exact=True).count() == 1
     assert detail_panel.get_by_role("heading", name="能力评估", exact=True).count() == 1
     assert detail_panel.get_by_text("表达能力", exact=True).count() == 1
-    assert detail_panel.locator("input, textarea, select").count() == 0
-    assert detail_panel.get_by_role("button", name="保存修正", exact=True).count() == 0
-    assert detail_panel.get_by_role("button", name="确认评估", exact=True).count() == 0
+    assert detail_panel.locator("[data-review-form]").count() == 1
+    assert detail_panel.get_by_label("饲养记录 1 分类", exact=True).count() == 1
+    assert detail_panel.get_by_label("表达能力评分理由", exact=True).count() == 1
+    assert detail_panel.get_by_role("button", name="保存草稿", exact=True).count() == 1
+    assert detail_panel.get_by_role("button", name="保存并确认", exact=True).count() == 1
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
     queue_link.focus()
     assert queue_link.evaluate("node => document.activeElement === node")

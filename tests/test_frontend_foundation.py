@@ -81,6 +81,10 @@ def test_teacher_uses_the_fresh_router_and_moves_all_delivered_routes_to_the_leg
     assert "import { createLegacyTeacherRoutes } from './legacy-routes.mjs';" in app
     assert "import { createTodayRoute } from './views/today.mjs';" in app
     assert "import { createReviewRoute } from './views/review.mjs';" in app
+    assert "import { createDirtyGuard } from './dirty-guard.mjs';" in app
+    assert "const reviewDirtyGuard = createDirtyGuard({ window, document });" in app
+    assert "dirtyGuard: reviewDirtyGuard" in app
+    assert "confirmLeave: () => reviewDirtyGuard.confirmLeave()" in app
     assert "defaultRoute: 'today'" in app
     assert 'data-v="today"' in html
     assert '>今日任务</button>' in html

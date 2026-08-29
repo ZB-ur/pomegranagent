@@ -128,6 +128,17 @@ textarea { width: 100%; min-height: 46px; }
 .review-message-text, .review-row-metadata { overflow-wrap: anywhere; }
 .review-result-group, .review-score-row { border-top: 1px solid var(--border); padding-top: 10px; }
 .review-score-row { display: grid; gap: 4px; }
+.review-editor { display: grid; gap: 16px; min-width: 0; }
+.review-editor-section, .review-feeding-editor, .review-form-field, .review-score-editor { display: grid; gap: 8px; min-width: 0; }
+.review-editor-section, .review-score-editor { border-top: 1px solid var(--border); padding-top: 12px; }
+.review-feeding-editor { grid-template-columns: minmax(0, 1fr) minmax(0, 2fr); }
+.review-form-field > input, .review-form-field > select, .review-form-field > textarea { min-width: 0; width: 100%; }
+.review-field-error, .review-form-summary { color: var(--red); min-height: 22px; }
+.review-save-status { color: var(--green); min-height: 22px; }
+.review-score-radios { display: flex; flex-wrap: wrap; gap: 6px; }
+.review-score-radios label { align-items: center; display: inline-flex; min-height: 44px; min-width: 44px; }
+.review-actions { background: var(--panel); bottom: 0; display: flex; flex-wrap: wrap; gap: 10px; padding: 12px 0 16px; position: sticky; z-index: 1; }
+.review-actions .btn { min-height: 44px; min-width: 44px; }
 
 button, input, select, textarea { min-height: 44px; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
@@ -144,6 +155,7 @@ button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-
 
 @media (max-width: 899px) {
   .review-shell, .review-workspace { grid-template-columns: minmax(0, 1fr); }
+  .review-feeding-editor { grid-template-columns: minmax(0, 1fr); }
 }
 
 @media (prefers-reduced-motion: reduce) {
