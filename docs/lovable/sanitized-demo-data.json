@@ -1,0 +1,200 @@
+{
+  "metadata": {
+    "fictional": true,
+    "classification": "public-prototype-fixture",
+    "runtime_mode": "local-mock-only",
+    "anchor_date": "2026-08-23"
+  },
+  "children": [
+    {
+      "id": "demo-child-01",
+      "name": "小雨",
+      "nickname": "雨雨",
+      "avatar_label": "雨滴",
+      "active": true
+    },
+    {
+      "id": "demo-child-02",
+      "name": "乐乐",
+      "nickname": "乐宝",
+      "avatar_label": "笑脸",
+      "active": true
+    },
+    {
+      "id": "demo-child-03",
+      "name": "安安",
+      "nickname": "安宝",
+      "avatar_label": "星星",
+      "active": true
+    },
+    {
+      "id": "demo-child-04",
+      "name": "果果",
+      "nickname": "果宝",
+      "avatar_label": "树叶",
+      "active": true
+    }
+  ],
+  "ducks": [
+    {
+      "id": "demo-duck-01",
+      "name": "豆豆",
+      "summary": "喜欢菜叶，活动时很亲近孩子。",
+      "active": true
+    },
+    {
+      "id": "demo-duck-02",
+      "name": "团团",
+      "summary": "喜欢在水边散步，进食节奏稳定。",
+      "active": true
+    }
+  ],
+  "today_roster": [
+    {
+      "date": "2026-08-23",
+      "child_id": "demo-child-01",
+      "duck_id": "demo-duck-01",
+      "shift": "上午"
+    },
+    {
+      "date": "2026-08-23",
+      "child_id": "demo-child-02",
+      "duck_id": "demo-duck-02",
+      "shift": "下午"
+    }
+  ],
+  "review_queues": {
+    "pending": [
+      {
+        "conversation_id": "demo-conversation-01",
+        "child_id": "demo-child-01",
+        "completed_at": "2026-08-23T09:00:00Z",
+        "round": 3,
+        "analysis_status": "succeeded",
+        "review_status": "draft",
+        "revision": 2
+      }
+    ],
+    "processing": [
+      {
+        "conversation_id": "demo-conversation-02",
+        "child_id": "demo-child-02",
+        "completed_at": "2026-08-23T10:00:00Z",
+        "round": 3,
+        "analysis_status": "processing",
+        "review_status": "unavailable",
+        "revision": 0
+      }
+    ],
+    "failed": [
+      {
+        "conversation_id": "demo-conversation-03",
+        "child_id": "demo-child-03",
+        "completed_at": "2026-08-23T11:00:00Z",
+        "round": 2,
+        "analysis_status": "failed",
+        "review_status": "unavailable",
+        "revision": 0
+      }
+    ]
+  },
+  "selected_review": {
+    "conversation_id": "demo-conversation-01",
+    "child_id": "demo-child-01",
+    "duck_id": "demo-duck-01",
+    "messages": [
+      {
+        "id": "demo-message-01",
+        "speaker": "child",
+        "speaker_id": "demo-child-01",
+        "text": "我先给豆豆换了干净的水。",
+        "sent_at": "2026-08-23T08:51:00Z"
+      },
+      {
+        "id": "demo-message-02",
+        "speaker": "diary",
+        "speaker_id": "demo-duck-01",
+        "text": "你发现水盆有什么变化吗？",
+        "sent_at": "2026-08-23T08:52:00Z"
+      },
+      {
+        "id": "demo-message-03",
+        "speaker": "child",
+        "speaker_id": "demo-child-01",
+        "text": "旧水里有一点菜叶，所以我重新装满了。",
+        "sent_at": "2026-08-23T08:53:00Z"
+      },
+      {
+        "id": "demo-message-04",
+        "speaker": "diary",
+        "speaker_id": "demo-duck-01",
+        "text": "换好以后，豆豆做了什么？",
+        "sent_at": "2026-08-23T08:54:00Z"
+      },
+      {
+        "id": "demo-message-05",
+        "speaker": "child",
+        "speaker_id": "demo-child-01",
+        "text": "它马上喝水，还轻轻摇尾巴。",
+        "sent_at": "2026-08-23T08:55:00Z"
+      },
+      {
+        "id": "demo-message-06",
+        "speaker": "diary",
+        "speaker_id": "demo-duck-01",
+        "text": "你观察得很仔细，也照顾得很认真。",
+        "sent_at": "2026-08-23T08:56:00Z"
+      }
+    ],
+    "feeding_logs": [
+      {
+        "id": "demo-feeding-01",
+        "duck_id": "demo-duck-01",
+        "category": "清洁",
+        "content": "清理水盆里的菜叶并换上干净的水。"
+      },
+      {
+        "id": "demo-feeding-02",
+        "duck_id": "demo-duck-01",
+        "category": "观察",
+        "content": "记录豆豆喝水和摇尾巴的反应。"
+      }
+    ],
+    "emotion": {
+      "label": "开心",
+      "intensity": 4,
+      "note": "讲到豆豆喝水时语气轻快。"
+    },
+    "insight": "能够按顺序说明照料过程，并用具体动作描述小鸭的反应。",
+    "scores": [
+      {
+        "dimension": "语言表达能力",
+        "score": 4,
+        "reason": "能按先后顺序说明换水和观察到的变化。"
+      },
+      {
+        "dimension": "同理心",
+        "score": 5,
+        "reason": "主动关注饮水是否干净，并留意小鸭的感受。"
+      },
+      {
+        "dimension": "勤劳启蒙",
+        "score": 4,
+        "reason": "独立完成清理和换水，并愿意记录结果。"
+      }
+    ]
+  },
+  "ui_states": [
+    "loading",
+    "empty",
+    "failed",
+    "retrying",
+    "dirty",
+    "saving",
+    "saved",
+    "confirmed",
+    "revision_conflict",
+    "analysis_failed",
+    "reduced_motion"
+  ]
+}
