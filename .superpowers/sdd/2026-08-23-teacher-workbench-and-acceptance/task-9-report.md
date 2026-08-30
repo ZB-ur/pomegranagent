@@ -4,11 +4,13 @@ Date: 2026-08-29–30 (Asia/Shanghai)
 
 ## Verdict
 
-**Current status: NO-GO. Commit A-prime completed one exact 22-command Unit 8
-run with truthful Evidence/Safety bytes, but successive independent artifact-
-integrity reviews invalidated that verifier candidate. The current scoped
-review is Contract/Code/Safety NO-GO, Stage GO (`P0=0, P1=2, P2=1`);
-A-double-prime is not authorized and no replacement Unit 8 run has started.**
+**Current status: NO-GO. Commit A-double-prime completed one exact replacement
+22-command Unit 8 run with truthful Evidence and canonical-run Safety bytes,
+but its artifact remains invalid for release. The latest scoped repair review
+found one remaining P1 after the no-subprocess logical-reader repair:
+`packed-refs` used `splitlines()` and could normalize noncanonical control-byte
+separators into valid-looking records. Commit A-triple-prime remains denied and
+no further Unit 8 run has started.**
 
 The eighth pre-Commit-A Contract/Code/Safety/Stage review returned **GO,
 P0=0, P1=0, P2=0**. Commit A
@@ -1065,6 +1067,206 @@ resource drift or tripwire fired.
   creation of non-amend A-double-prime, and a complete new Unit 8 run against
   that exact clean HEAD. Neither existing Unit 8 artifact was modified.
 
+### Unit 8.5: A-double-prime canonical evidence and renderer ruling
+
+- Scoped review authorized non-amend Commit A-double-prime
+  `8d2b9c60532333b577b1cadf0ff8bea3f1b3c4ec`. Its sole canonical Unit 8 run
+  `20260830T054646949198Z-task9` executed all 22 commands once and strictly
+  serially. Every command exited zero with valid evidence, 1,481/1,481 parsed
+  tests passed, all fourteen gates passed, authenticated tripwires were clean,
+  and protected resources before/after were byte-identical. The runner
+  truthfully returned `TECHNICAL_NO_GO` only for
+  `LOVABLE_DELIVERABLE_MISSING`.
+- Independent review classified the exact artifact bytes Evidence GO and the
+  canonical run's resource Safety GO, but renderer Safety, Artifact integrity,
+  and Release NO-GO, exact `P0=0, P1=3, P2=2`; Commit B was not authorized.
+  Coherent caller-owned HEAD rewrites still passed, limitations were merely
+  required to be nonempty, and unsafe output aliases/identities could be
+  written. Duration had no independent authority, and JUnit-command stdout was
+  descriptor-bound without an explicit diagnostic-only boundary.
+- Contract ruling before implementation is exact. Completed rendering is bound
+  to the current repository HEAD obtained through sanitized read-only Git, and
+  occurs on implementation Commit A before evidence-only Commit B. Limitations
+  are one immutable ordered list preserving human final-GO, incident/Lovable,
+  cooperative-filesystem, duration-telemetry, and pytest-stdout/TAP boundaries.
+  Public output may be a canonical temporary target; CLI output is only
+  `docs/interaction-acceptance-report.md`. Canonical/nonsymlink parent and target
+  checks, source/output path and inode separation, exclusive same-parent temp
+  writing, fsync, identity rechecks, and atomic replace are mandatory.
+- P2 is resolved honestly rather than by a self-hash: `duration_seconds` remains
+  finite nonnegative non-authoritative telemetry and is excluded from gates and
+  decisions. Pytest stdout remains descriptor-hashed diagnostic data because
+  verified JUnit plus authenticated stderr is authoritative; Node TAP stdout
+  remains authoritative because production reparses the exact verified bytes.
+- Trusted-HEAD coverage produced genuine RED **4 failed, 417 deselected**:
+  coherent top/global/all-command rewrites were accepted for full and truthful-
+  prefix technical/safety records while canonical current-HEAD controls passed.
+  The renderer now uses sanitized read-only Git and binds completed validation
+  to that trusted current HEAD. Focused GREEN was **4 passed, 417 deselected**.
+- Frozen-limitations coverage produced genuine RED **16 failed, 421
+  deselected**: the generator omitted the three new boundaries, and missing,
+  extra, reordered, substituted, or non-string lists were accepted across full
+  technical/safety/pending production renders. Exact constant generation and
+  identity validation were added. The first GREEN attempt was **15 failed, 1
+  passed** only because the hostile-copy helper tried to use the newly strict
+  Markdown validator to manufacture invalid Markdown; an independent exact-line
+  rewrite/rehash corrected that harness. Final GREEN was **16 passed, 421
+  deselected**.
+- Output-path coverage produced genuine RED **8 failed, 2 passed, 437
+  deselected**: source identity, output symlink victim, ancestor alias,
+  directory, source hardlink, relative, dot, and redundant-separator outputs
+  were unsafe, while absent/existing canonical regular controls passed. The
+  writer now validates raw canonical/nonsymlink path and inode boundaries, uses
+  a same-parent exclusive regular temporary, fsyncs, rechecks identities, and
+  atomically replaces. The first GREEN was **2 failed, 8 passed** because the
+  renderer still converted the raw output to `Path` too early; preserving the
+  original argument made final GREEN **10 passed, 437 deselected**.
+- P2 characterization was honest direct GREEN **2 passed, 447 deselected**:
+  changing a finite nonnegative duration remains accepted telemetry; rehashed
+  arbitrary pytest stdout remains diagnostic, while a rehashed forged TAP node
+  is rejected by exact-byte reparsing. No new self-attestation was added.
+- The combined new matrix passed **32 passed, 417 deselected**. Prior regression
+  matrices remained GREEN: authority/provenance/Lovable/review **53 passed**,
+  raw source/CLI **17 passed**, real runner Lovable derivation **5 passed**,
+  coherent full/prefix JUnit roots **4 passed**, decision-independent execution
+  contract plus truthful prefix **15 passed**, and artifact tree/evidence-byte
+  binding **30 passed**. The truthful-prefix matrix first exposed one stale test
+  fixture HEAD (**14 passed, 1 failed**) and passed all 15 after migrating that
+  fixture to the independently read current HEAD.
+- The immutable limitations intentionally changed both canonical record
+  goldens. Their expected RED was **2 failed, 447 deselected**; exact regenerated
+  SHA-256 values then passed **2 passed, 447 deselected**. Complete pure runner
+  verification passed twice: **449 passed in 29.85s** and **449 passed in
+  29.55s**. Read-only AST parsing was `syntax_ok=2`.
+- Production revalidation of untouched A-double-prime run
+  `20260830T054646949198Z-task9` now fails closed with `completed report evidence
+  is invalid`, as required because its three-row pre-amendment limitations are
+  not the new six-row exact contract. Its JSON SHA-256 remained
+  `c38217dfb37b6dd5fc3e776bab5cefa979dc7c4f340cece96556e65de6581d42`
+  and Markdown SHA-256 remained
+  `392e4c0243233aab0260b9282b6aed5dac7596b2fccd7c37d37a901fe1542c46`;
+  no output was created and both source hashes were unchanged.
+- Every adjacent guard retained protected-resource digest
+  `b6ca5608d94f6e65f68a257e1802ac1f780592172d66f6d64e0b662bff84457a`,
+  SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  database SHA-256
+  `f04f7a8928ae519dbf28fb4c6eaedaba35f1c65354bb7fd69074a419d5800a56`
+  with size `57344` and `mtime_ns=1787412719082747809`, log SHA-256
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`
+  with size `2961585` and `mtime_ns=1787939944391406243`, TTS digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  exact HEAD `8d2b9c60532333b577b1cadf0ff8bea3f1b3c4ec`, and `unsafe=[]`.
+  No provider, TTS, external network, real service, browser, backend, Node,
+  Lovable connector, or canonical Unit 8 command ran in this repair loop.
+- The A-double-prime artifact remains untouched truthful diagnostic evidence,
+  but the verifier candidate is invalid. Status stays NO-GO pending strict TDD,
+  fresh scoped review, non-amend Commit A-triple-prime, and a complete fresh
+  Unit 8 rerun against that exact clean HEAD.
+
+### Unit 8.6: exact `.git`-anchored logical HEAD ruling
+
+- The next scoped review returned **Contract / Code / Safety NO-GO, Stage GO;
+  P0=0, P1=1, P2=0** and denied Commit A-triple-prime. The finding is valid:
+  `_read_trusted_repository_head` still called sanitized external
+  `git rev-parse HEAD`, and the completed-render test helper used the same
+  command. Internal record equality was fixed, but the supposed trust anchor
+  still inherited subprocess and parent-discovery behavior.
+- The contract is unambiguous and preserves the two-phase boundary. Rendering
+  remains on implementation HEAD A before evidence-only Commit B, but authority
+  comes only from the literal canonical `<runner-repo>/.git` entry. Missing
+  `.git` fails even below another repository. A normal directory or canonical
+  worktree Git-file is interpreted with bounded no-follow regular-file reads;
+  optional `commondir` is limited to the standard
+  `<common>/worktrees/<name>` relationship. Detached lowercase 40-hex HEAD,
+  validated relative loose symbolic refs through eight hops, and a fully parsed
+  duplicate-free packed-ref fallback are the only accepted forms. Symlink,
+  nonregular, malformed, escaping, cyclic, duplicate, missing, or changing
+  metadata fails closed; no parent search or Git subprocess is permitted.
+- This intentionally excludes exotic layouts rather than silently expanding
+  the trusted computing base. Production must retain both pre-validation and
+  pre-write logical HEAD reads and the existing top/global/per-command binding.
+  No artifact, release decision, or caller argument may supply repository
+  authority.
+- Filesystem-only fixtures with literal hashes produced genuine RED **9 failed,
+  14 passed, 449 deselected in 1.84s**. The old implementation discovered a
+  parent repository, accepted a missing final newline and duplicate packed
+  records, followed loose/packed/`commondir`/Git-directory symlinks or aliases,
+  and failed reader and full-render subprocess spies. The minimal logical
+  reader passed all detached, loose, packed, worktree/`commondir`, bounded
+  multi-symbolic, malformed/cycle/escape/symlink/nonregular/duplicate, missing-
+  root, and no-subprocess cases at **23 passed, 449 deselected in 0.90s**.
+  `_git_capture` remains only for run-time resource telemetry; completed HEAD
+  authority no longer delegates to it.
+- Prior matrices remained GREEN: immutable authority/limitations/output/P2
+  coverage **32 passed, 440 deselected**; output paths **10 passed, 462
+  deselected**; exact raw source/CLI **17 passed, 455 deselected**; artifact
+  tree/evidence bytes **30 passed, 442 deselected**. One intentionally broader
+  source selection was also **18 passed, 454 deselected**. Complete pure runner
+  verification passed twice at **472 passed in 22.47s** and **472 passed in
+  22.42s**; read-only AST parsing was `syntax_ok=2`.
+- Every adjacent resource guard retained protected-resource digest
+  `b6ca5608d94f6e65f68a257e1802ac1f780592172d66f6d64e0b662bff84457a`,
+  SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  database SHA-256
+  `f04f7a8928ae519dbf28fb4c6eaedaba35f1c65354bb7fd69074a419d5800a56`
+  with size `57344` and `mtime_ns=1787412719082747809`, log SHA-256
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`
+  with size `2961585` and `mtime_ns=1787939944391406243`, TTS digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  exact HEAD `8d2b9c60532333b577b1cadf0ff8bea3f1b3c4ec`, and `unsafe=[]`.
+  No provider, TTS, network, real service, backend, browser, Node, Lovable,
+  canonical Unit 8, or artifact command ran; neither prior artifact changed.
+- Status remains **NO-GO**. These bytes require fresh scoped Contract/Code/
+  Safety/Stage review before non-amend Commit A-triple-prime may be authorized;
+  a full replacement Unit 8 against that exact clean HEAD remains mandatory.
+
+### Unit 8.7: canonical packed-refs byte grammar
+
+- The follow-up scoped review found one remaining P1: `_parse_packed_refs`
+  decoded strict ASCII but then used `text.splitlines()`. Python consequently
+  treated CR, VT, FF, FS, GS, and RS as record separators and removed CR from
+  CRLF. Malformed bytes could therefore be reinterpreted as canonical records.
+  The logical-reader trust model otherwise remains unchanged, and
+  A-triple-prime stays denied.
+- The exact amendment rejects every ASCII control byte except LF and rejects
+  DEL before parsing. It requires the existing final LF and parses only
+  `text[:-1].split("\n")`; TAB and all alternative line boundaries therefore
+  fail closed. Existing single-space record grammar, full-file malformed and
+  duplicate rejection, printable comment handling, lowercase hashes, ref-name
+  validation, and immediately adjacent peeled-tag semantics are preserved.
+  The canonical `# pack-refs with: peeled fully-peeled sorted` header plus an
+  annotated tag/peeled line is a positive control. Lazy fallback is preserved:
+  a valid requested loose ref wins without reading invalid unrelated packed
+  bytes.
+- Literal filesystem strict TDD produced genuine RED **7 failed, 28 passed,
+  472 deselected in 0.82s**, exactly CRLF, bare CR, VT, FF, FS, GS, and RS.
+  After the minimal production change, the complete forbidden-control and two
+  positive-control matrix was **35 passed, 472 deselected in 0.94s**.
+- Regression remained GREEN: logical-reader **23 passed, 484 deselected**;
+  prior renderer **32 passed, 475 deselected**; output **10 passed, 497
+  deselected**; exact source/CLI **17 passed, 490 deselected**; artifact
+  tree/evidence **30 passed, 477 deselected**. Complete pure verification passed
+  twice at **507 passed in 22.54s** and **507 passed in 22.69s**; read-only AST
+  parsing was `syntax_ok=2`.
+- Every adjacent guard retained protected-resource digest
+  `b6ca5608d94f6e65f68a257e1802ac1f780592172d66f6d64e0b662bff84457a`,
+  SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  database SHA-256
+  `f04f7a8928ae519dbf28fb4c6eaedaba35f1c65354bb7fd69074a419d5800a56`
+  with size `57344` and `mtime_ns=1787412719082747809`, log SHA-256
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`
+  with size `2961585` and `mtime_ns=1787939944391406243`, TTS digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  exact HEAD `8d2b9c60532333b577b1cadf0ff8bea3f1b3c4ec`, and `unsafe=[]`.
+  No provider, TTS, network, real service, backend, browser, Node, Lovable,
+  canonical Unit 8, or artifact command ran; old artifacts remain untouched.
+- Status remains **NO-GO** pending fresh scoped review, authorization of one
+  non-amend A-triple-prime, and a complete replacement Unit 8 against that
+  exact clean HEAD.
+
 ## Final policy and staging evidence
 
 - No `pytest.skip`, `pytest.xfail`, skip/skipif/xfail marker exists in the
@@ -1093,10 +1295,10 @@ resource drift or tripwire fired.
 - The seventh-review final read-only AST syntax check passed for both changed
   Python files (`syntax_ok=2`), and the unstaged `git diff --check` exited `0`
   before exact restaging.
-- The A-double-prime repair's exact cached path list and
+- The A-triple-prime repair's exact cached path list and
   `git diff --cached --check` are recorded below after explicit staging; the
-  invalidated Commit A-prime is not amended and no repair commit is made in
-  this task.
+  invalidated earlier implementation commits are not amended and no repair
+  commit is made in this task.
 
 ## Historical incidents carried forward unchanged
 
@@ -1113,22 +1315,24 @@ No agent, runner, or reviewer can accept these risks for the release owner.
 
 ## Residual risks and independent-review handoff
 
-- Both the original Commit A Unit 8 execution and the replacement A-prime Unit
-  8 execution completed, but their respective Artifact integrity NO-GO verdicts
-  invalidate release use of both candidates. A-double-prime Unit 8 and Unit 9
-  evidence-only reporting have not started and are not claimed.
+- The original Commit A, replacement A-prime, and replacement A-double-prime
+  Unit 8 executions all completed, but their successive Artifact/renderer
+  integrity NO-GO verdicts invalidate release use of all three candidates.
+  A-triple-prime Unit 8 and Unit 9 evidence-only reporting have not started and
+  are not claimed.
 - Lovable remains a blank private bootstrap without a valid reviewed
   `prototype-reference.md`; no scope waiver has been authorized.
 - Historical incident disposition remains human-owned and unresolved.
-- Commit A-prime exists at `11bc0d6488b1df6c48d92f9628554834adbe5af6` but is now an
-  invalid verifier candidate. The current four-path repair stage requires
-  independent Code/Safety/Stage review, a new non-amend Commit A-double-prime,
-  and a complete replacement Unit 8 run. Any new P0/P1 invalidates that repair
-  verdict and requires another focused RED/GREEN loop.
+- Commit A-double-prime exists at
+  `8d2b9c60532333b577b1cadf0ff8bea3f1b3c4ec` but is now an invalid verifier
+  candidate. The current four-path repair stage requires independent Contract/
+  Code/Safety/Stage review, a new non-amend Commit A-triple-prime, and a complete
+  replacement Unit 8 run. Any new P0/P1 invalidates that repair verdict and
+  requires another focused RED/GREEN loop.
 
 ### Exact cached paths after staging
 
-The final explicit A-double-prime repair cached-name check returned exactly
+The final explicit A-triple-prime repair cached-name check returned exactly
 these four paths:
 
 ```text

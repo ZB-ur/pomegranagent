@@ -58,6 +58,25 @@ CLEAN_ENV_ARGV = (
 
 PYTHON = "/Users/lddmay/AiCoding/pomegranagent/.venv/bin/python"
 NODE = "/opt/homebrew/bin/node"
+EXPECTED_FROZEN_LIMITATIONS = (
+    "The runner cannot authorize release GO.",
+    "Historical incidents still require release-owner disposition.",
+    "Lovable completion or an explicit scope waiver is external to the runner.",
+    (
+        "Completed-report filesystem integrity assumes a cooperative local "
+        "filesystem after no-follow path and identity checks; it does not claim "
+        "resistance to a privileged concurrent filesystem adversary."
+    ),
+    (
+        "Command duration_seconds is non-authoritative runner telemetry; only "
+        "its finite nonnegative shape is checked, and no gate or decision trusts it."
+    ),
+    (
+        "Pytest-command stdout is descriptor-hashed non-authoritative diagnostic "
+        "data; JUnit plus authenticated stderr remains authoritative, while Node "
+        "TAP stdout is parsed as authoritative suite evidence."
+    ),
+)
 
 
 def _specs(tmp_path):
@@ -3627,8 +3646,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "b64f3271fbca98acebbff470c06b17dfc7300e6c3f544ebaa5075bb3d451bc3d"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "d605e5977facf58ad259cbe70310d0875e0a941fef11e4af612973902c4b4a3d"
+    assert hashlib.sha256(json_bytes).hexdigest() == "0b8f3972d17e956d1d0b4fa6cb764ad47c1eeb3ef485303db84c1924e6fab7ed"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "532813b6e29b2f2ad473d281a95f07817c2d43f8ca9cd8ee55a8df072cc5d442"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4193,8 +4212,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "8530b2197855960ddd3b317f43e198b7ba35a9e6110799b85ad9d6975056a692"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "1e2c5313daff454712d7f6068490f1f4a0565cd35ae240e8404edbf8b4219499"
+    assert hashlib.sha256(json_bytes).hexdigest() == "00e13127086c3fbe0f37d2e4093952e33322e98790a7ef951e2be3ba0ef9c63e"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "d2d177c2225e1dde58b7a00f871d980b46b78197ff3e39ad9ca157c9380110fb"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown
@@ -5995,6 +6014,63 @@ def _refresh_completed_report_files(module, artifact_root, record):
     )
 
 
+def _refresh_completed_limitations_forgery(module, artifact_root, record):
+    """Rehash one hostile limitations mutation without using its validator."""
+
+    record.pop("report_markdown", None)
+    markdown_path = artifact_root / "report.md"
+    lines = markdown_path.read_text(encoding="utf-8").splitlines()
+    replacements = [
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("- Limitations: `")
+    ]
+    assert len(replacements) == 1
+    lines[replacements[0]] = "- Limitations: `{}`".format(
+        json.dumps(
+            record["limitations"],
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+    )
+    markdown = ("\n".join(lines) + "\n").encode("utf-8")
+    record["report_markdown"] = {
+        "path": "report.md",
+        "sha256": hashlib.sha256(markdown).hexdigest(),
+        "size": len(markdown),
+    }
+    markdown_path.write_bytes(markdown)
+    (artifact_root / "report.json").write_bytes(
+        module.canonical_json_bytes(record)
+    )
+
+
+def _current_repository_head():
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = Path(__file__).resolve().parents[1]
+    return module._read_trusted_repository_head(repo_root)
+
+
+def _literal_git_directory(repo_root):
+    repo_root.mkdir(parents=True, exist_ok=True)
+    git_dir = repo_root / ".git"
+    git_dir.mkdir()
+    (git_dir / "objects").mkdir()
+    (git_dir / "refs").mkdir()
+    (git_dir / "config").write_text(
+        "[core]\n\trepositoryformatversion = 0\n\tbare = false\n",
+        encoding="ascii",
+    )
+    return git_dir
+
+
+def _write_literal_git_metadata(path, payload):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(payload)
+
+
 def _junit_payload_for_suite(evidence):
     properties_by_node = {}
     for item in evidence.properties:
@@ -6032,7 +6108,9 @@ def _completed_full_lovable_missing_artifact_tree(
     artifact_root = tmp_path / run_id
     command_root = artifact_root / "commands"
     command_root.mkdir(parents=True)
-    pending = _valid_pending_report_record(module, tmp_path)
+    pending = _valid_pending_report_record(
+        module, tmp_path, tested_head=_current_repository_head()
+    )
     repo_root = Path(__file__).resolve().parents[1]
     specs = module.build_command_specs(repo_root, artifact_root)
     suites = {
@@ -6767,7 +6845,9 @@ def test_completed_report_accepts_exact_truthful_failure_prefix(tmp_path):
     command_root.mkdir(parents=True)
     repo_root = Path(__file__).resolve().parents[1]
     spec = module.build_command_specs(repo_root, artifact_root)[0]
-    resources = FakeRunOneResources(token="truthful-prefix")
+    resources = FakeRunOneResources(
+        git_head=_current_repository_head(), token="truthful-prefix"
+    )
     result = module.CommandResult(
         subcommand=spec.command_id,
         child_started=True,
@@ -6879,6 +6959,7 @@ def _completed_partial_artifact_tree(module, tmp_path, *, safety=False):
     repo_root = Path(__file__).resolve().parents[1]
     spec = module.build_command_specs(repo_root, artifact_root)[0]
     resources = FakeRunOneResources(
+        git_head=_current_repository_head(),
         token="partial-safety-baseline" if safety else "technical-stable"
     )
     final_resources = (
@@ -6968,6 +7049,471 @@ def _completed_partial_artifact_tree(module, tmp_path, *, safety=False):
     return artifact_root, record
 
 
+def _coherently_rewrite_completed_tested_head(
+    module, artifact_root, record, replacement_head
+):
+    record["tested_head"] = replacement_head
+    for snapshot in _all_report_resource_snapshots(record):
+        snapshot["git_head"] = replacement_head
+    for name in ("before", "after"):
+        relative_path = f"resources.{name}.json"
+        payload = module.canonical_json_bytes(record["resources"][name])
+        (artifact_root / relative_path).write_bytes(payload)
+        record["resource_artifacts"][name] = {
+            "path": relative_path,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+    _refresh_completed_report_files(module, artifact_root, record)
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+@pytest.mark.parametrize("shape", ("full", "partial"))
+def test_completed_report_rejects_coherent_head_not_trusted_by_repository(
+    tmp_path, outcome, shape
+):
+    """Removing the repository-HEAD trust anchor must fail this render test."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    if shape == "full":
+        artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+            module, tmp_path, safety=outcome == "safety"
+        )
+    else:
+        artifact_root, record = _completed_partial_artifact_tree(
+            module, tmp_path, safety=outcome == "safety"
+        )
+    trusted_head = _current_repository_head()
+    assert record["tested_head"] == trusted_head
+    control = tmp_path / f"trusted-head-{shape}-{outcome}.md"
+    assert module.render_completed_report(
+        artifact_root / "report.json", control
+    ) == control
+
+    alternate_head = "0" * 40 if trusted_head != "0" * 40 else "1" * 40
+    _coherently_rewrite_completed_tested_head(
+        module, artifact_root, record, alternate_head
+    )
+    rejected = tmp_path / f"untrusted-head-{shape}-{outcome}.md"
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(artifact_root / "report.json", rejected)
+    assert not rejected.exists()
+
+
+def test_trusted_repository_head_rejects_parent_repository_discovery(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    parent = tmp_path / "parent-repository"
+    git_dir = _literal_git_directory(parent)
+    _write_literal_git_metadata(git_dir / "HEAD", ("1" * 40 + "\n").encode())
+    child = parent / "nested-without-dot-git"
+    child.mkdir()
+
+    with pytest.raises(module.CliMisuseError, match="repository HEAD"):
+        module._read_trusted_repository_head(child)
+
+
+def test_trusted_repository_head_accepts_literal_detached_head(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / "detached-repository"
+    git_dir = _literal_git_directory(repo_root)
+    expected = "2" * 40
+    _write_literal_git_metadata(git_dir / "HEAD", (expected + "\n").encode())
+
+    assert module._read_trusted_repository_head(repo_root) == expected
+
+
+def test_trusted_repository_head_accepts_literal_loose_symbolic_ref(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / "loose-repository"
+    git_dir = _literal_git_directory(repo_root)
+    expected = "3" * 40
+    _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+    _write_literal_git_metadata(
+        git_dir / "refs" / "heads" / "main", (expected + "\n").encode()
+    )
+
+    assert module._read_trusted_repository_head(repo_root) == expected
+
+
+def test_trusted_repository_head_accepts_literal_packed_ref_fallback(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / "packed-repository"
+    git_dir = _literal_git_directory(repo_root)
+    expected = "4" * 40
+    _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+    _write_literal_git_metadata(
+        git_dir / "packed-refs",
+        (
+            "# pack-refs with: peeled fully-peeled sorted\n"
+            f"{expected} refs/heads/main\n"
+        ).encode(),
+    )
+
+    assert module._read_trusted_repository_head(repo_root) == expected
+
+
+def test_trusted_repository_head_rejects_packed_refs_crlf(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / "packed-crlf-repository"
+    git_dir = _literal_git_directory(repo_root)
+    expected = "a" * 40
+    _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+    _write_literal_git_metadata(
+        git_dir / "packed-refs",
+        f"{expected} refs/heads/main\r\n".encode(),
+    )
+
+    with pytest.raises(module.CliMisuseError, match="repository HEAD"):
+        module._read_trusted_repository_head(repo_root)
+
+
+@pytest.mark.parametrize(
+    "control",
+    tuple(value for value in range(32) if value != 10) + (127,),
+    ids=lambda value: {
+        9: "tab",
+        11: "vertical-tab",
+        12: "form-feed",
+        13: "carriage-return",
+        28: "file-separator",
+        29: "group-separator",
+        30: "record-separator",
+        31: "unit-separator",
+        127: "delete",
+    }.get(value, f"control-0x{value:02x}"),
+)
+def test_trusted_repository_head_rejects_packed_refs_ascii_control(
+    tmp_path, control
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / f"packed-control-{control:02x}-repository"
+    git_dir = _literal_git_directory(repo_root)
+    unrelated = "b" * 40
+    expected = "c" * 40
+    _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+    _write_literal_git_metadata(
+        git_dir / "packed-refs",
+        (
+            f"{unrelated} refs/heads/unrelated".encode()
+            + bytes((control,))
+            + f"{expected} refs/heads/main\n".encode()
+        ),
+    )
+
+    with pytest.raises(module.CliMisuseError, match="repository HEAD"):
+        module._read_trusted_repository_head(repo_root)
+
+
+def test_trusted_repository_head_accepts_canonical_header_and_peeled_tag(
+    tmp_path,
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / "packed-peeled-repository"
+    git_dir = _literal_git_directory(repo_root)
+    expected = "d" * 40
+    tag = "e" * 40
+    peeled = "f" * 40
+    _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+    _write_literal_git_metadata(
+        git_dir / "packed-refs",
+        (
+            "# pack-refs with: peeled fully-peeled sorted\n"
+            f"{expected} refs/heads/main\n"
+            f"{tag} refs/tags/v1.0\n"
+            f"^{peeled}\n"
+        ).encode(),
+    )
+
+    assert module._read_trusted_repository_head(repo_root) == expected
+
+
+def test_trusted_repository_head_loose_ref_precedes_unparsed_invalid_packed_refs(
+    tmp_path,
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / "loose-precedence-repository"
+    git_dir = _literal_git_directory(repo_root)
+    expected = "1" * 40
+    _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+    _write_literal_git_metadata(
+        git_dir / "refs" / "heads" / "main", (expected + "\n").encode()
+    )
+    _write_literal_git_metadata(
+        git_dir / "packed-refs", b"invalid and unrelated\r\n"
+    )
+
+    assert module._read_trusted_repository_head(repo_root) == expected
+
+
+def _literal_worktree_repository(tmp_path, *, expected):
+    common_root = tmp_path / "common-repository"
+    common_dir = _literal_git_directory(common_root)
+    git_dir = common_dir / "worktrees" / "candidate"
+    git_dir.mkdir(parents=True)
+    worktree = tmp_path / "candidate-worktree"
+    worktree.mkdir()
+    _write_literal_git_metadata(
+        worktree / ".git", f"gitdir: {git_dir}\n".encode()
+    )
+    _write_literal_git_metadata(git_dir / "commondir", b"../..\n")
+    _write_literal_git_metadata(
+        git_dir / "gitdir", f"{worktree / '.git'}\n".encode()
+    )
+    _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+    _write_literal_git_metadata(
+        common_dir / "refs" / "heads" / "main", (expected + "\n").encode()
+    )
+    return worktree, git_dir, common_dir
+
+
+def test_trusted_repository_head_accepts_canonical_worktree_commondir(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    expected = "5" * 40
+    worktree, _git_dir, _common_dir = _literal_worktree_repository(
+        tmp_path, expected=expected
+    )
+
+    assert module._read_trusted_repository_head(worktree) == expected
+
+
+def test_trusted_repository_head_accepts_bounded_multi_symbolic_ref(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / "multi-symbolic-repository"
+    git_dir = _literal_git_directory(repo_root)
+    expected = "6" * 40
+    _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/first\n")
+    _write_literal_git_metadata(
+        git_dir / "refs" / "heads" / "first",
+        b"ref: refs/heads/second\n",
+    )
+    _write_literal_git_metadata(
+        git_dir / "refs" / "heads" / "second",
+        b"ref: refs/heads/final\n",
+    )
+    _write_literal_git_metadata(
+        git_dir / "refs" / "heads" / "final", (expected + "\n").encode()
+    )
+
+    assert module._read_trusted_repository_head(repo_root) == expected
+
+
+@pytest.mark.parametrize(
+    "attack",
+    (
+        "missing-root",
+        "git-entry-symlink",
+        "head-symlink",
+        "head-directory",
+        "head-malformed",
+        "loose-symlink",
+        "ref-cycle",
+        "ref-escape",
+        "ref-absolute",
+        "symbolic-depth",
+        "packed-malformed",
+        "packed-duplicate",
+        "packed-symlink",
+        "commondir-symlink",
+        "gitdir-ancestor-symlink",
+    ),
+)
+def test_trusted_repository_head_rejects_unsafe_literal_metadata(
+    tmp_path, attack
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    expected = "7" * 40
+    repo_root = tmp_path / f"unsafe-{attack}"
+    if attack == "missing-root":
+        with pytest.raises(module.CliMisuseError, match="repository HEAD"):
+            module._read_trusted_repository_head(repo_root)
+        return
+
+    git_dir = _literal_git_directory(repo_root)
+    if attack == "git-entry-symlink":
+        real_git = tmp_path / "symlinked-git-directory"
+        git_dir.rename(real_git)
+        git_dir.symlink_to(real_git, target_is_directory=True)
+    elif attack == "head-symlink":
+        target = tmp_path / "symlinked-head"
+        target.write_bytes((expected + "\n").encode())
+        (git_dir / "HEAD").symlink_to(target)
+    elif attack == "head-directory":
+        (git_dir / "HEAD").mkdir()
+    elif attack == "head-malformed":
+        _write_literal_git_metadata(git_dir / "HEAD", b"7" * 40)
+    elif attack == "loose-symlink":
+        _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+        target = tmp_path / "symlinked-loose-ref"
+        target.write_bytes((expected + "\n").encode())
+        loose = git_dir / "refs" / "heads" / "main"
+        loose.parent.mkdir(parents=True)
+        loose.symlink_to(target)
+    elif attack == "ref-cycle":
+        _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/one\n")
+        _write_literal_git_metadata(
+            git_dir / "refs" / "heads" / "one", b"ref: refs/heads/two\n"
+        )
+        _write_literal_git_metadata(
+            git_dir / "refs" / "heads" / "two", b"ref: refs/heads/one\n"
+        )
+    elif attack == "ref-escape":
+        _write_literal_git_metadata(
+            git_dir / "HEAD", b"ref: refs/heads/../../outside\n"
+        )
+    elif attack == "ref-absolute":
+        _write_literal_git_metadata(git_dir / "HEAD", b"ref: /refs/heads/main\n")
+    elif attack == "symbolic-depth":
+        _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/hop0\n")
+        for index in range(9):
+            _write_literal_git_metadata(
+                git_dir / "refs" / "heads" / f"hop{index}",
+                f"ref: refs/heads/hop{index + 1}\n".encode(),
+            )
+        _write_literal_git_metadata(
+            git_dir / "refs" / "heads" / "hop9", (expected + "\n").encode()
+        )
+    elif attack == "packed-malformed":
+        _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+        _write_literal_git_metadata(
+            git_dir / "packed-refs",
+            (f"malformed packed line\n{expected} refs/heads/main\n").encode(),
+        )
+    elif attack == "packed-duplicate":
+        _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+        _write_literal_git_metadata(
+            git_dir / "packed-refs",
+            (
+                f"{expected} refs/heads/main\n"
+                f"{'8' * 40} refs/heads/main\n"
+            ).encode(),
+        )
+    elif attack == "packed-symlink":
+        _write_literal_git_metadata(git_dir / "HEAD", b"ref: refs/heads/main\n")
+        target = tmp_path / "symlinked-packed-refs"
+        target.write_bytes(f"{expected} refs/heads/main\n".encode())
+        (git_dir / "packed-refs").symlink_to(target)
+    elif attack == "commondir-symlink":
+        repo_root, git_dir, _common_dir = _literal_worktree_repository(
+            tmp_path / "worktree-case", expected=expected
+        )
+        commondir = git_dir / "commondir"
+        commondir.unlink()
+        target = tmp_path / "symlinked-commondir"
+        target.write_bytes(b"../..\n")
+        commondir.symlink_to(target)
+    elif attack == "gitdir-ancestor-symlink":
+        original_worktree, original_git_dir, _common_dir = (
+            _literal_worktree_repository(
+                tmp_path / "gitdir-alias-case", expected=expected
+            )
+        )
+        alias = tmp_path / "gitdir-alias"
+        alias.symlink_to(original_git_dir.parent, target_is_directory=True)
+        (original_worktree / ".git").write_text(
+            f"gitdir: {alias / original_git_dir.name}\n", encoding="ascii"
+        )
+        repo_root = original_worktree
+    else:
+        raise AssertionError(attack)
+
+    with pytest.raises(module.CliMisuseError, match="repository HEAD"):
+        module._read_trusted_repository_head(repo_root)
+
+
+def test_trusted_repository_head_invokes_no_subprocess_or_git_capture(
+    tmp_path, monkeypatch
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / "no-subprocess-repository"
+    git_dir = _literal_git_directory(repo_root)
+    expected = "9" * 40
+    _write_literal_git_metadata(git_dir / "HEAD", (expected + "\n").encode())
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("trusted repository HEAD must not invoke a subprocess")
+
+    monkeypatch.setattr(module, "_git_capture", forbidden)
+    monkeypatch.setattr(module.subprocess, "run", forbidden)
+
+    assert module._read_trusted_repository_head(repo_root) == expected
+
+
+def test_completed_render_uses_no_subprocess_for_trusted_head(
+    tmp_path, monkeypatch
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, _record = _completed_partial_artifact_tree(module, tmp_path)
+    output = tmp_path / "rendered-with-logical-head.md"
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("completed render must not invoke a subprocess")
+
+    monkeypatch.setattr(module, "_git_capture", forbidden)
+    monkeypatch.setattr(module.subprocess, "run", forbidden)
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", output
+    ) == output
+
+
+def test_report_record_uses_exact_frozen_limitations(tmp_path):
+    """Replacing the generator's frozen limitations must fail this record test."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    record = _valid_pending_report_record(module, tmp_path)
+
+    assert record["limitations"] == list(EXPECTED_FROZEN_LIMITATIONS)
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety", "pending"))
+@pytest.mark.parametrize(
+    "mutation", ("missing", "extra", "order", "substituted", "non-string")
+)
+def test_completed_report_rejects_nonexact_frozen_limitations(
+    tmp_path, outcome, mutation
+):
+    """Removing exact limitations identity must fail this production render."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    if outcome == "pending":
+        artifact_root, record, _reference = (
+            _completed_full_with_verified_lovable_reference(module, tmp_path)
+        )
+    else:
+        artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+            module, tmp_path, safety=outcome == "safety"
+        )
+    record["limitations"] = list(EXPECTED_FROZEN_LIMITATIONS)
+    _refresh_completed_report_files(module, artifact_root, record)
+    control = tmp_path / f"exact-limitations-{outcome}-{mutation}.md"
+    assert module.render_completed_report(
+        artifact_root / "report.json", control
+    ) == control
+
+    if mutation == "missing":
+        record["limitations"].pop()
+    elif mutation == "extra":
+        record["limitations"].append("Caller-added limitation.")
+    elif mutation == "order":
+        record["limitations"][0], record["limitations"][1] = (
+            record["limitations"][1],
+            record["limitations"][0],
+        )
+    elif mutation == "substituted":
+        record["limitations"][0] = "The runner authorizes release GO."
+    elif mutation == "non-string":
+        record["limitations"][0] = {"claim": "caller-owned"}
+    else:
+        raise AssertionError(mutation)
+    _refresh_completed_limitations_forgery(module, artifact_root, record)
+    rejected = tmp_path / f"nonexact-limitations-{outcome}-{mutation}.md"
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(artifact_root / "report.json", rejected)
+    assert not rejected.exists()
+
+
 def _noncanonical_completed_source(artifact_root, alias_kind):
     source = artifact_root / "report.json"
     if alias_kind == "dotdot":
@@ -7028,6 +7574,141 @@ def test_completed_report_rejects_other_noncanonical_source_spelling(
 
     with pytest.raises(module.CliMisuseError, match="completed report"):
         module.render_completed_report(source, tmp_path / f"rejected-{spelling}.md")
+
+
+@pytest.mark.parametrize(
+    "attack",
+    (
+        "source-identity",
+        "output-symlink",
+        "ancestor-symlink",
+        "directory",
+        "hardlink-to-source",
+        "relative",
+        "dot",
+        "redundant-separator",
+    ),
+)
+def test_completed_report_rejects_unsafe_output_path_without_writing(
+    tmp_path, monkeypatch, attack
+):
+    """Removing canonical output identity checks must fail this render test."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, _record = _completed_partial_artifact_tree(module, tmp_path)
+    source = artifact_root / "report.json"
+    source_before = source.read_bytes()
+    victim = None
+    written_candidate = None
+    if attack == "source-identity":
+        output = source
+    elif attack == "output-symlink":
+        victim = tmp_path / "symlink-victim.md"
+        victim.write_bytes(b"victim-must-stay")
+        output = tmp_path / "output-symlink.md"
+        output.symlink_to(victim)
+    elif attack == "ancestor-symlink":
+        real_parent = tmp_path / "real-output-parent"
+        real_parent.mkdir()
+        alias_parent = tmp_path / "output-parent-alias"
+        alias_parent.symlink_to(real_parent, target_is_directory=True)
+        output = alias_parent / "rendered.md"
+        written_candidate = real_parent / "rendered.md"
+    elif attack == "directory":
+        output = tmp_path / "output-directory.md"
+        output.mkdir()
+    elif attack == "hardlink-to-source":
+        output = tmp_path / "source-hardlink.md"
+        os.link(source, output)
+    elif attack == "relative":
+        monkeypatch.chdir(tmp_path)
+        output = "relative-output.md"
+        written_candidate = tmp_path / output
+    elif attack == "dot":
+        output = f"{tmp_path}/./dot-output.md"
+        written_candidate = tmp_path / "dot-output.md"
+    elif attack == "redundant-separator":
+        output = f"{tmp_path}//redundant-output.md"
+        written_candidate = tmp_path / "redundant-output.md"
+    else:
+        raise AssertionError(attack)
+
+    with pytest.raises(module.CliMisuseError, match="completed report output"):
+        module.render_completed_report(source, output)
+
+    assert source.read_bytes() == source_before
+    if victim is not None:
+        assert victim.read_bytes() == b"victim-must-stay"
+    if written_candidate is not None:
+        assert not written_candidate.exists()
+
+
+@pytest.mark.parametrize("existing", (False, True))
+def test_completed_report_accepts_canonical_output_path(tmp_path, existing):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, _record = _completed_partial_artifact_tree(module, tmp_path)
+    source = artifact_root / "report.json"
+    output = (tmp_path / f"canonical-output-{existing}.md").resolve()
+    if existing:
+        output.write_bytes(b"replace-one-regular-file")
+
+    assert module.render_completed_report(source, output) == output
+    assert output.read_bytes() == (artifact_root / "report.md").read_bytes()
+    assert output.is_file() and not output.is_symlink()
+
+
+def test_completed_report_keeps_duration_as_shape_only_telemetry(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path
+    )
+    record["commands"][0]["duration_seconds"] = 987.654
+    _refresh_completed_report_files(module, artifact_root, record)
+    output = tmp_path / "accepted-duration-telemetry.md"
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", output
+    ) == output
+    assert record["limitations"] == list(EXPECTED_FROZEN_LIMITATIONS)
+    assert record["decision"]["outcome"] == "TECHNICAL_NO_GO"
+
+
+def test_completed_report_distinguishes_pytest_stdout_from_tap_evidence(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path
+    )
+    runner_index = tuple(EXPECTED_TIMEOUTS).index("runner")
+    _rewrite_completed_command_artifact(
+        module,
+        artifact_root,
+        record,
+        runner_index,
+        "stdout",
+        b"999 passed in 0.01s\n",
+    )
+    _refresh_completed_report_files(module, artifact_root, record)
+    diagnostic_output = tmp_path / "accepted-pytest-diagnostic-stdout.md"
+    assert module.render_completed_report(
+        artifact_root / "report.json", diagnostic_output
+    ) == diagnostic_output
+
+    tap_index = tuple(EXPECTED_TIMEOUTS).index("shared_node")
+    _rewrite_completed_command_artifact(
+        module,
+        artifact_root,
+        record,
+        tap_index,
+        "stdout",
+        _unit7_passing_tap_nodes(("caller-forged-tap-node",)),
+    )
+    _refresh_completed_report_files(module, artifact_root, record)
+
+    with pytest.raises(module.CliMisuseError, match="artifact"):
+        module.render_completed_report(
+            artifact_root / "report.json",
+            tmp_path / "rejected-forged-tap-stdout.md",
+        )
 
 
 @pytest.mark.parametrize("source_kind", ("symlink", "directory"))

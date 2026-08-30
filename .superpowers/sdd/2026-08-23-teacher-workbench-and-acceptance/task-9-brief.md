@@ -1139,6 +1139,175 @@ runner suite passed twice at **417 passed**. These are repair-loop results only:
 they do not authorize A-double-prime, replace independent review, or count as a
 new Unit 8 run.
 
+#### Post-A-double-prime renderer authority and telemetry ruling
+
+The independently reviewed A-double-prime implementation and its single fresh
+Unit 8 artifact remain truthful diagnostic evidence: all 22 commands succeeded,
+1,481/1,481 parsed tests passed, all fourteen gates passed, authenticated
+tripwires stayed clean, and protected resources were exact. The completed
+renderer is nevertheless not release-authoritative. Independent review returned
+**Evidence GO, canonical-run resource Safety GO, renderer Safety NO-GO, Artifact
+/ Release NO-GO; P0=0, P1=3, P2=2**. Before implementation, the frozen contract
+is amended as follows:
+
+- The renderer obtains the trusted tested implementation HEAD only through the
+  existing sanitized read-only Git capture against the repository containing
+  the runner. The exact lowercase 40-hex result must equal top-level
+  `tested_head`, the global snapshots, and every command snapshot for complete
+  and truthful-prefix technical or safety records. Equality among caller-owned
+  record fields is never provenance authority. Rendering occurs while HEAD is
+  still implementation Commit A; the tracked report is staged and committed as
+  evidence-only Commit B afterwards. Commit B is never a re-render authority.
+  A Unit 9.5 re-render, if required before Commit B exists, must still occur on
+  the unchanged tested implementation HEAD A.
+- Completed records carry exactly this immutable ordered limitations list; the
+  generator and Markdown renderer use the same frozen value, and missing,
+  extra, reordered, substituted, or non-string entries fail closed:
+
+  ```text
+  The runner cannot authorize release GO.
+  Historical incidents still require release-owner disposition.
+  Lovable completion or an explicit scope waiver is external to the runner.
+  Completed-report filesystem integrity assumes a cooperative local filesystem after no-follow path and identity checks; it does not claim resistance to a privileged concurrent filesystem adversary.
+  Command duration_seconds is non-authoritative runner telemetry; only its finite nonnegative shape is checked, and no gate or decision trusts it.
+  Pytest-command stdout is descriptor-hashed non-authoritative diagnostic data; JUnit plus authenticated stderr remains authoritative, while Node TAP stdout is parsed as authoritative suite evidence.
+  ```
+- The public renderer accepts canonical absolute temporary output targets for
+  controlled tests, while CLI rendering targets only the canonical tracked
+  `<repo>/docs/interaction-acceptance-report.md`. Before any output write, the
+  raw output spelling and every ancestor must be canonical and nonsymlink, the
+  parent must be a verified directory, source and output must differ by path and
+  inode, and any existing output must be a regular nonsymlink file. Source
+  identity, output symlinks, ancestor aliases, special files, directories, and
+  hardlinks to the source fail closed. The write uses an exclusive same-parent
+  temporary regular file, flush/fsync, identity rechecks, atomic replace, and
+  parent-directory fsync within the explicitly cooperative filesystem model.
+- `duration_seconds` has no independent clock attestation in the frozen runner.
+  It remains finite nonnegative runner telemetry and is excluded from gates and
+  decisions. Pytest-command stdout likewise remains hash/size-bound diagnostic
+  bytes because authoritative pytest semantics come from verified JUnit plus
+  authenticated stderr. Node TAP stdout remains authoritative because the
+  completed verifier reparses those exact verified bytes. No self-hash or
+  caller-owned cross-field is promoted into independent authority.
+
+The existing A-double-prime artifact is not modified, but this renderer review
+invalidates it as a release candidate. A fresh scoped review, a non-amend
+replacement Commit A-triple-prime, and one complete Unit 8 rerun against that
+exact clean HEAD are required before Unit 9 may resume.
+
+Strict TDD recorded each P1 before production changed. Coherent trusted-HEAD
+rewrites across full/prefix technical/safety records produced **4 failed, 417
+deselected**, then **4 passed, 417 deselected**. The frozen-limitations generator
+and full technical/safety/pending mutation matrix produced **16 failed, 421
+deselected**, then **16 passed, 421 deselected** after one harness-only
+canonicalization correction. Unsafe output identity/spelling cases plus two
+canonical controls produced **8 failed, 2 passed, 437 deselected**; the first
+implementation left two raw spellings normalized too early (**2 failed, 8
+passed**) and preserving the original output argument produced **10 passed, 437
+deselected**. The P2 telemetry/diagnostic characterization was direct GREEN at
+**2 passed, 447 deselected**, because duration was already shape-only and TAP
+stdout was already reparsed; the immutable limitations now prevent either from
+being overstated. The combined new matrix passed **32 passed, 417 deselected**.
+Prior authority/provenance/Lovable/review, source/CLI, Lovable generation,
+coherent-root, decision-independent/prefix, and artifact-tree matrices remained
+GREEN at **53**, **17**, **5**, **4**, **15**, and **30** passed respectively.
+Canonical limitation goldens were intentionally migrated after **2 failed, 447
+deselected** to **2 passed, 447 deselected**. The complete pure runner passed
+twice at **449 passed** and read-only syntax validation was `syntax_ok=2`.
+These repair-loop results do not authorize Commit A-triple-prime, modify the
+A-double-prime artifact, or count as a new Unit 8 run.
+
+#### A-triple-prime logical repository-HEAD authority amendment
+
+The next scoped review returned **Contract / Code / Safety NO-GO, Stage GO;
+P0=0, P1=1, P2=0**. The sole P1 is valid: the trusted-HEAD boundary above still
+delegated to `git rev-parse HEAD`, so both production rendering and its test
+helper depended on an external Git subprocess and inherited Git's parent-
+repository discovery. Commit A-triple-prime is denied. This finding does not
+conflict with the frozen two-phase rule: rendering must still occur on tested
+implementation HEAD A before evidence-only Commit B, but HEAD authority is now
+obtained by a bounded logical metadata read rather than process execution.
+
+The logical reader is anchored only at the exact canonical runner repository
+root followed by the literal child `.git`; a missing child is an integrity
+failure even when any parent is a valid repository. The root, `.git`, Git-file
+target, optional `commondir`, `HEAD`, loose refs, and `packed-refs` all use
+canonical raw spellings, nonsymlink ancestors, and regular nonsymlink no-follow
+reads with bounded size and pre/post identity checks. A normal `.git` directory
+is accepted. A worktree `.git` file is one exact ASCII `gitdir: PATH` line;
+`PATH` is either canonical absolute or a normalized nonescaping relative path.
+Its optional `commondir` is one normalized relative line and may use the
+standard `../..` spelling only when it resolves to a canonical common directory
+whose exact layout is `<commondir>/worktrees/<gitdir-name>`. No other escape or
+metadata-root search is allowed.
+
+`HEAD` is either one exact lowercase 40-hex detached line or an exact symbolic
+`ref: refs/...` line. Symbolic refs are validated as relative Git ref names and
+followed through regular loose files for at most eight hops; cycles, absolute
+or escaping names, malformed components, and excess depth fail closed. A
+canonical common-directory `packed-refs` file is parsed in full as bounded
+ASCII, rejects malformed or duplicate records, and is only a fallback when the
+corresponding loose ref is absent. Symlink, special, duplicate, missing, or
+identity-changing metadata is never treated as repository authority. The
+renderer retains its two logical HEAD reads before validation and immediately
+before output writing, so a change between them still fails closed. The cost is
+intentional narrow compatibility: unsupported exotic Git layouts must be
+normalized outside the runner rather than widening evidence trust or invoking
+Git.
+
+Strict TDD used only filesystem-built repositories and literal expected hashes;
+no test obtained an expected value from Git or from the production reader. The
+old subprocess implementation produced genuine RED at **9 failed, 14 passed,
+449 deselected in 1.84s**: it discovered a parent repository, accepted a
+non-newline HEAD, followed loose/packed/`commondir`/Git-directory aliases,
+accepted duplicate packed refs, and failed both no-subprocess spies. Minimal
+production replacement then passed the entire matrix at **23 passed, 449
+deselected in 0.90s**. The existing completed-report helper now uses the
+logical reader rather than a direct `git rev-parse` command.
+
+Regression remained GREEN: the prior new renderer matrix was **32 passed, 440
+deselected**, output safety was **10 passed, 462 deselected**, exact source/CLI
+safety was **17 passed, 455 deselected**, and artifact-byte/tree binding was
+**30 passed, 442 deselected**. The complete pure runner passed twice at **472
+passed in 22.47s** and **472 passed in 22.42s**; read-only syntax validation was
+`syntax_ok=2`. Every adjacent guard retained the exact protected database, log,
+TTS, user-path, and HEAD values with `unsafe=[]`. No provider, TTS, network,
+real service, backend, browser, Node, Lovable connector, canonical Unit 8, or
+artifact command ran. These repair-loop results still require fresh scoped
+review before a non-amend A-triple-prime can be authorized, and the complete
+replacement Unit 8 remains mandatory.
+
+#### A-triple-prime packed-refs canonical-line amendment
+
+The next scoped review accepted the logical-reader direction but found one
+remaining P1 in complete `packed-refs` parsing. Python `str.splitlines()` treats
+CR, VT, FF, FS, GS, and RS as line boundaries and silently removes CR from
+CRLF, so canonically invalid bytes could become valid-looking records after
+decode. Commit A-triple-prime remains denied. The frozen byte grammar is now
+explicit: a parsed `packed-refs` file is strict ASCII, nonempty, ends in exactly
+the record-terminating LF required by the existing grammar, contains no ASCII
+control byte other than LF and no DEL, and is split only on literal LF. Tabs
+are therefore invalid; records retain their existing exact single-space,
+lowercase hash, validated ref-name, duplicate, comment, and peeled-tag rules.
+The canonical `# pack-refs with: peeled fully-peeled sorted` header and a single
+`^<lowercase-40-hex>` annotated-tag line immediately after its record remain
+valid. Parsing remains lazy: when the requested loose ref exists, unrelated
+`packed-refs` bytes are not opened or promoted into authority.
+
+Filesystem-only strict TDD produced genuine RED **7 failed, 28 passed, 472
+deselected in 0.82s**, exactly CRLF, bare CR, VT, FF, FS, GS, and RS. The full
+32-byte forbidden-control matrix plus canonical peeled and loose-precedence
+controls passed after the two-line semantic repair at **35 passed, 472
+deselected in 0.94s**. Regression remained GREEN: logical reader **23 passed,
+484 deselected**; prior renderer matrix **32 passed, 475 deselected**; output
+**10 passed, 497 deselected**; exact source/CLI **17 passed, 490 deselected**;
+artifact tree/evidence **30 passed, 477 deselected**. The complete pure runner
+passed twice at **507 passed in 22.54s** and **507 passed in 22.69s**;
+`syntax_ok=2`. Every adjacent resource guard remained exact with `unsafe=[]`;
+no provider, TTS, network, real service, backend, browser, Node, Lovable,
+canonical Unit 8, or artifact command ran. Fresh scoped review is still
+required before A-triple-prime or a replacement Unit 8 can be authorized.
+
 The report `tested_head` is not permanently bound to `FROZEN_START_HEAD`.
 Before Commit A it may equal that start hash; after Commit A it must equal the
 exact lowercase 40-hex candidate in the complete global before/after snapshot

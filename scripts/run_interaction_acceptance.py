@@ -54,6 +54,25 @@ FROZEN_RUNTIME_VERSION = {
     "api_version": "2",
     "schema_version": "2",
 }
+FROZEN_LIMITATIONS = (
+    "The runner cannot authorize release GO.",
+    "Historical incidents still require release-owner disposition.",
+    "Lovable completion or an explicit scope waiver is external to the runner.",
+    (
+        "Completed-report filesystem integrity assumes a cooperative local "
+        "filesystem after no-follow path and identity checks; it does not claim "
+        "resistance to a privileged concurrent filesystem adversary."
+    ),
+    (
+        "Command duration_seconds is non-authoritative runner telemetry; only "
+        "its finite nonnegative shape is checked, and no gate or decision trusts it."
+    ),
+    (
+        "Pytest-command stdout is descriptor-hashed non-authoritative diagnostic "
+        "data; JUnit plus authenticated stderr remains authoritative, while Node "
+        "TAP stdout is parsed as authoritative suite evidence."
+    ),
+)
 
 COMMAND_TIMEOUTS = {
     "runner": 300,
@@ -1125,11 +1144,7 @@ def build_report_record(
         "generated_at": generated_at,
         "incidents": _incident_report_rows(),
         "internal_evidence": _canonical_value(internal),
-        "limitations": [
-            "The runner cannot authorize release GO.",
-            "Historical incidents still require release-owner disposition.",
-            "Lovable completion or an explicit scope waiver is external to the runner.",
-        ],
+        "limitations": list(FROZEN_LIMITATIONS),
         "lovable": {
             "completion_or_scope_waiver": lovable_status == "PROVIDED_OR_WAIVED",
             "connector_used": False,
@@ -2381,6 +2396,7 @@ def _validate_report_record_shape(
     *,
     completed: bool,
     artifact_root: Path | None = None,
+    trusted_tested_head: str | None = None,
 ) -> None:
     if not isinstance(record, Mapping):
         raise CliMisuseError("completed report JSON has the wrong schema")
@@ -2402,6 +2418,13 @@ def _validate_report_record_shape(
         or not isinstance(record.get("generated_at"), str)
         or not isinstance(record.get("tested_head"), str)
         or re.fullmatch(r"[0-9a-f]{40}", record["tested_head"]) is None
+        or (
+            completed
+            and (
+                trusted_tested_head is None
+                or record.get("tested_head") != trusted_tested_head
+            )
+        )
         or (completed and record.get("external_decision") is not None)
         or (
             completed
@@ -2511,8 +2534,7 @@ def _validate_report_record_shape(
         not in {"PASS", "FAIL", "NOT_PROVEN"}
         or not isinstance(record.get("suite_evidence"), Mapping)
         or not isinstance(record.get("internal_evidence"), list)
-        or not isinstance(record.get("limitations"), list)
-        or not record["limitations"]
+        or record.get("limitations") != list(FROZEN_LIMITATIONS)
     ):
         raise CliMisuseError("completed report evidence is invalid")
 
@@ -4657,6 +4679,369 @@ def _git_capture(repo_root: Path, *arguments: str) -> tuple[int, bytes]:
     return completed.returncode, completed.stdout
 
 
+_GIT_METADATA_MAX_BYTES = 1024 * 1024
+_GIT_SYMBOLIC_REF_LIMIT = 8
+_GIT_HEAD_PATTERN = re.compile(r"[0-9a-f]{40}")
+
+
+def _invalid_trusted_repository_head() -> NoReturn:
+    raise CliMisuseError("completed report repository HEAD is invalid")
+
+
+def _canonical_git_absolute_path(raw_path: object) -> Path:
+    try:
+        raw = os.fspath(raw_path)
+    except TypeError:
+        _invalid_trusted_repository_head()
+    if (
+        not isinstance(raw, str)
+        or not raw
+        or "\x00" in raw
+        or not os.path.isabs(raw)
+        or raw.startswith("//")
+        or os.path.normpath(raw) != raw
+    ):
+        _invalid_trusted_repository_head()
+    candidate = Path(raw)
+    if str(candidate) != raw:
+        _invalid_trusted_repository_head()
+    return candidate
+
+
+def _git_metadata_identity(details: os.stat_result) -> tuple[int, ...]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_size,
+        details.st_mtime_ns,
+    )
+
+
+def _strict_git_path_details(
+    raw_path: object, *, allow_missing: bool = False
+) -> tuple[Path, os.stat_result] | None:
+    candidate = _canonical_git_absolute_path(raw_path)
+    for ancestor in reversed(candidate.parents):
+        try:
+            details = ancestor.lstat()
+        except FileNotFoundError:
+            if allow_missing:
+                return None
+            _invalid_trusted_repository_head()
+        except OSError:
+            _invalid_trusted_repository_head()
+        if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+            _invalid_trusted_repository_head()
+    try:
+        details = candidate.lstat()
+    except FileNotFoundError:
+        if allow_missing:
+            return None
+        _invalid_trusted_repository_head()
+    except OSError:
+        _invalid_trusted_repository_head()
+    try:
+        if candidate.resolve(strict=True) != candidate:
+            _invalid_trusted_repository_head()
+    except (OSError, RuntimeError):
+        _invalid_trusted_repository_head()
+    return candidate, details
+
+
+def _strict_git_directory(raw_path: object) -> Path:
+    checked = _strict_git_path_details(raw_path)
+    if checked is None:
+        _invalid_trusted_repository_head()
+    candidate, details = checked
+    if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+        _invalid_trusted_repository_head()
+    return candidate
+
+
+def _read_strict_git_metadata_file(
+    raw_path: object,
+    *,
+    allow_missing: bool = False,
+    maximum_bytes: int = _GIT_METADATA_MAX_BYTES,
+) -> bytes | None:
+    checked = _strict_git_path_details(raw_path, allow_missing=allow_missing)
+    if checked is None:
+        return None
+    candidate, before = checked
+    if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+        _invalid_trusted_repository_head()
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        _invalid_trusted_repository_head()
+    descriptor = -1
+    try:
+        descriptor = os.open(
+            candidate,
+            os.O_RDONLY | os.O_CLOEXEC | no_follow,
+        )
+        opened = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or _git_metadata_identity(opened) != _git_metadata_identity(before)
+        ):
+            _invalid_trusted_repository_head()
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(65536, maximum_bytes + 1 - total))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+            if total > maximum_bytes:
+                _invalid_trusted_repository_head()
+        after = candidate.lstat()
+        if (
+            not stat.S_ISREG(after.st_mode)
+            or stat.S_ISLNK(after.st_mode)
+            or _git_metadata_identity(after) != _git_metadata_identity(opened)
+        ):
+            _invalid_trusted_repository_head()
+        return b"".join(chunks)
+    except CliMisuseError:
+        raise
+    except OSError:
+        _invalid_trusted_repository_head()
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+
+
+def _single_git_metadata_line(payload: bytes) -> str:
+    if not payload.endswith(b"\n") or payload.count(b"\n") != 1:
+        _invalid_trusted_repository_head()
+    try:
+        line = payload[:-1].decode("ascii", errors="strict")
+    except UnicodeDecodeError:
+        _invalid_trusted_repository_head()
+    if not line or "\r" in line:
+        _invalid_trusted_repository_head()
+    return line
+
+
+def _declared_git_directory_path(
+    base: Path,
+    raw: str,
+    *,
+    allow_absolute: bool,
+    allow_parent_components: bool,
+) -> Path:
+    if not raw or "\x00" in raw or "\\" in raw:
+        _invalid_trusted_repository_head()
+    if os.path.isabs(raw):
+        if not allow_absolute:
+            _invalid_trusted_repository_head()
+        return _canonical_git_absolute_path(raw)
+    if os.path.normpath(raw) != raw or raw in {".", ".."}:
+        _invalid_trusted_repository_head()
+    components = raw.split("/")
+    if (
+        any(component in {"", "."} for component in components)
+        or (not allow_parent_components and ".." in components)
+    ):
+        _invalid_trusted_repository_head()
+    joined = os.path.normpath(os.path.join(str(base), raw))
+    return _canonical_git_absolute_path(joined)
+
+
+def _valid_git_ref_name(ref_name: str) -> bool:
+    if (
+        not ref_name.startswith("refs/")
+        or ref_name.endswith("/")
+        or "//" in ref_name
+        or ".." in ref_name
+        or "@{" in ref_name
+        or any(character in " ~^:?*[\\" for character in ref_name)
+        or any(ord(character) < 32 or ord(character) == 127 for character in ref_name)
+    ):
+        return False
+    components = ref_name.split("/")
+    return all(
+        component
+        and component not in {".", ".."}
+        and not component.startswith(".")
+        and not component.endswith(".")
+        and not component.endswith(".lock")
+        for component in components
+    )
+
+
+def _parse_git_reference_line(payload: bytes) -> tuple[str, str]:
+    line = _single_git_metadata_line(payload)
+    if _GIT_HEAD_PATTERN.fullmatch(line) is not None:
+        return "head", line
+    if line.startswith("ref: "):
+        ref_name = line[5:]
+        if _valid_git_ref_name(ref_name):
+            return "ref", ref_name
+    _invalid_trusted_repository_head()
+
+
+def _parse_packed_refs(payload: bytes | None) -> dict[str, str]:
+    if payload is None:
+        return {}
+    if not payload or not payload.endswith(b"\n"):
+        _invalid_trusted_repository_head()
+    try:
+        text = payload.decode("ascii", errors="strict")
+    except UnicodeDecodeError:
+        _invalid_trusted_repository_head()
+    if any(
+        (ord(character) < 32 and character != "\n")
+        or ord(character) == 127
+        for character in text
+    ):
+        _invalid_trusted_repository_head()
+    parsed: dict[str, str] = {}
+    previous_record = False
+    for line in text[:-1].split("\n"):
+        if not line:
+            _invalid_trusted_repository_head()
+        if line.startswith("#"):
+            if not line.startswith("# ") or any(
+                ord(character) < 32 or ord(character) == 127
+                for character in line
+            ):
+                _invalid_trusted_repository_head()
+            previous_record = False
+            continue
+        if line.startswith("^"):
+            if (
+                not previous_record
+                or _GIT_HEAD_PATTERN.fullmatch(line[1:]) is None
+            ):
+                _invalid_trusted_repository_head()
+            previous_record = False
+            continue
+        matched = re.fullmatch(r"([0-9a-f]{40}) ([^\x00-\x20\x7f]+)", line)
+        if matched is None:
+            _invalid_trusted_repository_head()
+        head, ref_name = matched.groups()
+        if not _valid_git_ref_name(ref_name) or ref_name in parsed:
+            _invalid_trusted_repository_head()
+        parsed[ref_name] = head
+        previous_record = True
+    return parsed
+
+
+def _read_trusted_repository_head(repo_root: Path) -> str:
+    try:
+        root = _strict_git_directory(repo_root)
+        git_entry_checked = _strict_git_path_details(root / ".git")
+        if git_entry_checked is None:
+            _invalid_trusted_repository_head()
+        git_entry, git_entry_details = git_entry_checked
+        git_file_layout = stat.S_ISREG(git_entry_details.st_mode)
+        if stat.S_ISDIR(git_entry_details.st_mode) and not stat.S_ISLNK(
+            git_entry_details.st_mode
+        ):
+            git_dir = _strict_git_directory(git_entry)
+        elif git_file_layout and not stat.S_ISLNK(git_entry_details.st_mode):
+            git_file_payload = _read_strict_git_metadata_file(
+                git_entry, maximum_bytes=4096
+            )
+            if git_file_payload is None:
+                _invalid_trusted_repository_head()
+            git_file_line = _single_git_metadata_line(git_file_payload)
+            if not git_file_line.startswith("gitdir: "):
+                _invalid_trusted_repository_head()
+            git_dir = _strict_git_directory(
+                _declared_git_directory_path(
+                    root,
+                    git_file_line[8:],
+                    allow_absolute=True,
+                    allow_parent_components=False,
+                )
+            )
+        else:
+            _invalid_trusted_repository_head()
+
+        commondir_payload = _read_strict_git_metadata_file(
+            git_dir / "commondir", allow_missing=True, maximum_bytes=4096
+        )
+        if commondir_payload is None:
+            common_dir = git_dir
+        else:
+            if not git_file_layout:
+                _invalid_trusted_repository_head()
+            common_line = _single_git_metadata_line(commondir_payload)
+            common_dir = _strict_git_directory(
+                _declared_git_directory_path(
+                    git_dir,
+                    common_line,
+                    allow_absolute=False,
+                    allow_parent_components=True,
+                )
+            )
+            if (
+                git_dir.parent.name != "worktrees"
+                or git_dir.parent.parent != common_dir
+                or not git_dir.name
+            ):
+                _invalid_trusted_repository_head()
+
+        head_payload = _read_strict_git_metadata_file(
+            git_dir / "HEAD", maximum_bytes=4096
+        )
+        if head_payload is None:
+            _invalid_trusted_repository_head()
+        kind, value = _parse_git_reference_line(head_payload)
+        if kind == "head":
+            return value
+
+        loose_roots = (
+            (git_dir, common_dir) if git_dir != common_dir else (common_dir,)
+        )
+        packed_refs: dict[str, str] | None = None
+        seen: set[str] = set()
+        ref_name = value
+        for _hop in range(_GIT_SYMBOLIC_REF_LIMIT):
+            if ref_name in seen or not _valid_git_ref_name(ref_name):
+                _invalid_trusted_repository_head()
+            seen.add(ref_name)
+            loose_payloads = tuple(
+                payload
+                for loose_root in loose_roots
+                if (
+                    payload := _read_strict_git_metadata_file(
+                        loose_root.joinpath(*ref_name.split("/")),
+                        allow_missing=True,
+                        maximum_bytes=4096,
+                    )
+                )
+                is not None
+            )
+            if len(loose_payloads) > 1:
+                _invalid_trusted_repository_head()
+            if loose_payloads:
+                kind, value = _parse_git_reference_line(loose_payloads[0])
+                if kind == "head":
+                    return value
+                ref_name = value
+                continue
+            if packed_refs is None:
+                packed_refs = _parse_packed_refs(
+                    _read_strict_git_metadata_file(
+                        common_dir / "packed-refs", allow_missing=True
+                    )
+                )
+            packed_head = packed_refs.get(ref_name)
+            if packed_head is None:
+                _invalid_trusted_repository_head()
+            return packed_head
+        _invalid_trusted_repository_head()
+    except CliMisuseError:
+        raise
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _invalid_trusted_repository_head()
+
+
 def capture_resources(repo_root: Path) -> ResourceSnapshot:
     """Capture every protected repository resource without mutating it."""
 
@@ -5943,6 +6328,10 @@ def _source_stat_identity(details: os.stat_result) -> tuple[int, int, int, int, 
     )
 
 
+def _inode_stat_identity(details: os.stat_result) -> tuple[int, int, int]:
+    return (details.st_dev, details.st_ino, stat.S_IFMT(details.st_mode))
+
+
 def _read_strict_completed_source(source: Path) -> tuple[Path, Path, bytes]:
     """Validate the original spelling and read one canonical regular source."""
 
@@ -6001,13 +6390,184 @@ def _read_strict_completed_source(source: Path) -> tuple[Path, Path, bytes]:
     return source_path, source_path.parent, b"".join(chunks)
 
 
+def _prepare_strict_completed_output(
+    source_path: Path, output: Path
+) -> tuple[
+    Path,
+    Path,
+    tuple[int, int, int],
+    tuple[int, int, int, int, int],
+    tuple[int, int, int, int, int] | None,
+]:
+    raw_output = os.fspath(output)
+    if not isinstance(raw_output, str):
+        raise CliMisuseError("completed report output path is invalid")
+    output_path = Path(raw_output)
+    if (
+        not output_path.is_absolute()
+        or os.path.normpath(raw_output) != raw_output
+        or output_path.as_posix() != raw_output
+        or not output_path.name
+        or output_path == source_path
+    ):
+        raise CliMisuseError("completed report output path is invalid")
+
+    parent = output_path.parent
+    try:
+        if output_path.resolve(strict=False) != output_path:
+            raise CliMisuseError("completed report output path is invalid")
+        for ancestor in reversed(output_path.parents):
+            details = ancestor.lstat()
+            if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+                raise CliMisuseError("completed report output path is invalid")
+        parent_details = parent.lstat()
+        source_details = source_path.lstat()
+        if (
+            not stat.S_ISDIR(parent_details.st_mode)
+            or stat.S_ISLNK(parent_details.st_mode)
+            or not stat.S_ISREG(source_details.st_mode)
+            or stat.S_ISLNK(source_details.st_mode)
+        ):
+            raise CliMisuseError("completed report output path is invalid")
+        try:
+            output_details = output_path.lstat()
+        except FileNotFoundError:
+            output_identity = None
+        else:
+            if (
+                not stat.S_ISREG(output_details.st_mode)
+                or stat.S_ISLNK(output_details.st_mode)
+                or _inode_stat_identity(output_details)
+                == _inode_stat_identity(source_details)
+            ):
+                raise CliMisuseError("completed report output path is invalid")
+            output_identity = _source_stat_identity(output_details)
+    except CliMisuseError:
+        raise
+    except OSError as error:
+        raise CliMisuseError("completed report output path is invalid") from error
+    return (
+        output_path,
+        parent,
+        _inode_stat_identity(parent_details),
+        _source_stat_identity(source_details),
+        output_identity,
+    )
+
+
+def _atomic_write_strict_completed_output(
+    source_path: Path, output: Path, payload: bytes
+) -> Path:
+    (
+        output_path,
+        parent,
+        parent_identity,
+        source_identity,
+        output_identity,
+    ) = _prepare_strict_completed_output(source_path, output)
+    parent_descriptor = -1
+    temporary_descriptor = -1
+    temporary_path: Path | None = None
+    try:
+        parent_flags = (
+            os.O_RDONLY
+            | getattr(os, "O_DIRECTORY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        parent_descriptor = os.open(parent, parent_flags)
+        if _inode_stat_identity(os.fstat(parent_descriptor)) != parent_identity:
+            raise CliMisuseError("completed report output path is invalid")
+
+        temporary_descriptor, temporary_name = tempfile.mkstemp(
+            prefix=f".{output_path.name}.task9-",
+            suffix=".tmp",
+            dir=parent,
+        )
+        temporary_path = Path(temporary_name)
+        opened_temporary = os.fstat(temporary_descriptor)
+        if (
+            temporary_path.parent != parent
+            or not stat.S_ISREG(opened_temporary.st_mode)
+            or stat.S_ISLNK(opened_temporary.st_mode)
+            or opened_temporary.st_nlink != 1
+        ):
+            raise CliMisuseError("completed report output path is invalid")
+        os.fchmod(temporary_descriptor, 0o644)
+        view = memoryview(payload)
+        while view:
+            written = os.write(temporary_descriptor, view)
+            if written <= 0:
+                raise OSError("completed report output write made no progress")
+            view = view[written:]
+        os.fsync(temporary_descriptor)
+        os.close(temporary_descriptor)
+        temporary_descriptor = -1
+
+        if (
+            _inode_stat_identity(parent.lstat()) != parent_identity
+            or source_path.resolve(strict=True) != source_path
+            or _source_stat_identity(source_path.lstat()) != source_identity
+        ):
+            raise CliMisuseError("completed report output path is invalid")
+        for ancestor in reversed(output_path.parents):
+            details = ancestor.lstat()
+            if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+                raise CliMisuseError("completed report output path is invalid")
+        if output_identity is None:
+            try:
+                output_path.lstat()
+            except FileNotFoundError:
+                pass
+            else:
+                raise CliMisuseError("completed report output path is invalid")
+        else:
+            current_output = output_path.lstat()
+            if (
+                not stat.S_ISREG(current_output.st_mode)
+                or stat.S_ISLNK(current_output.st_mode)
+                or _source_stat_identity(current_output) != output_identity
+                or _inode_stat_identity(current_output)
+                == _inode_stat_identity(source_path.lstat())
+            ):
+                raise CliMisuseError("completed report output path is invalid")
+        current_temporary = temporary_path.lstat()
+        if (
+            not stat.S_ISREG(current_temporary.st_mode)
+            or stat.S_ISLNK(current_temporary.st_mode)
+            or _inode_stat_identity(current_temporary)
+            != _inode_stat_identity(opened_temporary)
+        ):
+            raise CliMisuseError("completed report output path is invalid")
+
+        os.replace(temporary_path, output_path)
+        temporary_path = None
+        os.fsync(parent_descriptor)
+    except CliMisuseError:
+        raise
+    except OSError as error:
+        raise CliMisuseError("completed report output path is invalid") from error
+    finally:
+        if temporary_descriptor >= 0:
+            os.close(temporary_descriptor)
+        if temporary_path is not None:
+            try:
+                temporary_path.unlink()
+            except FileNotFoundError:
+                pass
+        if parent_descriptor >= 0:
+            os.close(parent_descriptor)
+    return output_path
+
+
 def render_completed_report(source: Path, output: Path) -> Path:
     """Render a tracked report only from one completed canonical JSON record."""
 
     source_path, trusted_artifact_root, payload = _read_strict_completed_source(
         source
     )
-    output_path = Path(output)
+    trusted_tested_head = _read_trusted_repository_head(
+        Path(__file__).resolve().parents[1]
+    )
     try:
         record = json.loads(
             payload.decode("utf-8", errors="strict"),
@@ -6021,14 +6581,20 @@ def render_completed_report(source: Path, output: Path) -> Path:
         record,
         completed=True,
         artifact_root=trusted_artifact_root,
+        trusted_tested_head=trusted_tested_head,
     )
     _verify_completed_artifact_tree(record, source_path)
     markdown_bytes = render_report_markdown(record).encode("utf-8")
     expected = _binary_artifact_record("report.md", markdown_bytes)
     if record.get("report_markdown") != expected:
         raise CliMisuseError("completed report Markdown hash is invalid")
-    output_path.write_bytes(markdown_bytes)
-    return output_path
+    if _read_trusted_repository_head(
+        Path(__file__).resolve().parents[1]
+    ) != trusted_tested_head:
+        raise CliMisuseError("completed report repository HEAD is invalid")
+    return _atomic_write_strict_completed_output(
+        source_path, output, markdown_bytes
+    )
 
 
 def render_report_from_cli(repo_root: Path, source_argument: str) -> int:
