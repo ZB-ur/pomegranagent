@@ -4,16 +4,23 @@ Date: 2026-08-29–30 (Asia/Shanghai)
 
 ## Verdict
 
-**Current status: NO-GO. Independently reviewed non-amend implementation Commit
-A⁗⁗ `d162fcdf193c208487d95651418e2fb46f0024ed` received exactly one complete
-canonical Unit 8 run. Run `20260830T115442648106Z-task9` recorded all 22
-commands successful, 1,571/1,571 parsed tests passing, all fourteen gates PASS,
-authenticated tripwires clean, and exact protected resources. Its sole machine
-NO-GO reason is `LOVABLE_DELIVERABLE_MISSING`. Final independent review returned
-Evidence / Artifact / Safety / Stage GO with P0=0, P1=0, P2=0 and authorized the
-exact report-only Commit B boundary. Release remains NO-GO: Lovable completion
-or an owner waiver is absent, and all three historical incidents still have
-release-owner acknowledgement `ABSENT`. Commit B is not yet created.**
+**Current status: NO-GO. Evidence-only Commit B
+`82e1450446f703935c7e6a8cd764cde941efc269` is the current HEAD; it is not the
+tested implementation. Independently reviewed non-amend implementation Commit
+A⁗⁗ `d162fcdf193c208487d95651418e2fb46f0024ed` remains the tested HEAD and
+received exactly one complete canonical Unit 8 run. Run
+`20260830T115442648106Z-task9` recorded all 22 commands successful, 1,571/1,571
+parsed tests passing, all fourteen gates PASS, authenticated tripwires clean,
+and exact protected resources. Its sole machine NO-GO reason is
+`LOVABLE_DELIVERABLE_MISSING`. Final independent review returned Evidence /
+Artifact / Safety / Stage GO with P0=0, P1=0, P2=0. The immutable canonical
+run-time ledger and generated report retain release-owner acknowledgement
+`ABSENT` for all three historical incidents; the later direct release-owner
+decision recorded at the end of this report accepts their residual risks and
+clears that separate post-run incident blocker at the report layer. Release
+remains NO-GO because Lovable completion or an owner waiver is absent.**
+
+### Historical chronology before Commit B (retained, superseded as current status)
 
 The eighth pre-Commit-A Contract/Code/Safety/Stage review returned **GO,
 P0=0, P1=0, P2=0**. Commit A
@@ -1636,7 +1643,11 @@ evidence, staging, or Unit 9 state:
   `artifacts/acceptance/20260830T103407247103Z-task9`; neither was rerun or
   repaired in place.
 
-## Current Unit 9 report-only handoff (authoritative)
+## Historical pre-Commit-B Unit 9 report-only handoff (superseded)
+
+The following handoff was authoritative immediately before Commit B. It is
+retained only as historical evidence and is superseded by the post-Commit-B
+handoff below.
 
 - The tested implementation HEAD is exact non-amend Commit A⁗⁗
   `d162fcdf193c208487d95651418e2fb46f0024ed`. Its sole canonical run is
@@ -1655,7 +1666,8 @@ evidence, staging, or Unit 9 state:
   JSON; deterministic re-render was byte-identical at SHA-256
   `21ee301249a0d055fa64cdc82dc837a47f5d1a49e0af4c87fbb9dc4e2c98fab3`.
   No canonical fact or artifact was hand-edited.
-- The current index contains exactly two report-only paths:
+- At that historical boundary, the index contained exactly two report-only
+  paths:
 
   ```text
   .superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-report.md
@@ -1665,3 +1677,35 @@ evidence, staging, or Unit 9 state:
   Commit B has not been created. After the authorized ordinary report-only
   Commit B is created, the renderer must not be run again: Commit B is not the
   tested implementation HEAD and must not replace or rewrite A⁗⁗ evidence.
+
+## Post-Commit-B direct release-owner incident disposition (authoritative current handoff)
+
+- Evidence-only Commit B is exact current HEAD
+  `82e1450446f703935c7e6a8cd764cde941efc269`. It is not the tested
+  implementation. Tested implementation Commit A is exact
+  `d162fcdf193c208487d95651418e2fb46f0024ed`.
+- Authority source: current-thread direct user instruction. No external
+  decision artifact was supplied or created.
+- Exact instruction quote: `我作为用户/发布负责人，确认以上三项事故均为 ACCEPT，并接受所述残余风险。`
+- In this instruction, `以上三项` resolves only to the three exact incident
+  IDs in the table below. No source personal name, message ID, source-message
+  hash, or source-message timestamp was exposed to repository tooling; none is
+  recorded or inferred here.
+- Recorded at UTC: `2026-08-30T14:23:51Z`. This is the report recording time,
+  not the source-message time.
+
+| Incident ID | Technical recommendation | Release-owner decision | Residual risk |
+| --- | --- | --- | --- |
+| `PIPELINE_T8_PROVIDER_20260823` | `ACCEPT / RESIDUAL_RISK` | `ACCEPT` | `accepted` |
+| `CHILD_T9_REAL_LOG_20260827` | `ACCEPT / RESIDUAL_RISK` | `ACCEPT` | `accepted` |
+| `TEACHER_T5_REAL_LOG_20260829` | `ACCEPT / RESIDUAL_RISK` | `ACCEPT` | `accepted` |
+
+This direct release-owner decision clears the historical incidents' human-
+disposition blocker in the post-run report layer. It does not rewrite the
+immutable run-time evidence: canonical JSON `external_decision=null` and all
+three canonical/generated acknowledgements `ABSENT` remain historical facts.
+
+This decision does not provide Lovable completion or a Lovable waiver. Lovable
+remains `MISSING`; the machine outcome remains `TECHNICAL_NO_GO` with sole
+reason `LOVABLE_DELIVERABLE_MISSING`; Release remains **NO-GO** and
+`final_go=false`.
