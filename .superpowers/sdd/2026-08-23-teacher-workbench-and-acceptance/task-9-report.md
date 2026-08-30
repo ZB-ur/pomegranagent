@@ -4,17 +4,16 @@ Date: 2026-08-29–30 (Asia/Shanghai)
 
 ## Verdict
 
-**Current status: NO-GO. Non-amend Commit A-quadruple-prime (A⁗)
-`8a21619885261051349ce4c55738678325c807b9` was independently authorized and
-received exactly one canonical Unit 8 run. That run is truthful partial
-evidence, not a release candidate: runner, Lovable, and backend passed, then
-browser stopped the inventory at `431/432` on the settled-failure
-`non-json-1024x768` harness node. The earlier diagnosis was correct but applied
-too narrowly: post-`Locator.click()` disabled is not a pending witness for any
-immediately fulfilled or aborted route. No product defect or product change is
-authorized. The exact three-path harness repair below requires fresh scoped
-review, a new non-amend replacement candidate, and a complete new Unit 8 from
-command 1.**
+**Current status: NO-GO. Independently reviewed non-amend implementation Commit
+A⁗⁗ `d162fcdf193c208487d95651418e2fb46f0024ed` received exactly one complete
+canonical Unit 8 run. Run `20260830T115442648106Z-task9` recorded all 22
+commands successful, 1,571/1,571 parsed tests passing, all fourteen gates PASS,
+authenticated tripwires clean, and exact protected resources. Its sole machine
+NO-GO reason is `LOVABLE_DELIVERABLE_MISSING`. Final independent review returned
+Evidence / Artifact / Safety / Stage GO with P0=0, P1=0, P2=0 and authorized the
+exact report-only Commit B boundary. Release remains NO-GO: Lovable completion
+or an owner waiver is absent, and all three historical incidents still have
+release-owner acknowledgement `ABSENT`. Commit B is not yet created.**
 
 The eighth pre-Commit-A Contract/Code/Safety/Stage review returned **GO,
 P0=0, P1=0, P2=0**. Commit A
@@ -1525,7 +1524,53 @@ resource drift or tripwire fired.
   three-path bytes, a separately authorized non-amend replacement candidate,
   and one complete fresh Unit 8 from command 1.
 
-## Final policy and staging evidence
+### Unit 9.1–9.3: final A⁗⁗ evidence render and report-only boundary
+
+- Scoped re-review accepted the exact A⁗⁗ repair, and ordinary non-amend Commit
+  `d162fcdf193c208487d95651418e2fb46f0024ed` was created. Exactly one canonical
+  runner invocation produced immutable run
+  `20260830T115442648106Z-task9`; it was never restarted or rerun.
+- The canonical source is only
+  `artifacts/acceptance/20260830T115442648106Z-task9/report.json`, SHA-256
+  `f7bce44481cbe4f30e621661f51b730ab21cb34c92733cd81f2a77a98ba16f03`.
+  Its deterministic artifact Markdown SHA-256 is
+  `21ee301249a0d055fa64cdc82dc837a47f5d1a49e0af4c87fbb9dc4e2c98fab3`;
+  both resource files are
+  `e70cee5f5bc56d425017c9787faaaa7fbde28f03786f2d7f0a5c7c5cb1e6c2c0`.
+  The verified tree has 67 regular files, one real directory, zero unsafe
+  entries, and independent audit digest
+  `73cc966a8a14eb390d05bf220ff19b1cf7d0987cfeb257146d9594ab68e6a4ab`.
+- The canonical facts are exact: 22/22 commands are `SUCCESS`; all 1,571 parsed
+  tests passed with zero nonpass count; Gates 1–14 are PASS; all five internal
+  evidence rows are fresh/valid/passed; top tripwire status is PASS with zero
+  authenticated events. `external_decision=null`, review fields remain the
+  canonical pre-review null/PENDING state, and the three immutable incidents
+  retain acknowledgement `ABSENT`.
+- The machine decision is exactly `TECHNICAL_NO_GO`, runner exit `1`, final GO
+  false, and the sole reason is `LOVABLE_DELIVERABLE_MISSING`. Lovable is exact
+  `MISSING`; connector, publish, source upload, completion, and waiver are all
+  false. The later independent final evidence review does not rewrite those
+  canonical runner fields: it returned **Evidence / Artifact / Safety / Stage
+  GO; P0=0, P1=0, P2=0**, while Release remains **NO-GO**.
+- On unchanged tested HEAD A⁗⁗, the production `render-report` CLI generated
+  `docs/interaction-acceptance-report.md` directly from that JSON. A separate
+  fresh production public render to a canonical temporary target was byte-for-
+  byte equal: 85,714 bytes, 180 lines, SHA-256
+  `21ee301249a0d055fa64cdc82dc837a47f5d1a49e0af4c87fbb9dc4e2c98fab3`.
+  No canonical fact was hand-edited.
+- Unit 9 report-integrity verification ran with `--noconftest`,
+  `xfail_strict`, and a `/private/tmp` JUnit target and passed **507 passed in
+  22.35s**. Its adjacent before/after ResourceSnapshot was identical at
+  `4277bd8490c3834f1de98e051e2964f7039836371cfe5df0738d81df9aa1d0c1`,
+  `unsafe=[]`; SQLite/log/TTS/inherited-user-path state and tested HEAD remained
+  unchanged. No provider, external network, real service, browser, backend,
+  Node, Unit 8 rerun, or artifact mutation occurred.
+- Report-only Commit B is authorized but not created in this step. Its ownership
+  is exactly the generated tracked report and this Task 9 report; tested HEAD
+  remains A⁗⁗, and Commit B must never present itself as the tested
+  implementation or as release GO.
+
+## Historical policy and pre-Unit 9 staging evidence (superseded)
 
 - No `pytest.skip`, `pytest.xfail`, skip/skipif/xfail marker exists in the
   Task 9-owned browser/safety files.
@@ -1553,10 +1598,10 @@ resource drift or tripwire fired.
 - The seventh-review final read-only AST syntax check passed for both changed
   Python files (`syntax_ok=2`), and the unstaged `git diff --check` exited `0`
   before exact restaging.
-- The current A⁗⁗ harness repair's exact cached path list and
-  `git diff --cached --check` are recorded below after explicit staging; the
-  invalidated earlier implementation commits are not amended and no repair
-  commit is made in this task.
+- At that earlier boundary, the A⁗⁗ harness repair's cached path list and
+  `git diff --cached --check` covered the three-path historical snapshot
+  identified below. The authoritative current two-report staging state appears
+  only in the final handoff at the end of this file.
 
 ## Historical incidents carried forward unchanged
 
@@ -1571,44 +1616,52 @@ resource drift or tripwire fired.
 
 No agent, runner, or reviewer can accept these risks for the release owner.
 
-## Residual risks and independent-review handoff
+## Historical pre-A⁗⁗ snapshot (superseded)
 
-- The original Commit A, replacement A-prime, and replacement A-double-prime
-  Unit 8 executions all completed, but their successive Artifact/renderer
-  integrity NO-GO verdicts invalidate release use of all three candidates.
-  Commit A-triple-prime received exactly one canonical Unit 8 run; it stopped
-  truthfully at command 4 with browser `431/432`, so that immutable partial
-  evidence is also a release NO-GO. A⁗ likewise received exactly one canonical
-  Unit 8 run and stopped truthfully at command 4 with browser `431/432`; its
-  immutable partial evidence is not a release candidate. Unit 9 evidence-only
-  reporting has not started and is not claimed.
-- Lovable remains a blank private bootstrap without a valid reviewed
-  `prototype-reference.md`; no scope waiver has been authorized.
-- Historical incident disposition remains human-owned and unresolved.
-- Commit A-triple-prime and A⁗ exist at
-  `2dfd807ed635faaa837ad592c71e992ce71fe09a` and
-  `8a21619885261051349ce4c55738678325c807b9`; their one partial run each is
-  preserved at `artifacts/acceptance/20260830T084330976903Z-task9` and
-  `artifacts/acceptance/20260830T103407247103Z-task9`. Neither run is rerun or
-  repaired in place. The current exact three-path harness repair requires
-  independent Contract/Code/Safety/Stage review, a new authorized non-amend
-  replacement candidate, and a complete replacement Unit 8 run from command 1.
-  Any new P0/P1 invalidates that repair verdict and requires another focused
-  RED/GREEN loop.
+The following is retained only as the exact handoff after the one A⁗ run
+`20260830T103407247103Z-task9` and before non-amend Commit A⁗⁗
+`d162fcdf193c208487d95651418e2fb46f0024ed`. It is not the current repository,
+evidence, staging, or Unit 9 state:
 
-### Exact cached paths after staging
+- At that boundary, Unit 9 had not started and the exact three-path harness
+  repair (`task-9-brief.md`, `task-9-report.md`, and
+  `tests/browser/test_teacher_today.py`) was staged pending independent review,
+  authorization, and a fresh Unit 8 run. That review, commit, and run have since
+  completed and supersede this snapshot.
+- The original Commit A, A-prime, and A-double-prime runs had completed but were
+  invalidated by their successive Artifact/renderer integrity verdicts.
+  A-triple-prime and A⁗ each had one immutable command-4 browser `431/432`
+  partial run, preserved respectively at
+  `artifacts/acceptance/20260830T084330976903Z-task9` and
+  `artifacts/acceptance/20260830T103407247103Z-task9`; neither was rerun or
+  repaired in place.
 
-The final explicit A⁗⁗ harness repair cached-name check returned exactly
-these three paths:
+## Current Unit 9 report-only handoff (authoritative)
 
-```text
-.superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-brief.md
-.superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-report.md
-tests/browser/test_teacher_today.py
-```
+- The tested implementation HEAD is exact non-amend Commit A⁗⁗
+  `d162fcdf193c208487d95651418e2fb46f0024ed`. Its sole canonical run is
+  `20260830T115442648106Z-task9`: all 22 commands succeeded, all 1,571 parsed
+  tests passed, Gates 1–14 passed, and the authenticated tripwire recorded zero
+  events.
+- Independent final review returned **Evidence / Artifact / Safety / Stage GO;
+  P0=0, P1=0, P2=0**. The exact canonical machine decision nevertheless
+  remains **TECHNICAL_NO_GO** with sole machine reason
+  `LOVABLE_DELIVERABLE_MISSING`; Lovable is still `MISSING` and no owner waiver
+  exists. Separately, all three historical incidents still have acknowledgement
+  `ABSENT`, and only the release owner can accept them. Release is therefore
+  **NO-GO**.
+- Unit 9 report-only rendering is complete. Production generated
+  `docs/interaction-acceptance-report.md` one-way from the immutable canonical
+  JSON; deterministic re-render was byte-identical at SHA-256
+  `21ee301249a0d055fa64cdc82dc837a47f5d1a49e0af4c87fbb9dc4e2c98fab3`.
+  No canonical fact or artifact was hand-edited.
+- The current index contains exactly two report-only paths:
 
-No inherited user path, plan, brainstorm artifact, unrelated product file,
-tracked acceptance report, generated release evidence, or old Unit 8 artifact
-is staged. The fresh cached-name comparison and cached diff check are the final
-pre-commit boundary; no amend or repair commit is made before independent
-review.
+  ```text
+  .superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-report.md
+  docs/interaction-acceptance-report.md
+  ```
+
+  Commit B has not been created. After the authorized ordinary report-only
+  Commit B is created, the renderer must not be run again: Commit B is not the
+  tested implementation HEAD and must not replace or rewrite A⁗⁗ evidence.
