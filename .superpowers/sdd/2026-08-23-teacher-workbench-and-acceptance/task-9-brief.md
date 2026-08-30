@@ -1049,6 +1049,96 @@ GO (`P0=0, P1=1, P2=0`), so Commit A-prime remains unauthorized pending a
 fresh scoped re-review; the complete replacement Unit 8 run remains mandatory
 after that reviewed commit exists.
 
+#### Post-A-prime completed-record authority and provenance ruling
+
+The independent evidence review of replacement Commit A-prime and its single
+Unit 8 artifact found the artifact bytes truthful but the completed-record
+verifier incomplete (`P0=0, P1=3, P2=1`). The following fields are immutable
+runner evidence, not report-editor inputs, for every completed technical or
+safety outcome and every truthful prefix:
+
+- `external_decision` is exactly `null`. A supplied document may be parsed and
+  labelled only as an unverified external artifact; self-reported author, role,
+  `authority_verified`, incident acceptance, or waiver fields can never create
+  human authority. Only a separate, explicitly authorized report-only task may
+  record a named user/release-owner follow-up.
+- `run_id` is the exact basename of the trusted completed artifact directory
+  and has the canonical UTC form `YYYYMMDDTHHMMSSffffffZ-task9`.
+  `generated_at` has the exact canonical RFC3339 UTC-seconds form
+  `YYYY-MM-DDTHH:MM:SSZ` and equals that run ID's timestamp truncated to whole
+  seconds. Alternate zones, fractions, impossible dates, or mismatches fail
+  closed.
+- With no verifier-authenticated regular prototype reference and no separately
+  authorized owner waiver, Lovable is exactly `MISSING`: completion false,
+  connector/publish/upload false, both status fields `MISSING`, and the frozen
+  zero-credit blocker present. `PROVIDED_OR_WAIVED` is renderable as provided
+  prototype evidence only when the trusted artifact root has the exact
+  `<repo>/artifacts/acceptance/<run_id>` layout and the corresponding tracked
+  `docs/lovable/prototype-reference.md` is a nonsymlink regular file satisfying
+  Task 7's exact nine-line schema: fixed heading/copy/date, one credential-free
+  query-free fragment-free HTTPS `lovable.app` share URL, lowercase 40-hex
+  source commit, `GO` or `GO with changes`, and a bounded nonblank observation.
+  Status text alone never proves provision. A waiver remains unrepresentable in
+  canonical runner evidence until the explicit owner-decision/report-only
+  boundary is separately authorized.
+- The canonical runner review state is exactly `p0=null`, `p1=null`,
+  `p2=null`, and `status=PENDING_INDEPENDENT_EVIDENCE_REVIEW`. Review findings
+  occur after artifact generation and cannot be forged back into the completed
+  runner record; missing, extra, boolean, numeric, negative, string, object, or
+  completed-verdict substitutions fail closed.
+
+These checks precede decision derivation. No external-decision, Lovable, review,
+or provenance mutation may mask an existing technical or safety non-GO.
+Commit A-prime and its Unit 8 artifact therefore remain exact diagnostic
+evidence but are invalid release candidates. A reviewed non-amend replacement
+Commit A-double-prime and one complete fresh Unit 8 run against that exact HEAD
+are required.
+
+#### Raw completed-source and runner Lovable derivation clarification
+
+The next scoped review of that A-double-prime repair returned **Contract / Code /
+Safety NO-GO, Stage GO; P0=0, P1=2, P2=1**. The contract is unambiguous and is
+amended before implementation as follows:
+
+- `render_completed_report` validates the caller's original source-path
+  spelling before the first artifact read. It accepts only one absolute,
+  normalized path whose own entry and every existing ancestor are nonsymlinks;
+  the source is a regular nonsymlink `report.json`, and its immediate artifact
+  root is exactly the path obtained by strict canonical resolution. Relative
+  paths, `.` or `..` components, redundant separators, an ancestor or terminal
+  symlink, and special or missing sources fail closed. After this boundary, the
+  same canonical source/root pair is used for JSON bytes, record validation,
+  and artifact-tree verification; CLI dispatch must preserve the raw candidate
+  instead of resolving away an alias first. A relocated canonical absolute
+  artifact tree remains valid.
+- `run_acceptance` never treats `lovable_complete_or_waived`, `Path.is_file()`,
+  or any other caller-reported boolean/status as completion or waiver evidence.
+  The field remains an API-compatibility input only and has no authority. The
+  runner derives its exact `MISSING` or `PROVIDED_OR_WAIVED` state solely by
+  applying the completed verifier's strict regular-nonsymlink nine-line
+  reference validator to the frozen artifact-root-derived repository. Missing,
+  malformed, unreadable, special, or symlinked references are `MISSING`; only a
+  genuine valid reference is provided evidence. No runner-generated state can
+  represent an owner waiver.
+
+Both rules apply before outcome derivation, so technical and safety full or
+truthful-prefix evidence cannot weaken them. Commit A-prime remains truthful
+diagnostic evidence but an invalid release candidate; A-double-prime is not
+authorized until these repairs receive a fresh scoped review, and its complete
+replacement Unit 8 run remains mandatory.
+
+Strict TDD recorded separate genuine failures before production changed. The
+raw-source/CLI matrix was **14 failed, 3 passed, 400 deselected**, covering full
+and truthful-prefix technical/safety records plus spelling and terminal-type
+controls; its focused GREEN was **17 passed, 400 deselected**. The real
+`run_acceptance` Lovable derivation matrix was **4 failed, 1 passed, 412
+deselected** and then **5 passed, 412 deselected**. The prior authority/
+provenance/Lovable/review 53-case matrix, original decision-independent 15-case
+matrix, and coherent-root 4-case matrix remained GREEN. The complete pure
+runner suite passed twice at **417 passed**. These are repair-loop results only:
+they do not authorize A-double-prime, replace independent review, or count as a
+new Unit 8 run.
+
 The report `tested_head` is not permanently bound to `FROZEN_START_HEAD`.
 Before Commit A it may equal that start hash; after Commit A it must equal the
 exact lowercase 40-hex candidate in the complete global before/after snapshot

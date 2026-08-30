@@ -27,6 +27,7 @@ import tempfile
 import time
 import types
 from typing import NoReturn
+from urllib.parse import urlsplit
 import xml.etree.ElementTree as ET
 
 import pytest
@@ -2224,6 +2225,157 @@ def _valid_artifact_record(value: object) -> bool:
     )
 
 
+def _completed_report_provenance_is_valid(
+    run_id: object,
+    generated_at: object,
+    artifact_root: Path | None,
+) -> bool:
+    if (
+        not isinstance(run_id, str)
+        or re.fullmatch(r"[0-9]{8}T[0-9]{12}Z-task9", run_id) is None
+        or not isinstance(generated_at, str)
+        or re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z",
+            generated_at,
+        )
+        is None
+        or artifact_root is None
+        or Path(artifact_root).name != run_id
+    ):
+        return False
+    try:
+        run_timestamp = datetime.strptime(
+            run_id.removesuffix("-task9"), "%Y%m%dT%H%M%S%fZ"
+        )
+        generated_timestamp = datetime.strptime(
+            generated_at, "%Y-%m-%dT%H:%M:%SZ"
+        )
+    except ValueError:
+        return False
+    return generated_timestamp == run_timestamp.replace(microsecond=0)
+
+
+def _completed_missing_lovable_state_is_valid(value: object) -> bool:
+    return bool(
+        isinstance(value, Mapping)
+        and set(value)
+        == {
+            "completion_or_scope_waiver",
+            "connector_used",
+            "project_status",
+            "publish_performed",
+            "source_uploaded",
+            "status",
+            "zero_credit_blocker",
+        }
+        and value.get("completion_or_scope_waiver") is False
+        and value.get("connector_used") is False
+        and value.get("project_status") == "MISSING"
+        and value.get("publish_performed") is False
+        and value.get("source_uploaded") is False
+        and value.get("status") == "MISSING"
+        and value.get("zero_credit_blocker")
+        == "A blank or zero-credit project is not completion evidence."
+    )
+
+
+def _verified_lovable_reference_is_valid(artifact_root: Path | None) -> bool:
+    if artifact_root is None:
+        return False
+    root = Path(artifact_root)
+    if root.parent.name != "acceptance" or root.parent.parent.name != "artifacts":
+        return False
+    repo_root = root.parents[2]
+    docs_root = repo_root / "docs"
+    lovable_root = docs_root / "lovable"
+    reference = lovable_root / "prototype-reference.md"
+    try:
+        if not stat.S_ISDIR(os.lstat(docs_root).st_mode):
+            return False
+        if not stat.S_ISDIR(os.lstat(lovable_root).st_mode):
+            return False
+        reference_stat = os.lstat(reference)
+        if not stat.S_ISREG(reference_stat.st_mode) or reference_stat.st_size > 8192:
+            return False
+        payload = reference.read_bytes()
+        text = payload.decode("utf-8", errors="strict")
+    except (OSError, UnicodeDecodeError):
+        return False
+    lines = text.splitlines()
+    if (
+        not text.endswith("\n")
+        or len(lines) != 9
+        or lines[:5]
+        != [
+            "# Lovable teacher prototype reference",
+            "",
+            "视觉参考，不连接鸭鸭日记本后端",
+            "",
+            "- Review date: 2026-08-29",
+        ]
+        or not lines[5].startswith("- Share URL: ")
+        or not lines[6].startswith("- Source commit: ")
+        or not lines[7].startswith("- Checklist result: ")
+        or not lines[8].startswith("- Open observations: ")
+    ):
+        return False
+    share_url = lines[5].removeprefix("- Share URL: ")
+    source_commit = lines[6].removeprefix("- Source commit: ")
+    checklist_result = lines[7].removeprefix("- Checklist result: ")
+    observations = lines[8].removeprefix("- Open observations: ")
+    try:
+        parsed_url = urlsplit(share_url)
+        port = parsed_url.port
+    except ValueError:
+        return False
+    hostname = parsed_url.hostname
+    return bool(
+        share_url
+        and share_url.strip() == share_url
+        and parsed_url.scheme == "https"
+        and hostname is not None
+        and (hostname == "lovable.app" or hostname.endswith(".lovable.app"))
+        and parsed_url.username is None
+        and parsed_url.password is None
+        and port in {None, 443}
+        and not parsed_url.query
+        and not parsed_url.fragment
+        and re.fullmatch(r"[0-9a-f]{40}", source_commit) is not None
+        and checklist_result in {"GO", "GO with changes"}
+        and observations
+        and observations.strip() == observations
+        and len(observations) <= 500
+    )
+
+
+def _completed_lovable_state_is_valid(
+    value: object, artifact_root: Path | None
+) -> bool:
+    if _completed_missing_lovable_state_is_valid(value):
+        return True
+    return bool(
+        isinstance(value, Mapping)
+        and set(value)
+        == {
+            "completion_or_scope_waiver",
+            "connector_used",
+            "project_status",
+            "publish_performed",
+            "source_uploaded",
+            "status",
+            "zero_credit_blocker",
+        }
+        and value.get("completion_or_scope_waiver") is True
+        and value.get("connector_used") is False
+        and value.get("project_status") == "PROVIDED_OR_WAIVED"
+        and value.get("publish_performed") is False
+        and value.get("source_uploaded") is False
+        and value.get("status") == "PROVIDED_OR_WAIVED"
+        and value.get("zero_credit_blocker") is None
+        and _verified_lovable_reference_is_valid(artifact_root)
+    )
+
+
 def _validate_report_record_shape(
     record: Mapping[str, object],
     *,
@@ -2250,6 +2402,15 @@ def _validate_report_record_shape(
         or not isinstance(record.get("generated_at"), str)
         or not isinstance(record.get("tested_head"), str)
         or re.fullmatch(r"[0-9a-f]{40}", record["tested_head"]) is None
+        or (completed and record.get("external_decision") is not None)
+        or (
+            completed
+            and not _completed_report_provenance_is_valid(
+                record.get("run_id"),
+                record.get("generated_at"),
+                artifact_root,
+            )
+        )
     ):
         raise CliMisuseError("completed report JSON has the wrong schema")
 
@@ -2372,6 +2533,10 @@ def _validate_report_record_shape(
             lovable.get(name) is not False
             for name in ("connector_used", "publish_performed", "source_uploaded")
         )
+        or (
+            completed
+            and not _completed_lovable_state_is_valid(lovable, artifact_root)
+        )
     ):
         raise CliMisuseError("completed report Lovable state is invalid")
     reviews = record.get("reviews")
@@ -2379,6 +2544,10 @@ def _validate_report_record_shape(
         not isinstance(reviews, Mapping)
         or set(reviews) != {"p0", "p1", "p2", "status"}
         or reviews.get("status") != "PENDING_INDEPENDENT_EVIDENCE_REVIEW"
+        or (
+            completed
+            and any(reviews.get(name) is not None for name in ("p0", "p1", "p2"))
+        )
     ):
         raise CliMisuseError("completed report review state is invalid")
     if record.get("report_roles") != {
@@ -5597,11 +5766,8 @@ def run_acceptance(
             ),
         )
 
-    lovable_complete = (
-        bool(lovable_complete_or_waived)
-        if lovable_complete_or_waived is not None
-        else (root / "docs" / "lovable" / "prototype-reference.md").is_file()
-    )
+    del lovable_complete_or_waived
+    lovable_complete = _verified_lovable_reference_is_valid(artifacts)
     decision, gates, internal = _acceptance_decision(
         command_results=results_tuple,
         all_evidence=all_evidence,
@@ -5767,13 +5933,82 @@ def _strict_json_object(pairs):
     return result
 
 
+def _source_stat_identity(details: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (
+        details.st_dev,
+        details.st_ino,
+        details.st_mode,
+        details.st_size,
+        details.st_mtime_ns,
+    )
+
+
+def _read_strict_completed_source(source: Path) -> tuple[Path, Path, bytes]:
+    """Validate the original spelling and read one canonical regular source."""
+
+    raw_source = os.fspath(source)
+    if not isinstance(raw_source, str):
+        raise CliMisuseError("completed report source path is invalid")
+    source_path = Path(raw_source)
+    if (
+        not source_path.is_absolute()
+        or os.path.normpath(raw_source) != raw_source
+        or source_path.as_posix() != raw_source
+        or source_path.name != "report.json"
+    ):
+        raise CliMisuseError("completed report source path is invalid")
+
+    try:
+        if source_path.resolve(strict=True) != source_path:
+            raise CliMisuseError("completed report source path is invalid")
+        for ancestor in reversed(source_path.parents):
+            details = ancestor.lstat()
+            if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+                raise CliMisuseError("completed report source path is invalid")
+        before = source_path.lstat()
+        if not stat.S_ISREG(before.st_mode) or stat.S_ISLNK(before.st_mode):
+            raise CliMisuseError("completed report source path is invalid")
+
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(source_path, flags)
+        try:
+            opened = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or _source_stat_identity(opened) != _source_stat_identity(before)
+            ):
+                raise CliMisuseError("completed report source path is invalid")
+            chunks = []
+            while chunk := os.read(descriptor, 1024 * 1024):
+                chunks.append(chunk)
+        finally:
+            os.close(descriptor)
+
+        after = source_path.lstat()
+        if (
+            _source_stat_identity(after) != _source_stat_identity(opened)
+            or source_path.resolve(strict=True) != source_path
+        ):
+            raise CliMisuseError("completed report source path is invalid")
+        for ancestor in reversed(source_path.parents):
+            details = ancestor.lstat()
+            if not stat.S_ISDIR(details.st_mode) or stat.S_ISLNK(details.st_mode):
+                raise CliMisuseError("completed report source path is invalid")
+    except CliMisuseError:
+        raise
+    except OSError as error:
+        raise CliMisuseError("completed report source path is invalid") from error
+    return source_path, source_path.parent, b"".join(chunks)
+
+
 def render_completed_report(source: Path, output: Path) -> Path:
     """Render a tracked report only from one completed canonical JSON record."""
 
-    source_path = Path(source)
+    source_path, trusted_artifact_root, payload = _read_strict_completed_source(
+        source
+    )
     output_path = Path(output)
     try:
-        payload = source_path.read_bytes()
         record = json.loads(
             payload.decode("utf-8", errors="strict"),
             object_pairs_hook=_strict_json_object,
@@ -5782,10 +6017,6 @@ def render_completed_report(source: Path, output: Path) -> Path:
         raise CliMisuseError("completed report JSON is unreadable") from error
     if not isinstance(record, dict) or canonical_json_bytes(record) != payload:
         raise CliMisuseError("completed report JSON is not canonical")
-    try:
-        trusted_artifact_root = source_path.parent.resolve()
-    except OSError as error:
-        raise CliMisuseError("completed report artifact root is invalid") from error
     _validate_report_record_shape(
         record,
         completed=True,
@@ -5804,16 +6035,16 @@ def render_report_from_cli(repo_root: Path, source_argument: str) -> int:
     root = Path(repo_root).resolve()
     candidate = Path(source_argument)
     if not candidate.is_absolute():
-        candidate = root / candidate
+        return 64
     try:
-        if candidate.is_symlink():
-            return 64
-        source = candidate.resolve(strict=True)
         acceptance_root = (root / "artifacts" / "acceptance").resolve()
-        if not source.is_relative_to(acceptance_root) or source.name != "report.json":
+        if (
+            not candidate.is_relative_to(acceptance_root)
+            or candidate.name != "report.json"
+        ):
             return 64
         render_completed_report(
-            source, root / "docs" / "interaction-acceptance-report.md"
+            source_argument, root / "docs" / "interaction-acceptance-report.md"
         )
     except (CliMisuseError, OSError):
         return 1

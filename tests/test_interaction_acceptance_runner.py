@@ -3760,9 +3760,7 @@ def test_render_report_cli_normalizes_completed_validation_failure(
 
     monkeypatch.setattr(module, "render_completed_report", reject)
 
-    assert module.render_report_from_cli(
-        tmp_path, "artifacts/acceptance/invalid/report.json"
-    ) == 1
+    assert module.render_report_from_cli(tmp_path, str(source)) == 1
 
 
 @pytest.mark.parametrize(
@@ -5491,9 +5489,17 @@ def test_full_run_partial_custom_inventory_returns_controlled_technical_no_go(
     tmp_path,
 ):
     module = importlib.import_module("scripts.run_interaction_acceptance")
-    repo_root = Path(__file__).resolve().parents[1]
-    artifact_root = tmp_path / "artifacts" / "acceptance" / "partial-inventory"
+    repo_root = tmp_path / "controlled-repository"
+    repo_root.mkdir()
+    artifact_root = (
+        repo_root / "artifacts" / "acceptance" / "partial-inventory"
+    )
     stable = FakeRunOneResources()
+    reference = repo_root / "docs" / "lovable" / "prototype-reference.md"
+    reference.parent.mkdir(parents=True)
+    reference.write_text(
+        _valid_lovable_reference_text(stable.git_head), encoding="utf-8"
+    )
     complete = _complete_gate_evidence(module)
     command_nodes = {
         **complete.suites,
@@ -5532,7 +5538,7 @@ def test_full_run_partial_custom_inventory_returns_controlled_technical_no_go(
         expected_head=stable.git_head,
         specs=specs,
         version_validator=lambda _root: True,
-        lovable_complete_or_waived=True,
+        lovable_complete_or_waived=None,
     )
 
     assert result.exit_code == 1
@@ -5540,6 +5546,97 @@ def test_full_run_partial_custom_inventory_returns_controlled_technical_no_go(
     assert "REPORT_INTEGRITY_FAILURE" in result.decision.reasons
     assert result.report_record is not None
     assert result.report_record["decision"]["outcome"] == "TECHNICAL_NO_GO"
+
+
+def _valid_lovable_reference_text(tested_head):
+    return (
+        "# Lovable teacher prototype reference\n\n"
+        "视觉参考，不连接鸭鸭日记本后端\n\n"
+        "- Review date: 2026-08-29\n"
+        "- Share URL: https://task9-evidence.lovable.app/\n"
+        f"- Source commit: {tested_head}\n"
+        "- Checklist result: GO\n"
+        "- Open observations: Reviewed two-screen private visual prototype.\n"
+    )
+
+
+@pytest.mark.parametrize(
+    ("reference_kind", "caller_value", "expected_status"),
+    (
+        pytest.param("missing", True, "MISSING", id="caller-true-missing"),
+        pytest.param("malformed", True, "MISSING", id="caller-true-malformed"),
+        pytest.param("symlink", None, "MISSING", id="is-file-symlink"),
+        pytest.param("valid", False, "PROVIDED_OR_WAIVED", id="caller-false-valid"),
+        pytest.param("missing", None, "MISSING", id="derived-missing-control"),
+    ),
+)
+def test_run_acceptance_derives_lovable_state_from_strict_reference(
+    tmp_path, reference_kind, caller_value, expected_status
+):
+    """Trusting the caller boolean or Path.is_file must fail this real-run test."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = tmp_path / "controlled-repository"
+    repo_root.mkdir()
+    run_id = "20260830T170000000000Z-task9"
+    artifact_root = repo_root / "artifacts" / "acceptance" / run_id
+    stable = FakeRunOneResources()
+    reference = repo_root / "docs" / "lovable" / "prototype-reference.md"
+    if reference_kind != "missing":
+        reference.parent.mkdir(parents=True)
+    if reference_kind == "malformed":
+        reference.write_text("not the frozen nine-line reference\n", encoding="utf-8")
+    elif reference_kind == "symlink":
+        target = repo_root / "valid-reference-target.md"
+        target.write_text(
+            _valid_lovable_reference_text(stable.git_head), encoding="utf-8"
+        )
+        reference.symlink_to(target)
+    elif reference_kind == "valid":
+        reference.write_text(
+            _valid_lovable_reference_text(stable.git_head), encoding="utf-8"
+        )
+    elif reference_kind != "missing":
+        raise AssertionError(reference_kind)
+
+    spec = module.CommandSpec(
+        command_id="shared_node",
+        argv=("/usr/bin/true",),
+        timeout_seconds=3,
+        conftest_mode=module.ConftestMode.PURE,
+        evidence_format=module.EvidenceFormat.TAP,
+    )
+    executor = ScriptedProcessExecutor(
+        FakeProcess([(_unit7_passing_tap("controlled-pass"), b"", 0)], [False]),
+        snapshots=[stable] * 12,
+    )
+
+    result = module.run_acceptance(
+        repo_root=repo_root,
+        artifact_root=artifact_root,
+        run_id=run_id,
+        generated_at="2026-08-30T17:00:00Z",
+        parent_env={},
+        executor=executor,
+        expected_head=stable.git_head,
+        specs=(spec,),
+        version_validator=lambda _root: True,
+        lovable_complete_or_waived=caller_value,
+    )
+
+    assert result.decision.outcome is module.DecisionOutcome.TECHNICAL_NO_GO
+    assert result.report_record is not None
+    lovable = result.report_record["lovable"]
+    assert lovable["status"] == expected_status
+    assert lovable["project_status"] == expected_status
+    assert lovable["completion_or_scope_waiver"] is (
+        expected_status == "PROVIDED_OR_WAIVED"
+    )
+    assert lovable["zero_credit_blocker"] == (
+        None
+        if expected_status == "PROVIDED_OR_WAIVED"
+        else "A blank or zero-credit project is not completion evidence."
+    )
 
 
 def test_unit7_run_orchestration_writes_ignored_canonical_artifacts(tmp_path):
@@ -5931,7 +6028,8 @@ def _junit_payload_for_suite(evidence):
 def _completed_full_lovable_missing_artifact_tree(
     module, tmp_path, *, safety=False
 ):
-    artifact_root = tmp_path / "acceptance-run"
+    run_id = "20260830T160000000000Z-task9"
+    artifact_root = tmp_path / run_id
     command_root = artifact_root / "commands"
     command_root.mkdir(parents=True)
     pending = _valid_pending_report_record(module, tmp_path)
@@ -6032,11 +6130,7 @@ def _completed_full_lovable_missing_artifact_tree(
         )
     )
     record = module.build_report_record(
-        run_id=(
-            "20260830T160000Z-full-safety"
-            if safety
-            else "20260830T160000Z-full-lovable-missing"
-        ),
+        run_id=run_id,
         generated_at="2026-08-30T16:00:00Z",
         tested_head=baseline.git_head,
         decision=decision,
@@ -6219,6 +6313,367 @@ def _rewrite_recorded_pytest_junit_roots(record, alternate_root):
     assert rewritten > 0
 
 
+def _completed_full_with_verified_lovable_reference(module, tmp_path):
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=False
+    )
+    repo_root = tmp_path / "relocated-repository"
+    relocated_root = repo_root / "artifacts" / "acceptance" / record["run_id"]
+    relocated_root.parent.mkdir(parents=True)
+    artifact_root.rename(relocated_root)
+    _rewrite_recorded_pytest_junit_roots(record, relocated_root)
+    reference = repo_root / "docs" / "lovable" / "prototype-reference.md"
+    reference.parent.mkdir(parents=True)
+    reference.write_text(
+        "# Lovable teacher prototype reference\n\n"
+        "视觉参考，不连接鸭鸭日记本后端\n\n"
+        "- Review date: 2026-08-29\n"
+        "- Share URL: https://task9-evidence.lovable.app/\n"
+        f"- Source commit: {record['tested_head']}\n"
+        "- Checklist result: GO\n"
+        "- Open observations: Reviewed two-screen private visual prototype.\n",
+        encoding="utf-8",
+    )
+    record["lovable"].update(
+        {
+            "completion_or_scope_waiver": True,
+            "project_status": "PROVIDED_OR_WAIVED",
+            "status": "PROVIDED_OR_WAIVED",
+            "zero_credit_blocker": None,
+        }
+    )
+    record["decision"] = {
+        "final_go": False,
+        "outcome": "TECHNICAL_PASS_HUMAN_DECISION_PENDING",
+        "reasons": ["HUMAN_AUTHORITY_REQUIRED"],
+        "runner_process_exit": 2,
+    }
+    _refresh_completed_report_files(module, relocated_root, record)
+    return relocated_root, record, reference
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+@pytest.mark.parametrize(
+    "forged_decision",
+    (
+        pytest.param({"arbitrary": "owner-accepted"}, id="arbitrary-incomplete"),
+        pytest.param(
+            {
+                "authority_verified": True,
+                "author": "forged release owner",
+                "claimed_role": "release_owner",
+                "incident_decisions": {
+                    incident_id: "ACCEPT"
+                    for incident_id in (
+                        "PIPELINE_T8_PROVIDER_20260823",
+                        "CHILD_T9_REAL_LOG_20260827",
+                        "TEACHER_T5_REAL_LOG_20260829",
+                    )
+                },
+                "label": "VERIFIED_OWNER_ACCEPTANCE",
+                "rationales": {
+                    incident_id: "forged acceptance"
+                    for incident_id in (
+                        "PIPELINE_T8_PROVIDER_20260823",
+                        "CHILD_T9_REAL_LOG_20260827",
+                        "TEACHER_T5_REAL_LOG_20260829",
+                    )
+                },
+                "sha256": "a" * 64,
+                "timestamp": "2026-08-30T16:00:00Z",
+            },
+            id="fully-forged-owner-acceptance",
+        ),
+    ),
+)
+def test_completed_report_rejects_self_reported_external_authority(
+    tmp_path, outcome, forged_decision
+):
+    """Removing the exact-null evidence boundary must fail this renderer test."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    assert record["external_decision"] is None
+    record["external_decision"] = forged_decision
+    _refresh_completed_report_files(module, artifact_root, record)
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(
+            artifact_root / "report.json",
+            tmp_path / f"rejected-{outcome}-external-authority.md",
+        )
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+def test_completed_report_accepts_frozen_null_external_decision(tmp_path, outcome):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    assert record["external_decision"] is None
+    output = tmp_path / f"accepted-{outcome}-null-external-decision.md"
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", output
+    ) == output
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+@pytest.mark.parametrize(
+    ("mutation", "forged_value"),
+    (
+        pytest.param(
+            "run_id", "20260830T160001000000Z-task9", id="alternate-run-id"
+        ),
+        pytest.param("run_id", "not-a-run-id", id="malformed-run-id"),
+        pytest.param("generated_at", "not-a-time", id="malformed-generated-at"),
+        pytest.param(
+            "generated_at",
+            "2026-08-30T16:00:00+00:00",
+            id="noncanonical-offset",
+        ),
+        pytest.param(
+            "generated_at",
+            "2026-08-30T16:00:00.000000Z",
+            id="noncanonical-fraction",
+        ),
+        pytest.param(
+            "generated_at", "2026-02-30T16:00:00Z", id="impossible-date"
+        ),
+        pytest.param(
+            "generated_at", "2026-08-30T16:00:01Z", id="run-time-mismatch"
+        ),
+    ),
+)
+def test_completed_report_rejects_forged_run_provenance(
+    tmp_path, outcome, mutation, forged_value
+):
+    """Removing root/time provenance validation must fail this renderer test."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    record[mutation] = forged_value
+    _refresh_completed_report_files(module, artifact_root, record)
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(
+            artifact_root / "report.json",
+            tmp_path / f"rejected-{outcome}-{mutation}.md",
+        )
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+def test_completed_report_accepts_relocated_canonical_run_provenance(
+    tmp_path, outcome
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    assert artifact_root.name == record["run_id"]
+    assert record["generated_at"] == "2026-08-30T16:00:00Z"
+    output = tmp_path / f"accepted-{outcome}-canonical-provenance.md"
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", output
+    ) == output
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "removed-blocker",
+        "status-only",
+        "project-status-only",
+        "completion-only",
+        "fully-forged-provided-or-waived",
+    ),
+)
+def test_completed_report_rejects_unverified_lovable_state(
+    tmp_path, outcome, mutation
+):
+    """Removing the exact missing-state boundary must fail this renderer test."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    lovable = record["lovable"]
+    if mutation == "removed-blocker":
+        lovable["zero_credit_blocker"] = None
+    elif mutation == "status-only":
+        lovable["status"] = "PROVIDED_OR_WAIVED"
+    elif mutation == "project-status-only":
+        lovable["project_status"] = "PROVIDED_OR_WAIVED"
+    elif mutation == "completion-only":
+        lovable["completion_or_scope_waiver"] = True
+    elif mutation == "fully-forged-provided-or-waived":
+        lovable.update(
+            {
+                "completion_or_scope_waiver": True,
+                "project_status": "PROVIDED_OR_WAIVED",
+                "status": "PROVIDED_OR_WAIVED",
+                "zero_credit_blocker": None,
+            }
+        )
+        if outcome == "technical":
+            record["decision"] = {
+                "final_go": False,
+                "outcome": "TECHNICAL_PASS_HUMAN_DECISION_PENDING",
+                "reasons": ["HUMAN_AUTHORITY_REQUIRED"],
+                "runner_process_exit": 2,
+            }
+    else:
+        raise AssertionError(mutation)
+    _refresh_completed_report_files(module, artifact_root, record)
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(
+            artifact_root / "report.json",
+            tmp_path / f"rejected-{outcome}-{mutation}.md",
+        )
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+def test_completed_report_accepts_exact_missing_lovable_state(tmp_path, outcome):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    assert record["lovable"] == {
+        "completion_or_scope_waiver": False,
+        "connector_used": False,
+        "project_status": "MISSING",
+        "publish_performed": False,
+        "source_uploaded": False,
+        "status": "MISSING",
+        "zero_credit_blocker": (
+            "A blank or zero-credit project is not completion evidence."
+        ),
+    }
+    output = tmp_path / f"accepted-{outcome}-missing-lovable.md"
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", output
+    ) == output
+
+
+def test_completed_report_accepts_verified_regular_lovable_reference(tmp_path):
+    """Rejecting a contract-valid regular reference must fail this positive test."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record, reference = (
+        _completed_full_with_verified_lovable_reference(module, tmp_path)
+    )
+    assert reference.is_file() and not reference.is_symlink()
+    assert record["decision"]["outcome"] == (
+        "TECHNICAL_PASS_HUMAN_DECISION_PENDING"
+    )
+    output = tmp_path / "accepted-verified-lovable-reference.md"
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", output
+    ) == output
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "zero",
+        "negative",
+        "string",
+        "object",
+        "boolean",
+    ),
+)
+def test_completed_report_rejects_forged_review_state(
+    tmp_path, outcome, mutation
+):
+    """Relaxing the exact pending-review state must fail this renderer test."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    reviews = record["reviews"]
+    if mutation == "zero":
+        reviews["p0"] = 0
+    elif mutation == "negative":
+        reviews["p1"] = -1
+    elif mutation == "string":
+        reviews["p2"] = "0"
+    elif mutation == "object":
+        reviews["p0"] = {"count": 0}
+    elif mutation == "boolean":
+        reviews["p1"] = False
+    else:
+        raise AssertionError(mutation)
+    _refresh_completed_report_files(module, artifact_root, record)
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(
+            artifact_root / "report.json",
+            tmp_path / f"rejected-{outcome}-{mutation}-review.md",
+        )
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+def test_completed_report_accepts_exact_pending_review_state(tmp_path, outcome):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    assert record["reviews"] == {
+        "p0": None,
+        "p1": None,
+        "p2": None,
+        "status": "PENDING_INDEPENDENT_EVIDENCE_REVIEW",
+    }
+    output = tmp_path / f"accepted-{outcome}-pending-review.md"
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", output
+    ) == output
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+@pytest.mark.parametrize("mutation", ("missing", "extra", "completed-status"))
+def test_completed_report_retains_exact_review_shape_guards(
+    tmp_path, outcome, mutation
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    if mutation == "missing":
+        record["reviews"].pop("p2")
+    elif mutation == "extra":
+        record["reviews"]["verdict"] = "GO"
+    elif mutation == "completed-status":
+        record["reviews"]["status"] = (
+            "INDEPENDENT_EVIDENCE_REVIEW_COMPLETE"
+        )
+    else:
+        raise AssertionError(mutation)
+    (artifact_root / "report.json").write_bytes(
+        module.canonical_json_bytes(record)
+    )
+
+    with pytest.raises(
+        module.CliMisuseError, match="completed report review state is invalid"
+    ):
+        module.render_completed_report(
+            artifact_root / "report.json",
+            tmp_path / f"rejected-{outcome}-{mutation}-review-shape.md",
+        )
+
+
 @pytest.mark.parametrize("outcome", ("technical", "safety"))
 def test_completed_report_rejects_coherent_alternate_junit_root_for_full_no_go(
     tmp_path, outcome
@@ -6306,7 +6761,8 @@ def test_completed_report_contract_is_not_downgraded_by_final_no_go_reason(
 
 def test_completed_report_accepts_exact_truthful_failure_prefix(tmp_path):
     module = importlib.import_module("scripts.run_interaction_acceptance")
-    artifact_root = tmp_path / "truthful-prefix"
+    run_id = "20260830T160100000000Z-task9"
+    artifact_root = tmp_path / run_id
     command_root = artifact_root / "commands"
     command_root.mkdir(parents=True)
     repo_root = Path(__file__).resolve().parents[1]
@@ -6350,7 +6806,7 @@ def test_completed_report_accepts_exact_truthful_failure_prefix(tmp_path):
         )
     )
     record = module.build_report_record(
-        run_id="20260830T160100Z-truthful-prefix",
+        run_id=run_id,
         generated_at="2026-08-30T16:01:00Z",
         tested_head=resources.git_head,
         decision=decision,
@@ -6416,7 +6872,8 @@ def test_completed_report_accepts_truthful_transient_drift_restored_at_final_cap
 
 
 def _completed_partial_artifact_tree(module, tmp_path, *, safety=False):
-    artifact_root = tmp_path / "acceptance-run"
+    run_id = "20260830T090100000000Z-task9"
+    artifact_root = tmp_path / run_id
     command_root = artifact_root / "commands"
     command_root.mkdir(parents=True)
     repo_root = Path(__file__).resolve().parents[1]
@@ -6473,22 +6930,18 @@ def _completed_partial_artifact_tree(module, tmp_path, *, safety=False):
             tripwires_clean=True,
             contrast_passed=True,
             incident_decisions=None,
-            lovable_complete_or_waived=True,
+            lovable_complete_or_waived=False,
         )
     )
     record = module.build_report_record(
-        run_id=(
-            "20260830T090100Z-safety-partial"
-            if safety
-            else "20260830T090100Z-technical-partial"
-        ),
+        run_id=run_id,
         generated_at="2026-08-30T09:01:00Z",
         tested_head=resources.git_head,
         decision=decision,
         command_results=(result,),
         command_specs=(spec,),
         gate_results=gates,
-        lovable_status="PROVIDED_OR_WAIVED",
+        lovable_status="MISSING",
         external_decision=None,
         baseline_snapshot=resources,
         final_snapshot=final_resources,
@@ -6513,6 +6966,144 @@ def _completed_partial_artifact_tree(module, tmp_path, *, safety=False):
     record["resource_artifacts"] = resource_artifacts
     _refresh_completed_report_files(module, artifact_root, record)
     return artifact_root, record
+
+
+def _noncanonical_completed_source(artifact_root, alias_kind):
+    source = artifact_root / "report.json"
+    if alias_kind == "dotdot":
+        hop = artifact_root.parent / "hop"
+        hop.mkdir()
+        return hop / ".." / artifact_root.name / source.name
+    if alias_kind == "ancestor-symlink":
+        alias = artifact_root.parent / "alias"
+        alias.symlink_to(artifact_root.parent, target_is_directory=True)
+        return alias / artifact_root.name / source.name
+    raise AssertionError(alias_kind)
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+@pytest.mark.parametrize("shape", ("full", "partial"))
+@pytest.mark.parametrize("alias_kind", ("dotdot", "ancestor-symlink"))
+def test_completed_report_rejects_noncanonical_source_alias(
+    tmp_path, outcome, shape, alias_kind
+):
+    """Resolving an untrusted source spelling before validation must fail here."""
+
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    if shape == "full":
+        artifact_root, _record = _completed_full_lovable_missing_artifact_tree(
+            module, tmp_path, safety=outcome == "safety"
+        )
+    else:
+        artifact_root, _record = _completed_partial_artifact_tree(
+            module, tmp_path, safety=outcome == "safety"
+        )
+        control = tmp_path / f"canonical-{outcome}-{shape}-{alias_kind}.md"
+        assert module.render_completed_report(
+            artifact_root / "report.json", control
+        ) == control
+    untrusted_source = _noncanonical_completed_source(artifact_root, alias_kind)
+    output = tmp_path / f"rejected-{outcome}-{shape}-{alias_kind}.md"
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(untrusted_source, output)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("spelling", ("relative", "dot", "redundant-separator"))
+def test_completed_report_rejects_other_noncanonical_source_spelling(
+    tmp_path, monkeypatch, spelling
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, _record = _completed_partial_artifact_tree(module, tmp_path)
+    if spelling == "relative":
+        monkeypatch.chdir(tmp_path)
+        source = f"{artifact_root.name}/report.json"
+    elif spelling == "dot":
+        source = f"{artifact_root}/./report.json"
+    elif spelling == "redundant-separator":
+        source = f"{artifact_root}//report.json"
+    else:
+        raise AssertionError(spelling)
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(source, tmp_path / f"rejected-{spelling}.md")
+
+
+@pytest.mark.parametrize("source_kind", ("symlink", "directory"))
+def test_completed_report_retains_terminal_source_type_guards(tmp_path, source_kind):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, _record = _completed_partial_artifact_tree(module, tmp_path)
+    source = artifact_root / "report.json"
+    payload = source.read_bytes()
+    source.unlink()
+    if source_kind == "symlink":
+        target = artifact_root.parent / "report-target.json"
+        target.write_bytes(payload)
+        source.symlink_to(target)
+    elif source_kind == "directory":
+        source.mkdir()
+    else:
+        raise AssertionError(source_kind)
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(source, tmp_path / f"rejected-{source_kind}.md")
+
+
+def _relocated_completed_tree_for_cli(module, tmp_path):
+    fixture_root = tmp_path / "fixture"
+    fixture_root.mkdir()
+    artifact_root, record = _completed_partial_artifact_tree(
+        module, fixture_root
+    )
+    repo_root = tmp_path / "cli-repository"
+    relocated_root = (
+        repo_root / "artifacts" / "acceptance" / record["run_id"]
+    )
+    relocated_root.parent.mkdir(parents=True)
+    artifact_root.rename(relocated_root)
+    _rewrite_recorded_pytest_junit_roots(record, relocated_root)
+    _refresh_completed_report_files(module, relocated_root, record)
+    (repo_root / "docs").mkdir()
+    return repo_root, relocated_root
+
+
+def test_render_report_cli_accepts_one_canonical_absolute_source(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root, artifact_root = _relocated_completed_tree_for_cli(module, tmp_path)
+
+    assert module.render_report_from_cli(
+        repo_root, str(artifact_root / "report.json")
+    ) == 0
+
+
+@pytest.mark.parametrize(
+    "alias_kind", ("relative", "dotdot", "ancestor-symlink")
+)
+def test_render_report_cli_preserves_and_rejects_noncanonical_source_alias(
+    tmp_path, alias_kind
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root, artifact_root = _relocated_completed_tree_for_cli(module, tmp_path)
+    acceptance_root = artifact_root.parent
+    if alias_kind == "relative":
+        source_argument = (
+            f"artifacts/acceptance/{artifact_root.name}/report.json"
+        )
+    elif alias_kind == "dotdot":
+        hop = acceptance_root / "hop"
+        hop.mkdir()
+        source_argument = str(
+            hop / ".." / artifact_root.name / "report.json"
+        )
+    elif alias_kind == "ancestor-symlink":
+        alias = acceptance_root / "alias"
+        alias.symlink_to(acceptance_root, target_is_directory=True)
+        source_argument = str(alias / artifact_root.name / "report.json")
+    else:
+        raise AssertionError(alias_kind)
+
+    assert module.render_report_from_cli(repo_root, source_argument) != 0
 
 
 @pytest.mark.parametrize("outcome", ("technical", "safety"))
@@ -7020,7 +7611,8 @@ def test_unit7_render_report_is_one_way_canonical_and_rejects_noncanonical_json(
     assert module.render_completed_report(source, output) == output
     assert output.read_bytes() == markdown
 
-    noncanonical = tmp_path / "noncanonical.json"
+    noncanonical = tmp_path / "noncanonical-source" / "report.json"
+    noncanonical.parent.mkdir()
     noncanonical.write_text(
         __import__("json").dumps(valid_record, indent=2), encoding="utf-8"
     )
@@ -7040,7 +7632,8 @@ def test_unit7_render_report_is_one_way_canonical_and_rejects_noncanonical_json(
             module.canonical_json_bytes(valid_record)
         )
         malformed_record.pop(field)
-        malformed = tmp_path / f"missing-{field}.json"
+        malformed = tmp_path / f"missing-{field}" / "report.json"
+        malformed.parent.mkdir()
         malformed.write_bytes(module.canonical_json_bytes(malformed_record))
         with pytest.raises(module.CliMisuseError, match="schema"):
             module.render_completed_report(

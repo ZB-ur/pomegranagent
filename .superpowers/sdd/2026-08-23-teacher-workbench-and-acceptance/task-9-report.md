@@ -4,11 +4,11 @@ Date: 2026-08-29–30 (Asia/Shanghai)
 
 ## Verdict
 
-**Current status: NO-GO. The first Unit 8 artifact has exact passing technical
-evidence, but an independent evidence review found one P1 completed-report
-verifier gap. Commit A and that artifact are invalid release candidates; a
-reviewed replacement Commit A-prime and a complete fresh Unit 8 run are
-required.**
+**Current status: NO-GO. Commit A-prime completed one exact 22-command Unit 8
+run with truthful Evidence/Safety bytes, but successive independent artifact-
+integrity reviews invalidated that verifier candidate. The current scoped
+review is Contract/Code/Safety NO-GO, Stage GO (`P0=0, P1=2, P2=1`);
+A-double-prime is not authorized and no replacement Unit 8 run has started.**
 
 The eighth pre-Commit-A Contract/Code/Safety/Stage review returned **GO,
 P0=0, P1=0, P2=0**. Commit A
@@ -907,6 +907,164 @@ resource drift or tripwire fired.
   authorization and creation of a new Commit A-prime, and a complete fresh
   Unit 8 run against that exact clean HEAD.
 
+### Unit 8.3: A-prime evidence-review integrity ruling
+
+- The scoped re-review authorized non-amend replacement Commit A-prime
+  `11bc0d6488b1df6c48d92f9628554834adbe5af6`. Its one canonical Unit 8 run,
+  `20260830T033216409784Z-task9`, completed all 22 commands successfully with
+  1,406/1,406 parsed tests, all 14 gates PASS, authenticated tripwires PASS,
+  and byte-identical protected resources. The exact artifact therefore remains
+  truthful Evidence/Safety evidence.
+- Independent review nevertheless returned Artifact integrity/Release NO-GO,
+  exact `P0=0, P1=3, P2=1`; Commit B was not authorized. Canonically rehashed
+  relocated copies could still forge external authority/incident acceptance,
+  disconnect `run_id` and malformed `generated_at` from the artifact root,
+  erase or status-forge the missing Lovable blocker, and replace pending review
+  nulls with arbitrary counts/types.
+- Contract ruling before implementation: canonical completed runner evidence
+  keeps `external_decision=null`; self-reported authority never authorizes an
+  incident or waiver. `run_id` must equal the trusted artifact-directory
+  basename in canonical microsecond UTC form and `generated_at` must be its
+  canonical whole-second UTC timestamp. With no verifier-authenticated regular
+  prototype reference or separately authorized owner waiver, Lovable remains
+  the exact frozen `MISSING` state. Reviews remain exact
+  `p0/p1/p2=null` plus `PENDING_INDEPENDENT_EVIDENCE_REVIEW`, because the
+  independent verdict occurs only after the artifact is frozen.
+- External-decision coverage produced genuine RED **4 failed, 2 passed, 342
+  deselected**: arbitrary/incomplete and fully forged verified-owner objects
+  were accepted for both technical and safety NO-GO while exact `null` controls
+  passed. Completed rendering now requires exact `null`; GREEN was **6 passed,
+  342 deselected**.
+- Provenance coverage produced genuine RED **14 failed, 2 passed, 348
+  deselected** across valid-but-alternate and malformed run IDs, malformed and
+  impossible timestamps, noncanonical offset/fraction forms, and run-time
+  mismatches for technical and safety NO-GO. The trusted artifact basename,
+  exact `YYYYMMDDTHHMMSSffffffZ-task9` form, canonical UTC-seconds timestamp,
+  and equality after microsecond truncation are now one fail-closed contract.
+  GREEN was **16 passed, 348 deselected**.
+- Lovable forgery coverage produced genuine RED **10 failed, 2 passed, 364
+  deselected**: blocker removal, either status-only substitution, completion-
+  only substitution, and a fully recomputed fake provided/waived state were
+  accepted for technical and safety NO-GO. Exact missing controls passed.
+  GREEN was **12 passed, 364 deselected**. A separate valid-reference positive
+  control then produced genuine RED **1 failed, 394 deselected** because the
+  first minimal rule rejected every provided state. The final state machine
+  accepts provision only with a nonsymlink regular Task 7 nine-line reference
+  under the artifact-root-derived repository, including a credential/query/
+  fragment-free HTTPS `lovable.app` URL, lowercase commit, acceptable checklist
+  result, and bounded observation; it never treats that as an owner waiver.
+  That positive control passed **1 passed, 394 deselected**.
+- Review coverage initially reported **16 failed, 2 passed**, but six cases
+  were harness-only: missing/extra/status mutations were already rejected while
+  the fixture attempted to regenerate Markdown. After separating those existing
+  shape guards, genuine RED was **10 failed, 8 passed, 376 deselected** for
+  zero, negative, string, object, and boolean P0/P1/P2 substitutions across
+  technical and safety outcomes. Exact pending nulls and the existing guards
+  passed. Completed artifacts now require all three values to be identity-
+  exact `null`; GREEN was **18 passed, 376 deselected**.
+- The combined new matrix passed **53 passed, 342 deselected**. The prior
+  decision-independent 15-case matrix remained **15 passed, 380 deselected**,
+  and full/partial coherent JUnit-root attacks remained **4 passed, 391
+  deselected**. Production rendering of untouched A-prime artifact
+  `20260830T033216409784Z-task9` passed: source JSON SHA-256 remained
+  `7cb24e67659bd2777eba84a8fa0e0865008ab52d94cdba452eafbd0d48c757a7`,
+  source/rendered Markdown remained
+  `ea061b6cd4ba09931bee98ca37bfe59690870c6d5c60a6fa05b900e5b33cf5a6`,
+  and source bytes were unchanged.
+- Complete pure runner verification with `--noconftest`, `xfail_strict`, and
+  separate JUnit outputs passed twice: **395 passed in 17.48s** and **395
+  passed in 17.45s**. Read-only AST parsing was `syntax_ok=2`.
+- Every adjacent guard retained ResourceSnapshot SHA-256
+  `0f37b8a63b15109716092195d468e4799bf90663030d546af2c9d9cdd293c0df`,
+  SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  database SHA-256
+  `f04f7a8928ae519dbf28fb4c6eaedaba35f1c65354bb7fd69074a419d5800a56`
+  with size `57344` and `mtime_ns=1787412719082747809`, log SHA-256
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`
+  with size `2961585` and `mtime_ns=1787939944391406243`, TTS digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  protected user-path digest
+  `8015d0f97bbcfd90434406f8e2422754c2e1cf59870ac7b1f059e0ae771207d6`,
+  and `unsafe=[]`. No provider, TTS, external network, real service, browser,
+  backend, Node, Lovable connector, or canonical Unit 8 command was started.
+  Explicit staging changed only the expected porcelain encoding: the final
+  staged ResourceSnapshot SHA-256 is
+  `d28853c56589e46edfa5e1437b2c4bc56ae535c1533604f5f8273eab29a295dc`,
+  with porcelain SHA-256
+  `da810b76d727958d9e0d5e1f1f154934beab90a8bb83a951142fea5bcaaaf4bd`
+  and size `1262`; every protected byte/metadata field above remains exact and
+  `unsafe=[]`.
+- The original A-prime artifact is not modified or discarded, but its verifier
+  candidate is invalid. Status remains NO-GO pending fresh scoped review, a
+  non-amend Commit A-double-prime, and a complete fresh Unit 8 rerun against
+  that exact replacement HEAD.
+
+### Unit 8.4: raw-source and Lovable-generation review ruling
+
+- The next independent review returned **Contract/Code/Safety NO-GO, Stage GO;
+  P0=0, P1=2, P2=1**; A-double-prime was not authorized. P1-1 showed that direct
+  rendering accepted a `hop/../<run_id>/report.json` spelling and an ancestor-
+  symlink alias because production read the raw candidate, resolved only its
+  parent for record validation, and checked only terminal/immediate tree
+  entries. CLI resolution erased the attack spelling before the public
+  renderer saw it. P1-2 showed that runner generation trusted an optional
+  caller boolean or symlink-following `Path.is_file()` to label Lovable
+  provided before strict completed validation. P2 corrected the stale headline
+  above: A-prime and its one Unit 8 run exist, but are invalid evidence
+  candidates.
+- Contract ruling before implementation: the public renderer must reject every
+  noncanonical original source spelling before its first read, including
+  relative, dot-segment, redundant, ancestor-symlink, terminal-symlink,
+  nonregular, and missing candidates, then use one strict canonical source/root
+  consistently. The runner must ignore the compatibility boolean and derive
+  Lovable only through the completed verifier's strict regular-nonsymlink exact
+  nine-line reference check. Missing, malformed, and symlinked references are
+  exact `MISSING`; a genuine valid reference is exact provided evidence. Neither
+  seam can manufacture owner authority or a waiver.
+- The raw-source matrix exercised production full and truthful-prefix
+  technical/safety rendering, relative/dot/redundant spellings, terminal type
+  guards, canonical relocation, and CLI dispatch. It produced genuine RED
+  **14 failed, 3 passed, 400 deselected**: every dot-dot/ancestor-alias attack,
+  the other three noncanonical spellings, and all three CLI aliases were
+  accepted; the terminal-type and canonical controls passed. Minimal production
+  validation now checks the original absolute normalized spelling, every
+  nonsymlink directory ancestor, regular nonsymlink terminal, strict canonical
+  identity, and one `O_NOFOLLOW` descriptor read with pre/post file identity.
+  CLI no longer joins or resolves an untrusted source before that boundary.
+  Focused GREEN was **17 passed, 400 deselected**.
+- The controlled real-`run_acceptance` Lovable matrix produced genuine RED
+  **4 failed, 1 passed, 412 deselected**: caller `true` overrode missing and
+  malformed references, `Path.is_file()` followed a symlink, and caller `false`
+  suppressed a genuine valid reference. Production now ignores the compatibility
+  boolean and derives status only with `_verified_lovable_reference_is_valid`
+  against the actual artifact-root-derived repository. Focused GREEN was
+  **5 passed, 412 deselected**.
+- Regression remained GREEN: the prior authority/provenance/Lovable/review
+  matrix was **53 passed, 364 deselected**; the original decision-independent
+  matrix was **15 passed, 402 deselected**; and coherent full/partial JUnit-root
+  attacks were **4 passed, 413 deselected**. The first complete pure run exposed
+  two stale harness assumptions and was honestly **2 failed, 415 passed**: one
+  inventory test still used caller `true` instead of a real valid reference,
+  and one JSON-shape test used a filename now rejected by the earlier source
+  boundary. After migrating only those fixtures, focused confirmation was
+  **2 passed, 415 deselected** and the complete pure runner passed twice:
+  **417 passed in 18.24s** and **417 passed in 17.76s**. Read-only AST parsing
+  was `syntax_ok=2`.
+- Every adjacent resource guard retained SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  database SHA-256
+  `f04f7a8928ae519dbf28fb4c6eaedaba35f1c65354bb7fd69074a419d5800a56`
+  with size `57344` and `mtime_ns=1787412719082747809`, log SHA-256
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`
+  with size `2961585` and `mtime_ns=1787939944391406243`, and TTS digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`;
+  every capture had `unsafe=[]`. No provider, TTS, network, real service,
+  backend, browser, Node, Lovable connector, or canonical Unit 8 command ran.
+- Status remains **NO-GO** pending fresh scoped review, authorization and
+  creation of non-amend A-double-prime, and a complete new Unit 8 run against
+  that exact clean HEAD. Neither existing Unit 8 artifact was modified.
+
 ## Final policy and staging evidence
 
 - No `pytest.skip`, `pytest.xfail`, skip/skipif/xfail marker exists in the
@@ -935,9 +1093,9 @@ resource drift or tripwire fired.
 - The seventh-review final read-only AST syntax check passed for both changed
   Python files (`syntax_ok=2`), and the unstaged `git diff --check` exited `0`
   before exact restaging.
-- The replacement-A repair's exact cached path list and
+- The A-double-prime repair's exact cached path list and
   `git diff --cached --check` are recorded below after explicit staging; the
-  already-invalidated Commit A is not amended and no repair commit is made in
+  invalidated Commit A-prime is not amended and no repair commit is made in
   this task.
 
 ## Historical incidents carried forward unchanged
@@ -955,21 +1113,22 @@ No agent, runner, or reviewer can accept these risks for the release owner.
 
 ## Residual risks and independent-review handoff
 
-- The first Unit 8 execution completed, but its Artifact integrity NO-GO
-  invalidates Commit A and all release use of that run. Replacement Unit 8 and
-  Unit 9 evidence-only reporting have not started and are not claimed.
+- Both the original Commit A Unit 8 execution and the replacement A-prime Unit
+  8 execution completed, but their respective Artifact integrity NO-GO verdicts
+  invalidate release use of both candidates. A-double-prime Unit 8 and Unit 9
+  evidence-only reporting have not started and are not claimed.
 - Lovable remains a blank private bootstrap without a valid reviewed
   `prototype-reference.md`; no scope waiver has been authorized.
 - Historical incident disposition remains human-owned and unresolved.
-- Commit A exists at `e2d3b2d795b76b24895dbac5fa2b3797c5ad9be5` but is an
-  invalid candidate. The current four-path repair stage requires independent
-  Code/Safety/Stage review, a new Commit A-prime, and a complete replacement
-  Unit 8 run. Any new P0/P1 invalidates that repair verdict and requires another
-  focused RED/GREEN loop.
+- Commit A-prime exists at `11bc0d6488b1df6c48d92f9628554834adbe5af6` but is now an
+  invalid verifier candidate. The current four-path repair stage requires
+  independent Code/Safety/Stage review, a new non-amend Commit A-double-prime,
+  and a complete replacement Unit 8 run. Any new P0/P1 invalidates that repair
+  verdict and requires another focused RED/GREEN loop.
 
 ### Exact cached paths after staging
 
-The final explicit replacement-A repair cached-name check returned exactly
+The final explicit A-double-prime repair cached-name check returned exactly
 these four paths:
 
 ```text
