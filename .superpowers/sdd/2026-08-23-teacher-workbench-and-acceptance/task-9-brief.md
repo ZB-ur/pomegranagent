@@ -965,6 +965,90 @@ per-command resources, gates, tripwire state, and Lovable state. A truthful
 partial technical report remains renderable only when it contains no safety
 fact; forged decision types, exits, or reasons are rejected.
 
+### Post-Unit-8 completed-report verifier amendment
+
+The first Unit 8 evidence review exposed one decision-dependent verifier gap:
+the exact execution contract above was enforced only when the recomputed
+decision was `TECHNICAL_PASS_HUMAN_DECISION_PENDING`. A completed
+`TECHNICAL_NO_GO` or `SAFETY_NO_GO` record could therefore retain internally
+consistent hashes while substituting a timeout or argv, replacing the global
+resource baseline with a self-consistent per-command pair, downgrading a
+project-conftest command to `--noconftest`, removing its authenticated KEY
+sidecar, omitting successful suite evidence, or claiming later commands ran
+after an earlier failure. Lovable absence, incident status, a command failure,
+or a safety outcome is never authority to relax these immutable fields.
+
+Every completed report, independent of its final decision, now satisfies this
+execution contract before artifact rendering:
+
+- commands are a nonempty exact ordered prefix of the 22 frozen
+  `CommandSpec`s, including IDs, argv, integer timeouts, conftest modes, and
+  ordered stdout/stderr/JUnit paths. The expected specs use only the canonical
+  renderer source root described below, never an absolute path recovered from
+  recorded argv;
+- every command before the last is `SUCCESS`; the last may be non-success, but
+  a successful last command is legal only for the complete 22-command run;
+- every command `before_snapshot` equals the one global baseline, every prior
+  successful `after_snapshot` equals it, and final resource drift remains
+  truthful safety evidence. A transient command-level drift may remain in the
+  last after-snapshot even when the later final capture has returned to the
+  baseline;
+- every successful command has one nonzero valid suite bound to its exact
+  artifact bytes. A final failed JUnit command may truthfully retain or omit
+  its JUnit plus parsed evidence together; a failed TAP command has no parsed
+  TAP suite because production parses TAP only after command success;
+- the five internal evidence rows are recomputed exactly from the executed
+  prefix, suites, global resources, tested HEAD/version, tripwire state, and
+  browser-DB evidence. Structured-property completeness is enforced for every
+  successful executed suite;
+- the frozen project conftest mode cannot be downgraded. Consequently completed
+  artifact verification still requires the authenticated command-local KEY
+  sidecar for every project pytest JUnit, including technical and safety
+  outcomes.
+
+This rule deliberately preserves truthful early-stop artifacts: they use the
+exact prefix through the first technical or contained safety failure and never
+claim a later command. Incomplete process cleanup still produces no completed
+report at all. Any completed-report execution-contract mismatch fails closed as
+`REPORT_INTEGRITY_FAILURE`/`CliMisuseError`; it cannot be hidden behind
+`LOVABLE_DELIVERABLE_MISSING`, unresolved incidents, or any other decision
+reason.
+
+Commit A `e2d3b2d795b76b24895dbac5fa2b3797c5ad9be5` and its first Unit 8
+artifact are invalid release candidates because this verifier gap was found
+after that run. The repair must be a new reviewed implementation Commit A-prime
+on top (never an amend), followed by a complete fresh Unit 8 run against that
+exact clean HEAD. The old ignored artifact remains untouched diagnostic
+evidence and may not be rendered into Commit B or reused for release.
+
+#### Trusted completed-artifact root clarification
+
+The first scoped replacement-A review found that decision-independent spec
+validation was still rooted in the record itself: it recovered the runner's
+absolute `--junitxml` parent and then built every expected `CommandSpec` from
+that untrusted value. A coherent rewrite of all pytest JUnit argv roots could
+therefore pass even though the descriptor-bound artifact bytes remained under
+the renderer's real source directory.
+
+For completed rendering, the sole spec trust anchor is now the canonical
+`source_path.parent.resolve()` directory of the `report.json` bytes actually
+read by `render_completed_report`. That trusted directory is passed explicitly
+through completed-record validation and is used to construct every full or
+partial expected `CommandSpec`. No recorded argv, descriptor, report field, or
+first-command convention may supply or override the root. The existing
+artifact-tree `lstat` checks still reject a symlink/nonregular `report.json`, a
+symlink/non-directory parent or `commands` directory, and unexpected paths or
+entries; canonicalization does not weaken or replace those fail-closed checks.
+
+This root binding applies equally to complete technical/safety NO-GO records
+and truthful early-stop technical/safety prefixes. Rewriting one or every
+recorded `--junitxml` root is `REPORT_INTEGRITY_FAILURE`, while the otherwise
+identical record rooted at the directory actually containing `report.json`
+remains renderable. The scoped review was Contract/Code/Safety NO-GO and Stage
+GO (`P0=0, P1=1, P2=0`), so Commit A-prime remains unauthorized pending a
+fresh scoped re-review; the complete replacement Unit 8 run remains mandatory
+after that reviewed commit exists.
+
 The report `tested_head` is not permanently bound to `FROZEN_START_HEAD`.
 Before Commit A it may equal that start hash; after Commit A it must equal the
 exact lowercase 40-hex candidate in the complete global before/after snapshot

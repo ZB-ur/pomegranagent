@@ -1877,6 +1877,143 @@ def _validate_pending_structured_properties(
                 raise CliMisuseError("completed report structured evidence is invalid")
 
 
+def _completed_report_execution_contract_is_valid(
+    *,
+    record: Mapping[str, object],
+    commands: list[Mapping[str, object]],
+    results: tuple[CommandResult, ...],
+    suites: Mapping[str, SuiteEvidence],
+    internal: tuple[InternalEvidence, ...],
+    artifact_root: Path | None,
+) -> bool:
+    try:
+        expected_ids = tuple(COMMAND_TIMEOUTS)
+        command_ids = tuple(command["subcommand"] for command in commands)
+        if (
+            not commands
+            or len(commands) > len(expected_ids)
+            or command_ids != expected_ids[: len(commands)]
+            or any(
+                result.classified_outcome is not ClassifiedOutcome.SUCCESS
+                for result in results[:-1]
+            )
+            or (
+                len(commands) < len(expected_ids)
+                and results[-1].classified_outcome is ClassifiedOutcome.SUCCESS
+            )
+        ):
+            return False
+        expected_artifact_root = (
+            Path(artifact_root).resolve()
+            if artifact_root is not None
+            else Path("/__task9_in_memory_artifact_root__")
+        )
+        expected_specs = build_command_specs(
+            Path(__file__).resolve().parents[1], expected_artifact_root
+        )[: len(commands)]
+        recorded_junit_parent: Path | None = None
+        expected_suite_ids: set[str] = set()
+        for order, (command, result, spec) in enumerate(
+            zip(commands, results, expected_specs, strict=True), start=1
+        ):
+            expected_junit_path = f"commands/{order:02d}-{spec.command_id}.junit.xml"
+            actual_argv = list(command["argv"])
+            if artifact_root is None:
+                normalized_argv = []
+                for argument in actual_argv:
+                    if not argument.startswith("--junitxml="):
+                        normalized_argv.append(argument)
+                        continue
+                    recorded_junit = Path(
+                        argument.removeprefix("--junitxml=")
+                    )
+                    if not recorded_junit.is_absolute():
+                        return False
+                    parent = recorded_junit.parent.resolve()
+                    if recorded_junit_parent is None:
+                        recorded_junit_parent = parent
+                    elif parent != recorded_junit_parent:
+                        return False
+                    normalized_argv.append(
+                        f"--junitxml={expected_artifact_root / recorded_junit.name}"
+                    )
+                actual_argv = normalized_argv
+            if (
+                actual_argv != list(spec.argv)
+                or command["timeout_seconds"] != spec.timeout_seconds
+                or command["conftest_mode"] != spec.conftest_mode.value
+                or command["stdout"]["path"]
+                != f"commands/{order:02d}-{spec.command_id}.stdout.log"
+                or command["stderr"]["path"]
+                != f"commands/{order:02d}-{spec.command_id}.stderr.log"
+                or (
+                    spec.evidence_format is EvidenceFormat.TAP
+                    and command["junit"] is not None
+                )
+            ):
+                return False
+            evidence = suites.get(spec.command_id)
+            if spec.evidence_format is EvidenceFormat.JUNIT:
+                if command["junit"] is not None:
+                    if command["junit"]["path"] != expected_junit_path:
+                        return False
+                    expected_suite_ids.add(spec.command_id)
+                elif evidence is not None:
+                    return False
+            elif result.classified_outcome is not ClassifiedOutcome.SUCCESS:
+                if evidence is not None:
+                    return False
+            else:
+                expected_suite_ids.add(spec.command_id)
+            if result.classified_outcome is ClassifiedOutcome.SUCCESS and (
+                evidence is None
+                or not evidence.valid
+                or evidence.total <= 0
+                or (
+                    spec.evidence_format is EvidenceFormat.JUNIT
+                    and command["junit"] is None
+                )
+            ):
+                return False
+        if set(suites) != expected_suite_ids:
+            return False
+
+        resources = record["resources"]
+        baseline = _report_resource_snapshot(resources["before"])
+        final_snapshot = _report_resource_snapshot(resources["after"])
+        if (
+            _snapshot_is_unsafe(baseline)
+            or any(
+                result.before_snapshot != baseline for result in results
+            )
+            or any(result.after_snapshot != baseline for result in results[:-1])
+            or (
+                not _snapshots_are_unchanged(baseline, final_snapshot)
+                and results[-1].after_snapshot != final_snapshot
+            )
+        ):
+            return False
+        expected_internal = _run_internal_evidence(
+            command_results=results,
+            all_evidence=suites,
+            baseline=baseline,
+            final_snapshot=final_snapshot,
+            version_exact=True,
+        )
+        if internal != expected_internal:
+            return False
+        _validate_pending_structured_properties(
+            {
+                result.subcommand: suites[result.subcommand]
+                for result in results
+                if result.classified_outcome is ClassifiedOutcome.SUCCESS
+            }
+        )
+        return True
+    except (CliMisuseError, IndexError, KeyError, TypeError, ValueError):
+        return False
+
+
 def _pending_report_contract_is_valid(
     *,
     record: Mapping[str, object],
@@ -1885,93 +2022,22 @@ def _pending_report_contract_is_valid(
     suites: Mapping[str, SuiteEvidence],
     internal: tuple[InternalEvidence, ...],
     recomputed_gates: tuple[GateResult, ...],
+    artifact_root: Path | None,
 ) -> bool:
     try:
-        expected_ids = tuple(COMMAND_TIMEOUTS)
-        if tuple(command["subcommand"] for command in commands) != expected_ids:
-            return False
-        runner_junit = next(
-            (
-                argument.removeprefix("--junitxml=")
-                for argument in commands[0]["argv"]
-                if argument.startswith("--junitxml=")
-            ),
-            None,
-        )
-        if runner_junit is None or Path(runner_junit).name != "runner.junit.xml":
-            return False
-        artifact_root = Path(runner_junit).parent.resolve()
-        expected_specs = build_command_specs(
-            Path(__file__).resolve().parents[1], artifact_root
-        )
-        for order, (command, result, spec) in enumerate(
-            zip(commands, results, expected_specs, strict=True), start=1
-        ):
-            expected_junit_path = f"commands/{order:02d}-{spec.command_id}.junit.xml"
-            if (
-                command["argv"] != list(spec.argv)
-                or command["timeout_seconds"] != spec.timeout_seconds
-                or command["conftest_mode"] != spec.conftest_mode.value
-                or command["stdout"]["path"]
-                != f"commands/{order:02d}-{spec.command_id}.stdout.log"
-                or command["stderr"]["path"]
-                != f"commands/{order:02d}-{spec.command_id}.stderr.log"
-                or (
-                    spec.evidence_format is EvidenceFormat.JUNIT
-                    and (
-                        command["junit"] is None
-                        or command["junit"]["path"] != expected_junit_path
-                    )
-                )
-                or (
-                    spec.evidence_format is EvidenceFormat.TAP
-                    and command["junit"] is not None
-                )
-                or result.classified_outcome is not ClassifiedOutcome.SUCCESS
-            ):
-                return False
-            evidence = suites.get(spec.command_id)
-            if evidence is None or not evidence.valid or evidence.total <= 0:
-                return False
-        if set(suites) != set(expected_ids):
-            return False
-
-        resources = record["resources"]
-        baseline = _report_resource_snapshot(resources["before"])
-        final_snapshot = _report_resource_snapshot(resources["after"])
-        if (
-            not _snapshots_are_unchanged(baseline, final_snapshot)
-            or any(
-                not _snapshots_are_unchanged(
-                    result.before_snapshot, result.after_snapshot
-                )
-                or result.before_snapshot != baseline
-                for result in results
-            )
-        ):
-            return False
-        expected_internal_keys = tuple(
-            (item.source, item.evidence_id)
-            for item in INTERNAL_EVIDENCE_REQUIREMENTS
-        )
-        if (
-            tuple((item.source, item.evidence_id) for item in internal)
-            != expected_internal_keys
-            or any(
-                not item.passed or not item.fresh or not item.valid
-                for item in internal
-            )
-        ):
-            return False
-        _validate_pending_structured_properties(suites)
         lovable = record["lovable"]
-        tested_head = record["tested_head"]
         return bool(
-            re.fullmatch(r"[0-9a-f]{40}", tested_head) is not None
-            and _snapshot_git_head(baseline) == tested_head
+            _completed_report_execution_contract_is_valid(
+                record=record,
+                commands=commands,
+                results=results,
+                suites=suites,
+                internal=internal,
+                artifact_root=artifact_root,
+            )
+            and len(commands) == len(COMMAND_TIMEOUTS)
             and all(
-                _snapshot_git_head(result.before_snapshot) == tested_head
-                and _snapshot_git_head(result.after_snapshot) == tested_head
+                result.classified_outcome is ClassifiedOutcome.SUCCESS
                 for result in results
             )
             and all(gate.status is GateStatus.PASS for gate in recomputed_gates)
@@ -1987,7 +2053,10 @@ def _pending_report_contract_is_valid(
 
 
 def _validate_report_cross_fields(
-    record: Mapping[str, object], commands: list[Mapping[str, object]]
+    record: Mapping[str, object],
+    commands: list[Mapping[str, object]],
+    *,
+    artifact_root: Path | None,
 ) -> None:
     raw_suites = record["suite_evidence"]
     if (
@@ -2117,6 +2186,7 @@ def _validate_report_cross_fields(
         suites=suites,
         internal=internal,
         recomputed_gates=recomputed_gates,
+        artifact_root=artifact_root,
     )
     if (
         recomputed_decision.outcome
@@ -2155,7 +2225,10 @@ def _valid_artifact_record(value: object) -> bool:
 
 
 def _validate_report_record_shape(
-    record: Mapping[str, object], *, completed: bool
+    record: Mapping[str, object],
+    *,
+    completed: bool,
+    artifact_root: Path | None = None,
 ) -> None:
     if not isinstance(record, Mapping):
         raise CliMisuseError("completed report JSON has the wrong schema")
@@ -2313,7 +2386,30 @@ def _validate_report_record_shape(
         "commit_b": "evidence only",
     }:
         raise CliMisuseError("completed report commit roles are invalid")
-    _validate_report_cross_fields(record, commands)
+    if completed and artifact_root is None:
+        raise CliMisuseError("completed report artifact root is invalid")
+    _validate_report_cross_fields(
+        record, commands, artifact_root=artifact_root
+    )
+    if completed:
+        suites = {
+            command_id: _report_suite_evidence(value)
+            for command_id, value in record["suite_evidence"].items()
+        }
+        internal = tuple(
+            _report_internal_evidence(value)
+            for value in record["internal_evidence"]
+        )
+        results = tuple(_report_command_result(command) for command in commands)
+        if not _completed_report_execution_contract_is_valid(
+            record=record,
+            commands=commands,
+            results=results,
+            suites=suites,
+            internal=internal,
+            artifact_root=artifact_root,
+        ):
+            raise CliMisuseError("completed report execution contract is invalid")
     if "resource_artifacts" in record:
         artifacts = record["resource_artifacts"]
         if (
@@ -5686,7 +5782,15 @@ def render_completed_report(source: Path, output: Path) -> Path:
         raise CliMisuseError("completed report JSON is unreadable") from error
     if not isinstance(record, dict) or canonical_json_bytes(record) != payload:
         raise CliMisuseError("completed report JSON is not canonical")
-    _validate_report_record_shape(record, completed=True)
+    try:
+        trusted_artifact_root = source_path.parent.resolve()
+    except OSError as error:
+        raise CliMisuseError("completed report artifact root is invalid") from error
+    _validate_report_record_shape(
+        record,
+        completed=True,
+        artifact_root=trusted_artifact_root,
+    )
     _verify_completed_artifact_tree(record, source_path)
     markdown_bytes = render_report_markdown(record).encode("utf-8")
     expected = _binary_artifact_record("report.md", markdown_bytes)

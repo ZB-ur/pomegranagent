@@ -4,6 +4,55 @@ Date: 2026-08-29–30 (Asia/Shanghai)
 
 ## Verdict
 
+**Current status: NO-GO. The first Unit 8 artifact has exact passing technical
+evidence, but an independent evidence review found one P1 completed-report
+verifier gap. Commit A and that artifact are invalid release candidates; a
+reviewed replacement Commit A-prime and a complete fresh Unit 8 run are
+required.**
+
+The eighth pre-Commit-A Contract/Code/Safety/Stage review returned **GO,
+P0=0, P1=0, P2=0**. Commit A
+`e2d3b2d795b76b24895dbac5fa2b3797c5ad9be5` was then created and the canonical
+22-command Unit 8 runner executed once, strictly serially, against that exact
+clean HEAD. Run `20260830T013514512330Z-task9` produced 22/22 successful command
+records, all 14 gates PASS, 1,386/1,386 parsed tests passing, unchanged protected
+resources, and no authenticated tripwire event. Its runner correctly returned
+`TECHNICAL_NO_GO` solely because the Lovable deliverable/waiver is missing.
+
+Independent post-run review classified the original bytes as **Evidence GO,
+Safety GO, Artifact integrity NO-GO; P0=0, P1=1, P2=0**. The P1 is reproducible:
+after canonical re-rendering and descriptor rehashing, a `TECHNICAL_NO_GO`
+record could change command 1 timeout `300 -> 301`, replace command 1's
+before/after log size together with a self-consistent non-global pair, or change
+browser conftest mode `project -> noconftest` and remove the authenticated KEY
+sidecar. The renderer accepted all three because the exact execution contract
+was called only for a recomputed pending outcome. The original artifact itself
+contains the correct frozen fields and remains untouched, but its verifier was
+not strong enough to make it release evidence.
+
+The focused repair below makes the completed execution contract independent of
+the final decision while retaining truthful early-stop prefixes. The existing
+Commit A is not amended. A new implementation commit must replace it as the
+tested A-prime boundary, and Unit 8 must run again from command 1 against that
+exact clean HEAD. No old command artifact, hash, count, report, or reviewer
+verdict may be carried into the replacement run. Backend, database-safety,
+browser, Node, Lovable, and the canonical 22-command runner have not been rerun
+in this repair loop.
+
+The first scoped review of that replacement-A repair was itself **Contract /
+Code / Safety NO-GO, Stage GO; P0=0, P1=1, P2=0**. The remaining P1 was a
+coherent absolute-root substitution: the validator built its expected specs
+from the untrusted runner `--junitxml` value rather than the directory of the
+`report.json` it was actually rendering. Unit 8.2 records the focused root-
+anchor repair. No Commit A-prime is authorized before a clean scoped re-review.
+
+The three historical incidents still require explicit release-owner
+disposition, and the Lovable prototype/reference or an explicit owner waiver is
+still missing. Even after a replacement technical run, final release therefore
+remains **NO-GO** unless those human-owned blockers are resolved.
+
+### Historical pre-Commit-A verdict snapshot
+
 **NO-GO pending a fresh independent Code/Safety/Stage review. The
 seventh-review repair candidate passed the affected local gates described below,
 but it is not review-approved, committed, or release GO.**
@@ -73,8 +122,13 @@ Overall release therefore remains **NO-GO**.
 
 ## Frozen identity, authorization, and boundaries
 
-- Required and current implementation HEAD before Commit A:
+- Historical required implementation HEAD before Commit A:
   `89b3459973bb7cd6e8be43b1251ac6cdb5dfa292`.
+- First Commit A: `e2d3b2d795b76b24895dbac5fa2b3797c5ad9be5`;
+  independently review-approved before Unit 8, then invalidated by the
+  post-run artifact-integrity P1. It is not amended or reused as A-prime.
+- Invalidated Unit 8 artifact root (read-only, ignored):
+  `artifacts/acceptance/20260830T013514512330Z-task9`.
 - Frozen brief:
   `.superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-brief.md`.
 - Original implementation brief verification: SHA-256
@@ -758,6 +812,101 @@ resource drift or tripwire fired.
   Code/Safety/Stage review. This section records implementation evidence only;
   it does not claim final GO or start Unit 8.
 
+### Unit 8.1: independent evidence-review P1 and replacement-A repair
+
+- The original Unit 8 artifact remains untouched at
+  `artifacts/acceptance/20260830T013514512330Z-task9`. Its canonical
+  `report.json` is 595,864 bytes with SHA-256
+  `125e01b86c514d0f211fc14a4fea0fb836de9127ba96dfde7bb9d0cedca146c8`;
+  `report.md` is 84,616 bytes with SHA-256
+  `02aed684473ceef11b3957c717623a16753a3bc347f5fda76457417b65def256`.
+  Independent byte review found 63 command artifacts: 44 stdout/stderr logs
+  plus 19 JUnit files, with 1,081/1,081 JUnit and 305/305 TAP tests passing.
+  Those exact facts support Evidence GO and Safety GO only; they do not override
+  Artifact integrity NO-GO.
+- Root cause was verified in production: exact inventory/argv/timeout/conftest,
+  global baseline, full-suite, structured-property, internal-evidence, tripwire,
+  and Lovable checks lived in `_pending_report_contract_is_valid`, while its
+  failure changed the decision only when the recomputed outcome was pending.
+  `TECHNICAL_NO_GO` from missing Lovable and every `SAFETY_NO_GO` bypassed that
+  execution-contract result.
+- After correcting one test-fixture-only gate-recomputation omission, the
+  complete real-artifact mutation matrix produced genuine RED **14 failed,
+  1 passed, 322 deselected**. Both technical and safety records incorrectly
+  accepted timeout, argv, command-order, self-consistent non-global resource
+  baseline, project-conftest/KEY removal, successful-suite omission, and a
+  later-command claim after an earlier failure. The one passing control was an
+  exact frozen-prefix child-nonzero report.
+- Minimal GREEN split the completed execution contract from pending-only release
+  conditions. Every completed outcome now enforces the exact frozen spec prefix,
+  baseline anchoring, success evidence completeness, exact internal evidence,
+  successful structured properties, and terminal-failure rule before artifact
+  traversal. Focused GREEN was **15 passed, 322 deselected**.
+- A further frozen-brief control produced genuine RED **1 failed, 337
+  deselected** for truthful transient resource drift whose final capture had
+  returned to baseline. The narrowed rule now preserves that last-command
+  `RESOURCE_DRIFT` evidence while still requiring a non-baseline global final
+  snapshot to equal the last after-snapshot. GREEN was **1 passed, 337
+  deselected**.
+- Existing artifact-binding fixtures were migrated to exact frozen prefixes or
+  complete 22-command synthetic records; no production rule was relaxed. The
+  completed-artifact regression slice passed **49 passed, 288 deselected**.
+  Final pure runner verification passed twice: **338 passed in 9.39s** and
+  **338 passed in 9.37s**.
+- All adjacent resource captures retained SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  log SHA-256
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`
+  with size `2961585` and `mtime_ns=1787939944391406243`, TTS digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  and `unsafe=()`. No provider, TTS, non-loopback network, real service, worker,
+  or canonical Unit 8 command was started.
+- This repair loop did not rerun database-safety, backend, browser, Node,
+  Lovable, or the 22-command canonical acceptance runner. Commit A and the old
+  Unit 8 evidence remain invalid. This repair was submitted to independent
+  review; the resulting scoped NO-GO and follow-up evidence are recorded next.
+
+### Unit 8.2: trusted artifact-root P1 repair
+
+- The first scoped replacement-A review returned **Contract/Code/Safety NO-GO,
+  Stage GO; P0=0, P1=1, P2=0**. It reproduced a coherent attack in which all
+  pytest `--junitxml=` argv values were moved to one different absolute root,
+  while canonical JSON/Markdown and descriptors were regenerated and the real
+  artifact tree remained unchanged. The validator recovered that untrusted
+  root from command 1 and used it to construct its own expected specs, so both
+  technical and safety NO-GO records remained self-consistent and renderable.
+- Strict test-first coverage used complete production rendering and retained
+  the real-root positive control for every case. Full
+  `TECHNICAL_NO_GO`/`SAFETY_NO_GO` and truthful partial technical/safety prefix
+  attacks produced genuine RED **4 failed, 338 deselected**: all four coherent
+  alternate-root records were incorrectly accepted.
+- The minimal fix passes canonical `source_path.parent.resolve()` explicitly
+  into completed-record validation. Every expected full or prefix
+  `CommandSpec` is now built from that renderer-owned root; no recorded argv or
+  report field supplies the completed-artifact trust anchor. Existing source,
+  parent, `commands` directory, descriptor, symlink, and regular-file checks
+  remain unchanged and fail closed. Focused GREEN was **4 passed, 338
+  deselected**.
+- The original decision-independent matrix remained GREEN at **15 passed, 327
+  deselected**. The completed-artifact regression slice passed **53 passed,
+  289 deselected**. Complete pure-runner verification passed twice: **342
+  passed in 9.66s** and **342 passed in 9.72s**. Final read-only AST parsing was
+  `syntax_ok=2`.
+- Every adjacent resource guard retained SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  log SHA-256
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`
+  with size `2961585` and `mtime_ns=1787939944391406243`, TTS digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  exact HEAD `e2d3b2d795b76b24895dbac5fa2b3797c5ad9be5`, and `unsafe=()`.
+  No provider, TTS, non-loopback network, real service, worker, or canonical
+  Unit 8 command was started.
+- Database-safety, backend, browser, Node, Lovable, and the canonical
+  22-command runner were not rerun and are not newly claimed. Current status
+  remains NO-GO pending a clean scoped Contract/Code/Safety/Stage re-review,
+  authorization and creation of a new Commit A-prime, and a complete fresh
+  Unit 8 run against that exact clean HEAD.
+
 ## Final policy and staging evidence
 
 - No `pytest.skip`, `pytest.xfail`, skip/skipif/xfail marker exists in the
@@ -786,8 +935,10 @@ resource drift or tripwire fired.
 - The seventh-review final read-only AST syntax check passed for both changed
   Python files (`syntax_ok=2`), and the unstaged `git diff --check` exited `0`
   before exact restaging.
-- Final exact cached path list and `git diff --cached --check` are recorded
-  below after explicit staging; no commit is made in this task.
+- The replacement-A repair's exact cached path list and
+  `git diff --cached --check` are recorded below after explicit staging; the
+  already-invalidated Commit A is not amended and no repair commit is made in
+  this task.
 
 ## Historical incidents carried forward unchanged
 
@@ -804,44 +955,32 @@ No agent, runner, or reviewer can accept these risks for the release owner.
 
 ## Residual risks and independent-review handoff
 
-- Unit 8 clean-Commit-A execution of the full 22-command inventory and Unit 9
-  evidence-only report commit have not started and are not claimed.
+- The first Unit 8 execution completed, but its Artifact integrity NO-GO
+  invalidates Commit A and all release use of that run. Replacement Unit 8 and
+  Unit 9 evidence-only reporting have not started and are not claimed.
 - Lovable remains a blank private bootstrap without a valid reviewed
   `prototype-reference.md`; no scope waiver has been authorized.
 - Historical incident disposition remains human-owned and unresolved.
-- Commit A has not been committed. The current staged bytes require independent
-  Code/Safety/Stage review. Any P0/P1 invalidates the staged verdict and requires
-  focused RED/GREEN repair, affected full reruns, refreshed report/stage checks,
-  and a fresh review.
+- Commit A exists at `e2d3b2d795b76b24895dbac5fa2b3797c5ad9be5` but is an
+  invalid candidate. The current four-path repair stage requires independent
+  Code/Safety/Stage review, a new Commit A-prime, and a complete replacement
+  Unit 8 run. Any new P0/P1 invalidates that repair verdict and requires another
+  focused RED/GREEN loop.
 
 ### Exact cached paths after staging
 
-The final explicit Commit A cached-name check returned exactly these 14 paths:
+The final explicit replacement-A repair cached-name check returned exactly
+these four paths:
 
 ```text
-.gitignore
 .superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-brief.md
 .superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-report.md
-app/frontend/teacher/styles.css
 scripts/run_interaction_acceptance.py
-tests/browser/test_child_faults.py
-tests/browser/test_child_shell.py
-tests/browser/test_release_viewports.py
-tests/browser/test_teacher_review_loading.py
-tests/browser/test_teacher_today.py
-tests/conftest.py
-tests/frontend/shared/api-client.test.mjs
-tests/test_database_safety.py
 tests/test_interaction_acceptance_runner.py
 ```
 
-`app/frontend/teacher/styles.css` is present only because the documented
-focus-contrast product RED activated conditional ownership.
-`tests/browser/test_child_shell.py` is present only because the independently
-reviewed ordered Playwright-loop RED activated its narrow conditional ownership.
-`tests/browser/test_teacher_accessibility.py` is absent because Task 9 did not
-modify it. No inherited user path, plan, brainstorm artifact, unrelated product
-file, tracked acceptance report, generated release evidence, or other path is
-staged. After force-adding this updated report, the fresh cached-name comparison
-returned the same 14 paths and `git diff --cached --check` exited `0`; no commit
-is made before the fresh independent review.
+No inherited user path, plan, brainstorm artifact, unrelated product file,
+tracked acceptance report, generated release evidence, or old Unit 8 artifact
+is staged. The fresh cached-name comparison and cached diff check are the final
+pre-commit boundary; no amend or repair commit is made before independent
+review.

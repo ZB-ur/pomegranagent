@@ -14,7 +14,7 @@ from re import _parser as sre_parse
 
 import pytest
 from collections.abc import Iterator, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 EXPECTED_TIMEOUTS = {
@@ -1937,30 +1937,24 @@ def test_completed_report_rejects_tampered_authenticated_tripwire_junit(
     tmp_path, rehash_forgery
 ):
     module = importlib.import_module("scripts.run_interaction_acceptance")
-    record = _tripwire_record(
+    event = _tripwire_record(
         "external_ai",
         command_id="backend",
         node_id="test_uncaught_breaker",
         phase="call",
         sequence=1,
     )
-    result = _run_synthetic_tripwire_command(
+    artifact_root, report_record = _completed_suite_artifact_tree(
         module,
         tmp_path,
         command_id="backend",
-        stdout=b"ordinary pytest failure\n",
-        stderr=_signed_tripwire_sidecar("backend", (record,)),
-        child_exit=1,
-        junit_xml=_authenticated_tripwire_junit("external_ai"),
+        evidence_format=module.EvidenceFormat.JUNIT,
+        evidence_payload=_authenticated_tripwire_junit("external_ai").encode(),
+        stderr=_signed_tripwire_sidecar("backend", (event,)),
+        project=True,
     )
-    assert result.report_record is not None
-    command = result.report_record["commands"][0]
-    artifact_root = result.artifact_root
-    (artifact_root / command["stdout"]["path"]).write_bytes(
-        result.command_results[0].stdout
-    )
-    (artifact_root / command["stderr"]["path"]).write_bytes(
-        result.command_results[0].stderr
+    command = next(
+        item for item in report_record["commands"] if item["subcommand"] == "backend"
     )
     junit_path = artifact_root / command["junit"]["path"]
     if rehash_forgery:
@@ -1972,7 +1966,7 @@ def test_completed_report_rejects_tampered_authenticated_tripwire_junit(
             sha256=hashlib.sha256(tampered).hexdigest(),
             size=len(tampered),
         )
-        _refresh_completed_report_files(module, artifact_root, result.report_record)
+        _refresh_completed_report_files(module, artifact_root, report_record)
     else:
         junit_path.write_bytes(junit_path.read_bytes() + b"\n")
 
@@ -5904,13 +5898,603 @@ def _refresh_completed_report_files(module, artifact_root, record):
     )
 
 
-def _completed_partial_artifact_tree(module, tmp_path):
+def _junit_payload_for_suite(evidence):
+    properties_by_node = {}
+    for item in evidence.properties:
+        properties_by_node.setdefault(item.node_id, []).append(item)
+    cases = []
+    for node_id in evidence.node_ids:
+        properties = properties_by_node.get(node_id, ())
+        if properties:
+            property_xml = "".join(
+                '<property name="{}" value="{}"/>'.format(
+                    html.escape(item.name, quote=True),
+                    html.escape(item.value, quote=True),
+                )
+                for item in properties
+            )
+            body = f"<properties>{property_xml}</properties>"
+        else:
+            body = ""
+        cases.append(
+            '<testcase name="{}">{}</testcase>'.format(
+                html.escape(node_id, quote=True), body
+            )
+        )
+    return (
+        '<testsuite tests="{}" failures="0" errors="0" skipped="0">{}</testsuite>'.format(
+            evidence.total, "".join(cases)
+        )
+    ).encode("utf-8")
+
+
+def _completed_full_lovable_missing_artifact_tree(
+    module, tmp_path, *, safety=False
+):
     artifact_root = tmp_path / "acceptance-run"
     command_root = artifact_root / "commands"
     command_root.mkdir(parents=True)
-    record = _json_clone_record(module, _technical_partial_report_record(module))
-    stdout = b"ordinary failure"
+    pending = _valid_pending_report_record(module, tmp_path)
+    repo_root = Path(__file__).resolve().parents[1]
+    specs = module.build_command_specs(repo_root, artifact_root)
+    suites = {
+        command_id: module._report_suite_evidence(value)
+        for command_id, value in pending["suite_evidence"].items()
+    }
+    baseline = module._report_resource_snapshot(pending["resources"]["before"])
+    stdout_payloads = {}
+    stderr_payloads = {}
+    junit_payloads = {}
+    results = []
+    for spec in specs:
+        evidence = suites[spec.command_id]
+        if spec.evidence_format is module.EvidenceFormat.JUNIT:
+            stdout = b"pytest child output\n"
+            stderr = (
+                _signed_tripwire_sidecar(spec.command_id, ())
+                if spec.conftest_mode is module.ConftestMode.PROJECT
+                else b""
+            )
+            junit_payloads[spec.command_id] = _junit_payload_for_suite(evidence)
+        else:
+            stdout = _unit7_passing_tap_nodes(evidence.node_ids)
+            stderr = b""
+        stdout_payloads[spec.command_id] = stdout
+        stderr_payloads[spec.command_id] = stderr
+        results.append(
+            module.CommandResult(
+                subcommand=spec.command_id,
+                child_started=True,
+                child_exit=0,
+                termination=module.Termination.EXITED,
+                output_complete=True,
+                residual_group_observed=False,
+                cleanup_failures=(),
+                classified_outcome=module.ClassifiedOutcome.SUCCESS,
+                reason="SUCCESS",
+                before_snapshot=baseline,
+                after_snapshot=baseline,
+                stdout=stdout,
+                stderr=stderr,
+                duration_seconds=1.25,
+            )
+        )
+
+    final_snapshot = baseline
+    if safety:
+        final_snapshot = FakeRunOneResources(
+            git_head=baseline.git_head, token="full-run-safety-drift"
+        )
+        results[-1] = replace(
+            results[-1],
+            classified_outcome=module.ClassifiedOutcome.SAFETY_FAILURE,
+            reason="RESOURCE_DRIFT",
+            after_snapshot=final_snapshot,
+        )
+    results = tuple(results)
+    internal = module._run_internal_evidence(
+        command_results=results,
+        all_evidence=suites,
+        baseline=baseline,
+        final_snapshot=final_snapshot,
+        version_exact=True,
+    )
+    manifest_commands = {row.command_id for row in module.SELECTOR_MANIFEST}
+    gates = module.evaluate_gates(
+        results,
+        final_snapshot,
+        module.EvidenceMap(
+            suites={
+                command_id: evidence
+                for command_id, evidence in suites.items()
+                if command_id in manifest_commands
+            },
+            internal=internal,
+        ),
+    )
+    resources_unchanged = bool(
+        not safety
+        and all(
+            result.before_snapshot == baseline
+            and result.after_snapshot == baseline
+            for result in results
+        )
+    )
+    decision = module.decide_release(
+        module.DecisionInputs(
+            command_results=results,
+            gate_results=gates,
+            resources_unchanged=resources_unchanged,
+            tripwires_clean=True,
+            contrast_passed=True,
+            incident_decisions=None,
+            lovable_complete_or_waived=False,
+        )
+    )
+    record = module.build_report_record(
+        run_id=(
+            "20260830T160000Z-full-safety"
+            if safety
+            else "20260830T160000Z-full-lovable-missing"
+        ),
+        generated_at="2026-08-30T16:00:00Z",
+        tested_head=baseline.git_head,
+        decision=decision,
+        command_results=results,
+        command_specs=specs,
+        gate_results=gates,
+        lovable_status="MISSING",
+        external_decision=None,
+        baseline_snapshot=baseline,
+        final_snapshot=final_snapshot,
+        junit_payloads=junit_payloads,
+        suite_evidence=suites,
+        internal_evidence=internal,
+    )
+    for command in record["commands"]:
+        command_id = command["subcommand"]
+        (artifact_root / command["stdout"]["path"]).write_bytes(
+            stdout_payloads[command_id]
+        )
+        (artifact_root / command["stderr"]["path"]).write_bytes(
+            stderr_payloads[command_id]
+        )
+        if command["junit"] is not None:
+            (artifact_root / command["junit"]["path"]).write_bytes(
+                junit_payloads[command_id]
+            )
+    resource_artifacts = {}
+    for name in ("before", "after"):
+        payload = module.canonical_json_bytes(record["resources"][name])
+        relative_path = f"resources.{name}.json"
+        (artifact_root / relative_path).write_bytes(payload)
+        resource_artifacts[name] = {
+            "path": relative_path,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+    record["resource_artifacts"] = resource_artifacts
+    _refresh_completed_report_files(module, artifact_root, record)
+    control = tmp_path / ("control-safety.md" if safety else "control-technical.md")
+    assert module.render_completed_report(
+        artifact_root / "report.json", control
+    ) == control
+    return artifact_root, record
+
+
+def _rewrite_completed_command_artifact(
+    module, artifact_root, record, command_index, field, payload
+):
+    descriptor = record["commands"][command_index][field]
+    path = artifact_root / descriptor["path"]
+    path.write_bytes(payload)
+    descriptor["sha256"] = hashlib.sha256(payload).hexdigest()
+    descriptor["size"] = len(payload)
+
+
+def _omit_completed_command_suite(artifact_root, record, command_index):
+    command = record["commands"][command_index]
+    record["suite_evidence"].pop(command["subcommand"])
+    if command["junit"] is not None:
+        (artifact_root / command["junit"]["path"]).unlink()
+        command["junit"] = None
+    command["counts"] = {
+        "cancelled": None,
+        "errors": None,
+        "failures": None,
+        "passed": None,
+        "skipped": None,
+        "todo": None,
+        "total": None,
+        "xfailed": None,
+        "xpassed": None,
+    }
+    command["evidence_reason"] = "MISSING"
+    command["evidence_sha256"] = None
+    command["evidence_valid"] = False
+    command["tripwire_events"] = []
+
+
+def _recompute_completed_record_gates_and_decision(module, record):
+    suites = {
+        command_id: module._report_suite_evidence(value)
+        for command_id, value in record["suite_evidence"].items()
+    }
+    results = tuple(
+        module._report_command_result(command) for command in record["commands"]
+    )
+    manifest_commands = {row.command_id for row in module.SELECTOR_MANIFEST}
+    gate_suites = {
+        command_id: evidence
+        for command_id, evidence in suites.items()
+        if command_id in manifest_commands
+    }
+    baseline = module._report_resource_snapshot(record["resources"]["before"])
+    final_snapshot = module._report_resource_snapshot(record["resources"]["after"])
+    internal = module._run_internal_evidence(
+        command_results=results,
+        all_evidence=suites,
+        baseline=baseline,
+        final_snapshot=final_snapshot,
+        version_exact=True,
+    )
+    record["internal_evidence"] = module._canonical_value(internal)
+    record["focus_measurements"] = module._structured_suite_values(
+        suites, "release_focus_all", "task9.focus_measurement"
+    )
+    record["database_action_evidence"] = module._structured_suite_values(
+        suites, "release_db_action_all", "task9.db_action_evidence"
+    )
+    record["timeout_evidence"] = module._structured_suite_values(
+        suites, "child_chat_timeout_all", "task9.timeout_evidence"
+    )
+    tripwire_status = module._tripwire_status(
+        module._tripwire_event_ids(suites), suites.get("browser")
+    )
+    record["tripwires"] = {
+        "provider_tts_socket_context_worker": tripwire_status
+    }
+    gates = module.evaluate_gates(
+        results,
+        final_snapshot,
+        module.EvidenceMap(suites=gate_suites, internal=internal),
+    )
+    record["gates"] = module._gate_report_rows(gates, gate_suites, internal)
+    resources_unchanged = bool(
+        module._snapshots_are_unchanged(baseline, final_snapshot)
+        and all(
+            module._snapshots_are_unchanged(
+                result.before_snapshot, result.after_snapshot
+            )
+            for result in results
+        )
+    )
+    decision = module.decide_release(
+        module.DecisionInputs(
+            command_results=results,
+            gate_results=gates,
+            resources_unchanged=resources_unchanged,
+            tripwires_clean=tripwire_status != "FAIL",
+            contrast_passed=True,
+            incident_decisions=None,
+            lovable_complete_or_waived=False,
+        )
+    )
+    record["decision"] = {
+        "final_go": False,
+        "outcome": decision.outcome.value,
+        "reasons": list(decision.reasons),
+        "runner_process_exit": decision.exit_code,
+    }
+
+
+def _rename_completed_command_artifacts(artifact_root, command, order):
+    command_id = command["subcommand"]
+    for field, suffix in (
+        ("stdout", "stdout.log"),
+        ("stderr", "stderr.log"),
+        ("junit", "junit.xml"),
+    ):
+        descriptor = command[field]
+        if descriptor is None:
+            continue
+        old_path = artifact_root / descriptor["path"]
+        new_relative = f"commands/{order:02d}-{command_id}.{suffix}"
+        old_path.rename(artifact_root / new_relative)
+        descriptor["path"] = new_relative
+
+
+def _rewrite_recorded_pytest_junit_roots(record, alternate_root):
+    alternate = Path(alternate_root).resolve()
+    rewritten = 0
+    for command in record["commands"]:
+        argv = []
+        for argument in command["argv"]:
+            if argument.startswith("--junitxml="):
+                original = Path(argument.removeprefix("--junitxml="))
+                argument = f"--junitxml={alternate / original.name}"
+                rewritten += 1
+            argv.append(argument)
+        command["argv"] = argv
+    assert rewritten > 0
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+def test_completed_report_rejects_coherent_alternate_junit_root_for_full_no_go(
+    tmp_path, outcome
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    _rewrite_recorded_pytest_junit_roots(
+        record, tmp_path / "coherent-alternate-artifact-root"
+    )
+    _refresh_completed_report_files(module, artifact_root, record)
+
+    with pytest.raises(
+        module.CliMisuseError,
+        match="completed report execution contract is invalid",
+    ):
+        module.render_completed_report(
+            artifact_root / "report.json",
+            tmp_path / f"rejected-full-{outcome}-alternate-root.md",
+        )
+
+
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "timeout",
+        "argv",
+        "order",
+        "global_baseline",
+        "project_conftest_key",
+        "suite_completeness",
+        "continued_after_failure",
+    ),
+)
+def test_completed_report_contract_is_not_downgraded_by_final_no_go_reason(
+    tmp_path, outcome, mutation
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    if mutation == "timeout":
+        record["commands"][0]["timeout_seconds"] += 1
+    elif mutation == "argv":
+        record["commands"][0]["argv"][-1] = "tests/substituted_runner.py"
+    elif mutation == "order":
+        record["commands"][0], record["commands"][1] = (
+            record["commands"][1],
+            record["commands"][0],
+        )
+        for order, command in enumerate(record["commands"][:2], start=1):
+            command["order"] = order
+            _rename_completed_command_artifacts(artifact_root, command, order)
+    elif mutation == "global_baseline":
+        for name in ("before_snapshot", "after_snapshot"):
+            record["commands"][0][name]["log"]["size"] += 1
+    elif mutation == "project_conftest_key":
+        browser_index = tuple(EXPECTED_TIMEOUTS).index("browser")
+        record["commands"][browser_index]["conftest_mode"] = "noconftest"
+        _rewrite_completed_command_artifact(
+            module, artifact_root, record, browser_index, "stderr", b""
+        )
+    elif mutation == "suite_completeness":
+        _omit_completed_command_suite(artifact_root, record, 0)
+    elif mutation == "continued_after_failure":
+        _omit_completed_command_suite(artifact_root, record, 0)
+        command = record["commands"][0]
+        command["child_exit"] = 7
+        command["classified_outcome"] = "CHILD_NONZERO"
+        command["reason"] = "CHILD_NONZERO"
+        command["runner_process_exit"] = 7
+        _recompute_completed_record_gates_and_decision(module, record)
+    else:
+        raise AssertionError(mutation)
+    _refresh_completed_report_files(module, artifact_root, record)
+
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(
+            artifact_root / "report.json",
+            tmp_path / f"rejected-{outcome}-{mutation}.md",
+        )
+
+
+def test_completed_report_accepts_exact_truthful_failure_prefix(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root = tmp_path / "truthful-prefix"
+    command_root = artifact_root / "commands"
+    command_root.mkdir(parents=True)
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = module.build_command_specs(repo_root, artifact_root)[0]
+    resources = FakeRunOneResources(token="truthful-prefix")
+    result = module.CommandResult(
+        subcommand=spec.command_id,
+        child_started=True,
+        child_exit=7,
+        termination=module.Termination.EXITED,
+        output_complete=True,
+        residual_group_observed=False,
+        cleanup_failures=(),
+        classified_outcome=module.ClassifiedOutcome.CHILD_NONZERO,
+        reason="CHILD_NONZERO",
+        before_snapshot=resources,
+        after_snapshot=resources,
+        stdout=b"ordinary failure",
+        stderr=b"",
+        duration_seconds=0.25,
+    )
+    internal = module._run_internal_evidence(
+        command_results=(result,),
+        all_evidence={},
+        baseline=resources,
+        final_snapshot=resources,
+        version_exact=True,
+    )
+    gates = module.evaluate_gates(
+        (result,), resources, module.EvidenceMap(suites={}, internal=internal)
+    )
+    decision = module.decide_release(
+        module.DecisionInputs(
+            command_results=(result,),
+            gate_results=gates,
+            resources_unchanged=True,
+            tripwires_clean=True,
+            contrast_passed=True,
+            incident_decisions=None,
+            lovable_complete_or_waived=False,
+        )
+    )
+    record = module.build_report_record(
+        run_id="20260830T160100Z-truthful-prefix",
+        generated_at="2026-08-30T16:01:00Z",
+        tested_head=resources.git_head,
+        decision=decision,
+        command_results=(result,),
+        command_specs=(spec,),
+        gate_results=gates,
+        lovable_status="MISSING",
+        external_decision=None,
+        baseline_snapshot=resources,
+        final_snapshot=resources,
+        suite_evidence={},
+        internal_evidence=internal,
+    )
+    (artifact_root / record["commands"][0]["stdout"]["path"]).write_bytes(
+        result.stdout
+    )
+    (artifact_root / record["commands"][0]["stderr"]["path"]).write_bytes(
+        result.stderr
+    )
+    resource_artifacts = {}
+    for name in ("before", "after"):
+        payload = module.canonical_json_bytes(record["resources"][name])
+        relative_path = f"resources.{name}.json"
+        (artifact_root / relative_path).write_bytes(payload)
+        resource_artifacts[name] = {
+            "path": relative_path,
+            "sha256": hashlib.sha256(payload).hexdigest(),
+            "size": len(payload),
+        }
+    record["resource_artifacts"] = resource_artifacts
+    _refresh_completed_report_files(module, artifact_root, record)
+    output = tmp_path / "truthful-prefix.md"
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", output
+    ) == output
+
+
+def test_completed_report_accepts_truthful_transient_drift_restored_at_final_capture(
+    tmp_path,
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=True
+    )
+    record["resources"]["after"] = _json_clone_record(
+        module, record["resources"]["before"]
+    )
+    after_payload = module.canonical_json_bytes(record["resources"]["after"])
+    (artifact_root / "resources.after.json").write_bytes(after_payload)
+    record["resource_artifacts"]["after"] = {
+        "path": "resources.after.json",
+        "sha256": hashlib.sha256(after_payload).hexdigest(),
+        "size": len(after_payload),
+    }
+    _recompute_completed_record_gates_and_decision(module, record)
+    _refresh_completed_report_files(module, artifact_root, record)
+    output = tmp_path / "truthful-transient-drift.md"
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", output
+    ) == output
+
+
+def _completed_partial_artifact_tree(module, tmp_path, *, safety=False):
+    artifact_root = tmp_path / "acceptance-run"
+    command_root = artifact_root / "commands"
+    command_root.mkdir(parents=True)
+    repo_root = Path(__file__).resolve().parents[1]
+    spec = module.build_command_specs(repo_root, artifact_root)[0]
+    resources = FakeRunOneResources(
+        token="partial-safety-baseline" if safety else "technical-stable"
+    )
+    final_resources = (
+        FakeRunOneResources(
+            git_head=resources.git_head, token="partial-safety-drift"
+        )
+        if safety
+        else resources
+    )
+    stdout = b"completed before resource drift" if safety else b"ordinary failure"
     stderr = b""
+    result = module.CommandResult(
+        subcommand=spec.command_id,
+        child_started=True,
+        child_exit=0 if safety else 7,
+        termination=module.Termination.EXITED,
+        output_complete=True,
+        residual_group_observed=False,
+        cleanup_failures=(),
+        classified_outcome=(
+            module.ClassifiedOutcome.SAFETY_FAILURE
+            if safety
+            else module.ClassifiedOutcome.CHILD_NONZERO
+        ),
+        reason="RESOURCE_DRIFT" if safety else "CHILD_NONZERO",
+        before_snapshot=resources,
+        after_snapshot=final_resources,
+        stdout=stdout,
+        stderr=stderr,
+        duration_seconds=0.25,
+    )
+    internal = module._run_internal_evidence(
+        command_results=(result,),
+        all_evidence={},
+        baseline=resources,
+        final_snapshot=final_resources,
+        version_exact=True,
+    )
+    gates = module.evaluate_gates(
+        (result,),
+        final_resources,
+        module.EvidenceMap(suites={}, internal=internal),
+    )
+    decision = module.decide_release(
+        module.DecisionInputs(
+            command_results=(result,),
+            gate_results=gates,
+            resources_unchanged=not safety,
+            tripwires_clean=True,
+            contrast_passed=True,
+            incident_decisions=None,
+            lovable_complete_or_waived=True,
+        )
+    )
+    record = module.build_report_record(
+        run_id=(
+            "20260830T090100Z-safety-partial"
+            if safety
+            else "20260830T090100Z-technical-partial"
+        ),
+        generated_at="2026-08-30T09:01:00Z",
+        tested_head=resources.git_head,
+        decision=decision,
+        command_results=(result,),
+        command_specs=(spec,),
+        gate_results=gates,
+        lovable_status="PROVIDED_OR_WAIVED",
+        external_decision=None,
+        baseline_snapshot=resources,
+        final_snapshot=final_resources,
+        suite_evidence={},
+        internal_evidence=internal,
+    )
     command = record["commands"][0]
     assert command["stdout"]["sha256"] == hashlib.sha256(stdout).hexdigest()
     assert command["stderr"]["sha256"] == hashlib.sha256(stderr).hexdigest()
@@ -5931,6 +6515,34 @@ def _completed_partial_artifact_tree(module, tmp_path):
     return artifact_root, record
 
 
+@pytest.mark.parametrize("outcome", ("technical", "safety"))
+def test_completed_report_rejects_coherent_alternate_junit_root_for_failure_prefix(
+    tmp_path, outcome
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, record = _completed_partial_artifact_tree(
+        module, tmp_path, safety=outcome == "safety"
+    )
+    control = tmp_path / f"accepted-prefix-{outcome}.md"
+    assert module.render_completed_report(
+        artifact_root / "report.json", control
+    ) == control
+
+    _rewrite_recorded_pytest_junit_roots(
+        record, tmp_path / "coherent-alternate-prefix-root"
+    )
+    _refresh_completed_report_files(module, artifact_root, record)
+
+    with pytest.raises(
+        module.CliMisuseError,
+        match="completed report execution contract is invalid",
+    ):
+        module.render_completed_report(
+            artifact_root / "report.json",
+            tmp_path / f"rejected-prefix-{outcome}-alternate-root.md",
+        )
+
+
 def _completed_suite_artifact_tree(
     module,
     tmp_path,
@@ -5941,118 +6553,87 @@ def _completed_suite_artifact_tree(
     stderr=b"",
     project=False,
 ):
-    artifact_root = tmp_path / f"suite-{command_id}"
-    command_root = artifact_root / "commands"
-    command_root.mkdir(parents=True)
-    resources = FakeRunOneResources(token=f"suite-{command_id}")
+    del project
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=False
+    )
+    command_index = tuple(EXPECTED_TIMEOUTS).index(command_id)
+    command = record["commands"][command_index]
+    spec = module.build_command_specs(
+        Path(__file__).resolve().parents[1], artifact_root
+    )[command_index]
+    assert spec.command_id == command_id
+    assert spec.evidence_format is evidence_format
     if evidence_format is module.EvidenceFormat.JUNIT:
         stdout = b"pytest child output\n"
+        if spec.conftest_mode is module.ConftestMode.PROJECT and not stderr:
+            stderr = _signed_tripwire_sidecar(command_id, ())
         evidence = module.parse_pytest_junit_bytes(
             evidence_payload,
             stderr_payload=stderr,
             command_id=command_id,
-            require_tripwire_auth=project,
+            require_tripwire_auth=(
+                spec.conftest_mode is module.ConftestMode.PROJECT
+            ),
         )
-        junit_payloads = {command_id: evidence_payload}
+        _rewrite_completed_command_artifact(
+            module,
+            artifact_root,
+            record,
+            command_index,
+            "junit",
+            evidence_payload,
+        )
     else:
         stdout = evidence_payload
         evidence = module.parse_node_tap(evidence_payload)
-        junit_payloads = None
     safety = bool(evidence.tripwire_events)
-    result = module.CommandResult(
-        subcommand=command_id,
-        child_started=True,
-        child_exit=1,
-        termination=module.Termination.EXITED,
-        output_complete=True,
-        residual_group_observed=False,
-        cleanup_failures=(),
-        classified_outcome=(
-            module.ClassifiedOutcome.SAFETY_FAILURE
-            if safety
-            else module.ClassifiedOutcome.CHILD_NONZERO
-        ),
-        reason="TRIPWIRE_FAILURE" if safety else "CHILD_NONZERO",
-        before_snapshot=resources,
-        after_snapshot=resources,
-        stdout=stdout,
-        stderr=stderr,
-        duration_seconds=0.25,
+    record["suite_evidence"][command_id] = module._canonical_value(evidence)
+    command["counts"] = module._suite_counts(evidence)
+    command["evidence_reason"] = evidence.reason
+    command["evidence_sha256"] = module._parsed_evidence_sha256(evidence)
+    command["evidence_valid"] = evidence.valid
+    command["tripwire_events"] = list(
+        module._tripwire_events_for_evidence(evidence)
     )
-    spec = module.CommandSpec(
-        command_id=command_id,
-        argv=("/usr/bin/false",),
-        timeout_seconds=3,
-        conftest_mode=(
-            module.ConftestMode.PROJECT if project else module.ConftestMode.PURE
-        ),
-        evidence_format=evidence_format,
-        evidence_path=(
-            artifact_root / f"{command_id}.junit.xml"
-            if evidence_format is module.EvidenceFormat.JUNIT
-            else None
-        ),
+    _rewrite_completed_command_artifact(
+        module, artifact_root, record, command_index, "stdout", stdout
     )
-    suites = {command_id: evidence}
-    internal = (
-        (module._tripwire_internal_evidence("FAIL"),) if safety else ()
+    _rewrite_completed_command_artifact(
+        module, artifact_root, record, command_index, "stderr", stderr
     )
-    gates = module.evaluate_gates(
-        (result,),
-        resources,
-        module.EvidenceMap(suites=suites, internal=internal),
-    )
-    decision = module.decide_release(
-        module.DecisionInputs(
-            command_results=(result,),
-            gate_results=gates,
-            resources_unchanged=True,
-            tripwires_clean=not safety,
-            contrast_passed=True,
-            incident_decisions=None,
-            lovable_complete_or_waived=False,
+
+    if evidence_format is module.EvidenceFormat.JUNIT:
+        for later in record["commands"][command_index + 1 :]:
+            for field in ("stdout", "stderr", "junit"):
+                descriptor = later[field]
+                if descriptor is not None:
+                    (artifact_root / descriptor["path"]).unlink()
+            record["suite_evidence"].pop(later["subcommand"])
+        record["commands"] = record["commands"][: command_index + 1]
+        command["child_exit"] = 1
+        command["classified_outcome"] = (
+            "SAFETY_FAILURE" if safety else "CHILD_NONZERO"
         )
-    )
-    record = module.build_report_record(
-        run_id=f"20260830T150000Z-{command_id}",
-        generated_at="2026-08-30T15:00:00Z",
-        tested_head=resources.git_head,
-        decision=decision,
-        command_results=(result,),
-        command_specs=(spec,),
-        gate_results=gates,
-        lovable_status="MISSING",
-        external_decision=None,
-        baseline_snapshot=resources,
-        final_snapshot=resources,
-        junit_payloads=junit_payloads,
-        suite_evidence=suites,
-        internal_evidence=internal,
-    )
-    command = record["commands"][0]
-    (artifact_root / command["stdout"]["path"]).write_bytes(stdout)
-    (artifact_root / command["stderr"]["path"]).write_bytes(stderr)
-    if command["junit"] is not None:
-        (artifact_root / command["junit"]["path"]).write_bytes(evidence_payload)
-    resource_artifacts = {}
-    for name in ("before", "after"):
-        payload = module.canonical_json_bytes(record["resources"][name])
-        relative_path = f"resources.{name}.json"
-        (artifact_root / relative_path).write_bytes(payload)
-        resource_artifacts[name] = {
-            "path": relative_path,
-            "sha256": hashlib.sha256(payload).hexdigest(),
-            "size": len(payload),
-        }
-    record["resource_artifacts"] = resource_artifacts
+        command["reason"] = "TRIPWIRE_FAILURE" if safety else "CHILD_NONZERO"
+        command["runner_process_exit"] = 3 if safety else 1
+
+    _recompute_completed_record_gates_and_decision(module, record)
     _refresh_completed_report_files(module, artifact_root, record)
+    control = tmp_path / f"control-suite-{command_id}.md"
+    assert module.render_completed_report(
+        artifact_root / "report.json", control
+    ) == control
     return artifact_root, record
 
 
 def _rehash_completed_command_artifact(
-    module, artifact_root, record, field, payload
+    module, artifact_root, record, command_id, field, payload
 ):
-    descriptor = record["commands"][0][field]
+    command = next(
+        item for item in record["commands"] if item["subcommand"] == command_id
+    )
+    descriptor = command[field]
     path = artifact_root / descriptor["path"]
     path.write_bytes(payload)
     descriptor["sha256"] = hashlib.sha256(payload).hexdigest()
@@ -6134,7 +6715,7 @@ def test_completed_report_binds_full_junit_suite_evidence(
         ),
     }
     _rehash_completed_command_artifact(
-        module, artifact_root, record, "junit", mutations[mutation]
+        module, artifact_root, record, "backend", "junit", mutations[mutation]
     )
 
     with pytest.raises(module.CliMisuseError, match="artifact"):
@@ -6177,7 +6758,12 @@ def test_completed_report_binds_full_tap_suite_evidence(tmp_path, mutation):
         "changed_count": original.replace(b"# tests 2", b"# tests 3"),
     }
     _rehash_completed_command_artifact(
-        module, artifact_root, record, "stdout", mutations[mutation]
+        module,
+        artifact_root,
+        record,
+        "shared_node",
+        "stdout",
+        mutations[mutation],
     )
 
     with pytest.raises(module.CliMisuseError, match="artifact"):
@@ -6204,7 +6790,7 @@ def test_completed_report_rejects_project_junit_substitution_with_valid_header(
     )
     substituted = original.replace(b"node-b", b"ordinary-substitute")
     _rehash_completed_command_artifact(
-        module, artifact_root, record, "junit", substituted
+        module, artifact_root, record, "backend", "junit", substituted
     )
 
     with pytest.raises(module.CliMisuseError, match="artifact"):
@@ -6377,7 +6963,9 @@ def test_completed_report_rejects_untrusted_artifact_tree(tmp_path, mutation):
     else:
         raise AssertionError(mutation)
 
-    with pytest.raises(module.CliMisuseError, match="artifact"):
+    with pytest.raises(
+        module.CliMisuseError, match="artifact|execution contract"
+    ):
         module.render_completed_report(
             artifact_root / "report.json", tmp_path / f"{mutation}.md"
         )
