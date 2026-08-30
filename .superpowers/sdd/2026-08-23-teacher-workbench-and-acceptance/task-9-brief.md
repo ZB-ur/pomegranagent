@@ -1455,6 +1455,169 @@ canonical Unit 8, or artifact command ran. Status remains **NO-GO** pending a
 new scoped review of these exact five paths, separate A⁗ authorization, and a
 complete fresh Unit 8 from command 1.
 
+#### A-quadruple-prime partial Unit 8 and settled-failure phase amendment
+
+Scoped review authorized and created non-amend implementation Commit
+A-quadruple-prime (A⁗)
+`8a21619885261051349ce4c55738678325c807b9`. Exactly one canonical Unit 8
+runner then started from command 1 against that clean HEAD. Immutable run
+`20260830T103407247103Z-task9` completed another truthful first-failure prefix:
+runner `507/507`, Lovable `18/18`, and backend `266/266` passed; browser parsed
+`431/432` with the sole failure
+`tests.browser.test_teacher_today::test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy[non-json-1024x768]`.
+The runner stopped before commands 5--22 and correctly returned
+`TECHNICAL_NO_GO`, exit `1`, for `COMMAND_FAILURE`, `GATE_FAILURE`, and
+`LOVABLE_DELIVERABLE_MISSING`; all fourteen gates are `BLOCKED`. The exact
+artifact bytes are immutable truthful RED evidence and must not be edited,
+restarted, or reused as completed release evidence.
+
+The A-triple-prime diagnosis at the click/transport boundary was correct but
+the first harness amendment applied it too narrowly. Every route handler in the
+14-node mismatch/malformed/HTTP/non-JSON matrix immediately fulfills the retry
+request. The shared API parser or Today response validator can therefore reject
+and Today's catch can restore the enabled action before Playwright's
+cross-process `Locator.click()` returns, just as an immediate offline abort can.
+The A⁗ browser JUnit executed all fourteen nodes: thirteen passed, while the
+`non-json-1024x768` node observed the already restored enabled action; the
+same-kind `non-json-1440x900` node passed. That difference is a scheduling
+window, not a product-state distinction or authorization for a product change.
+
+The browser harness contract is therefore amended by observation phase rather
+than failure kind:
+
+- an immediately fulfilled or aborted route is a **settled** test. It proves
+  only the fixed final failure copy, restored enabled action, retained failed
+  row and unrelated actions, absence of raw detail/false success/page error,
+  and the exact request boundary. `Locator.click()` return is never authority
+  that such a request is still pending;
+- disabled and single-flight assertions require a **held** retry route whose
+  callback has actually been captured and which remains unresolved. Request
+  notification alone is not capture authority. The existing bounded event-pump
+  condition and cleanup protocol remain mandatory before any pending-state,
+  route-count, or settlement assertion;
+- the settled selector remains exactly seven failure kinds by two viewports
+  (`14` nodes), held offline remains exactly two viewports (`2` nodes), and
+  held accepted/replayed success remains exactly two results by two viewports
+  (`4` nodes). Their node names, suite inventory, selector counts, and Gate
+  3/7/14 mappings do not change;
+- the minimal product change is no product change: remove only the shared
+  post-click transient disabled assertion from the settled 14-node test. All
+  final-state assertions remain exact. Existing Today held tests must be
+  audited to ensure actual route capture precedes every pending-state claim;
+- this repair owns only `tests/browser/test_teacher_today.py`, this brief, and
+  `task-9-report.md`. Today/shared API product code, runner code/tests, every
+  Unit 8 artifact, and inherited user dirt remain read-only.
+
+The pre-edit held-route audit supplied a second honest harness RED without
+manufacturing a browser schedule: the older row-boundary, accepted/replayed
+single-flight, and navigation-away tests held a retry route but read their
+capture list or asserted disabled immediately after click/double-click. Only the
+new held-offline test already condition-waited the handler's own append. The
+minimal same-file repair reuses the existing bounded condition pump in those
+three tests before any route count, pending-state assertion, route fulfillment,
+or navigation. It changes no product expectation, node ID, parameter, selector,
+manifest row, gate, or suite count.
+
+The immutable A⁗ canonical failure supplies the genuine RED; repeatedly
+running a race until it fails is forbidden and would not strengthen the
+contract. Focused verification covered the exact settled 14, held-offline 2,
+held accepted/replayed 4, row-boundary 2, and navigation-away 2 nodes and passed
+**24 passed, 1 warning in 28.42s**. The complete Today file passed **72 passed,
+1 warning in 79.75s**; both warnings were the pre-existing Starlette/httpx
+deprecation. The unchanged manifest plus Gates 1--14 deletion/substitution
+matrix passed **16 passed in 0.82s**. Complete pure-runner verification with
+`--noconftest`, `xfail_strict`, and separate JUnit outputs passed twice at
+**507 passed in 22.65s** and **507 passed in 22.64s**. Read-only AST validation
+was `syntax_ok=1`.
+
+Every pytest's immediately adjacent before/after ResourceSnapshot retained
+SHA-256 `179395c604498a7a3806edbf416c098835b73e0420ae76b03e000cb0f1456009`,
+logical SQLite
+`c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+log SHA/size/mtime
+`5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7` /
+`2961585` / `1787939944391406243`, TTS digest
+`daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+HEAD A⁗, and `unsafe=[]`. No provider, external network, real service,
+backend, full browser suite, Node, canonical Unit 8, or artifact command ran.
+Status remains **NO-GO** pending fresh scoped review of this exact three-path
+repair, a separately authorized non-amend replacement candidate, and one
+complete fresh Unit 8 from command 1.
+
+#### A⁗⁗ scoped-review count and teardown amendment
+
+Independent scoped review of the staged three-path harness repair found two P1
+coverage gaps. They do not overturn the product-timing diagnosis and do not
+authorize a product, runner, manifest, gate, or artifact change. Verify-first
+inspection confirmed both findings against the real browser test, so the review
+findings themselves are the honest RED evidence; no product failure, repeated
+race, arbitrary delay, or teardown leak is manufactured.
+
+P1-1 is a settled-state false-GREEN boundary. The 14-node test waited for final
+safe feedback but did not count the retry POST or the four initial Today panel
+reads. Its handlers returned the same usable fixture on repeated calls, so a
+duplicate retry or failure-triggered panel reload could remain visually green.
+The frozen settled contract now requires, independently for every failure kind
+and viewport:
+
+- exactly one POST to the exact conversation-42 retry URL;
+- exactly one initial read of each roster, pending, processing, and failed
+  panel URL, in the frozen initial order, and zero failure-triggered reloads;
+- handler invocation counts equal those real request counts, so a duplicate
+  route cannot be hidden by an idempotent fixture;
+- after safe feedback, the failed conversation remains exactly once with the
+  sole global retry action enabled; roster/pending/processing retain their
+  exact empty states and actions; no pending/processing migration, failed-empty
+  success projection, raw server detail, false success, or page error appears.
+
+P1-2 is a held-route teardown boundary. The row-boundary, accepted/replayed,
+and navigation-away groups condition-waited capture in their main body but did
+not own equivalent exception-safe cleanup; navigation also used a fixed 100 ms
+delay as request-failure observation. Every group must now use the already
+reviewed held-offline protocol:
+
+- a named exact-URL request/requestfailed listener supplies only start or
+  terminal signals and is always removed;
+- `handler_closing` makes any late route callback abort immediately;
+- `finally` condition-pumps a started-but-not-yet-captured request to actual
+  capture or a clear deadline, offers `abort("failed")` to every captured route
+  while containing only expected already-handled Playwright errors, then
+  unroutes the exact handler and removes only its own listeners;
+- navigation waits conditionally until the exact retry URL is present in
+  `failed_requests`; the fixed 100 ms sleep is forbidden.
+
+The change remains inside the same one browser-test file and two documents.
+Node IDs, settled 14 + held-offline 2 + held-success 4 inventory, selector
+counts, suite total, and Gate 3/7/14 mappings remain exact. Focused verification
+must exercise the settled counters and all three cleanup groups before the
+complete Today, unchanged manifest/Gates, pure-runner-twice, and syntax gates.
+
+The review findings are the honest RED for both coverage gaps. The settled 14
+counter/control nodes were direct-GREEN at **14 passed, 1 warning in 17.18s**;
+the three cleanup groups were direct-GREEN at **8 passed, 1 warning in
+10.64s**. The combined frozen selector passed **24 passed, 1 warning in
+27.66s**, the complete Today file passed **72 passed, 1 warning in 78.78s**,
+and the unchanged manifest plus Gates 1--14 deletion/substitution selector
+passed **16 passed in 0.80s**. Complete pure-runner verification used
+`--noconftest`, `xfail_strict`, and distinct JUnit outputs and passed twice at
+**507 passed in 22.30s** and **507 passed in 22.20s**. Read-only AST validation
+was `syntax_ok=1`; the browser warnings were only the pre-existing
+Starlette/httpx deprecation.
+
+Every pytest's immediately adjacent before/after ResourceSnapshot retained
+SHA-256 `7705305f232b234478efe36771cc02a13a28bbd19a138f9333311b775e4ecc34`,
+logical SQLite
+`c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+log SHA/size/mtime
+`5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7` /
+`2961585` / `1787939944391406243`, TTS digest
+`daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+HEAD A⁗, and `unsafe=[]`. No provider, external network, real service,
+backend, full browser suite, Node, canonical Unit 8, or artifact command ran.
+Status remains **NO-GO** pending fresh scoped review of these exact staged
+three-path bytes, a separately authorized non-amend replacement candidate, and
+one complete fresh Unit 8 from command 1.
+
 The report `tested_head` is not permanently bound to `FROZEN_START_HEAD`.
 Before Commit A it may equal that start hash; after Commit A it must equal the
 exact lowercase 40-hex candidate in the complete global before/after snapshot

@@ -124,6 +124,39 @@ def wait_for_condition(page, condition, description: str, timeout_ms: int = 5_00
         page.wait_for_timeout(10)  # Event-pump poll interval, not a fixed-state delay.
 
 
+def cleanup_held_retry_routes(
+    page,
+    *,
+    retry_url,
+    handler,
+    held_routes,
+    request_started,
+    listeners,
+):
+    cleanup_error = None
+    if request_started() and not held_routes and not page.is_closed():
+        try:
+            wait_for_condition(
+                page,
+                lambda: held_routes[0] if held_routes else None,
+                "late retry route capture during cleanup",
+            )
+        except AssertionError as error:
+            cleanup_error = error
+    for held_route in tuple(held_routes):
+        try:
+            held_route.abort("failed")
+        except PlaywrightError:
+            pass
+    try:
+        page.unroute(retry_url, handler)
+    finally:
+        for event, listener in listeners:
+            page.remove_listener(event, listener)
+    if cleanup_error is not None:
+        raise cleanup_error
+
+
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_today_shell_migrates_overview_before_first_authenticated_load(teacher_browser, viewport):
     _context, page = open_teacher(teacher_browser, viewport, "#overview?source=legacy")
@@ -325,7 +358,11 @@ def test_teacher_today_renders_pending_processing_and_failed_rows_with_retry_bou
 ):
     _context, page = open_teacher(teacher_browser, viewport)
     requests = []
-    page.on("request", lambda request: requests.append(request))
+
+    def record_request(request):
+        requests.append(request)
+
+    page.on("request", record_request)
 
     def distinct_row(queue, conversation_id, child, completed_at):
         row = queue_row(queue)
@@ -385,76 +422,100 @@ def test_teacher_today_renders_pending_processing_and_failed_rows_with_retry_bou
         "failed": failed,
     })
     retry_posts = []
+    retry_url = f"{teacher_browser.server.base_url}/api/conversations/44/analysis/retry"
+    handler_closing = False
 
     def hold_retry(route):
+        nonlocal handler_closing
         assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
         retry_posts.append(route)
+        if handler_closing:
+            try:
+                route.abort("failed")
+            except PlaywrightError:
+                pass
 
-    page.route(
-        f"{teacher_browser.server.base_url}/api/conversations/44/analysis/retry",
-        hold_retry,
-    )
-    setup_teacher(page)
+    page.route(retry_url, hold_retry)
+    try:
+        setup_teacher(page)
 
-    expected = {
-        "pending": ("雨雨", "16:59", 42, "待审阅"),
-        "processing": ("云云", "17:05", 43, "分析中"),
-        "failed": ("星星", "17:11", 44, "分析失败"),
-    }
-    for key, (name, completed_time, conversation_id, status) in expected.items():
-        target = panel(page, key)
-        target.get_by_text(name, exact=True).wait_for()
-        details = " ".join(
-            target.locator(".today-row-details").inner_text().split()
+        expected = {
+            "pending": ("雨雨", "16:59", 42, "待审阅"),
+            "processing": ("云云", "17:05", 43, "分析中"),
+            "failed": ("星星", "17:11", 44, "分析失败"),
+        }
+        for key, (name, completed_time, conversation_id, status) in expected.items():
+            target = panel(page, key)
+            target.get_by_text(name, exact=True).wait_for()
+            details = " ".join(
+                target.locator(".today-row-details").inner_text().split()
+            )
+            assert details == (
+                f"完成于 {completed_time} · 会话 #{conversation_id} · 2 轮 · {status}"
+            )
+            for other_name in {"雨雨", "云云", "星星"} - {name}:
+                assert target.get_by_text(other_name, exact=True).count() == 0
+
+        assert panel(page, "pending").locator(".today-analysis-retry").count() == 0
+        assert panel(page, "processing").locator(".today-analysis-retry").count() == 0
+        retry = panel(page, "failed").get_by_role(
+            "button", name="重试分析：星星", exact=True
         )
-        assert details == (
-            f"完成于 {completed_time} · 会话 #{conversation_id} · 2 轮 · {status}"
+        assert retry.count() == 1
+        assert page.locator(".today-analysis-retry").count() == 1
+
+        retry.dblclick()
+        held_retry = wait_for_condition(
+            page,
+            lambda: retry_posts[0] if retry_posts else None,
+            "retry route capture before row-boundary pending assertions",
         )
-        for other_name in {"雨雨", "云云", "星星"} - {name}:
-            assert target.get_by_text(other_name, exact=True).count() == 0
+        assert retry.is_disabled()
+        page.keyboard.press("Enter")
+        assert len(retry_posts) == 1
+        fulfill_json(held_retry, {
+            "conversation_id": 44,
+            "analysis_job_id": 29,
+            "analysis_status": "pending",
+            "attempt_count": 0,
+            "retry_accepted": True,
+            "replayed": False,
+        })
 
-    assert panel(page, "pending").locator(".today-analysis-retry").count() == 0
-    assert panel(page, "processing").locator(".today-analysis-retry").count() == 0
-    retry = panel(page, "failed").get_by_role(
-        "button", name="重试分析：星星", exact=True
-    )
-    assert retry.count() == 1
-    assert page.locator(".today-analysis-retry").count() == 1
+        panel(page, "failed").get_by_text("暂无分析失败会话", exact=True).wait_for()
+        moved = panel(page, "processing")
+        moved.get_by_text("星星", exact=True).wait_for()
+        moved_row = moved.locator(".today-queue-row").filter(has_text="星星")
+        assert moved_row.count() == 1
+        assert " ".join(moved_row.locator(".today-row-details").inner_text().split()) == (
+            "完成于 17:11 · 会话 #44 · 2 轮 · 分析中"
+        )
+        assert moved.get_by_text("云云", exact=True).count() == 1
+        assert panel(page, "pending").get_by_text("雨雨", exact=True).count() == 1
+        assert page.locator(".today-analysis-retry").count() == 0
+        assert len(retry_posts) == 1
+        assert reads == {"roster": 1, "pending": 2, "processing": 2, "failed": 2}
 
-    retry.dblclick()
-    assert retry.is_disabled()
-    page.keyboard.press("Enter")
-    assert len(retry_posts) == 1
-    fulfill_json(retry_posts[0], {
-        "conversation_id": 44,
-        "analysis_job_id": 29,
-        "analysis_status": "pending",
-        "attempt_count": 0,
-        "retry_accepted": True,
-        "replayed": False,
-    })
-
-    panel(page, "failed").get_by_text("暂无分析失败会话", exact=True).wait_for()
-    moved = panel(page, "processing")
-    moved.get_by_text("星星", exact=True).wait_for()
-    moved_row = moved.locator(".today-queue-row").filter(has_text="星星")
-    assert moved_row.count() == 1
-    assert " ".join(moved_row.locator(".today-row-details").inner_text().split()) == (
-        "完成于 17:11 · 会话 #44 · 2 轮 · 分析中"
-    )
-    assert moved.get_by_text("云云", exact=True).count() == 1
-    assert panel(page, "pending").get_by_text("雨雨", exact=True).count() == 1
-    assert page.locator(".today-analysis-retry").count() == 0
-    assert len(retry_posts) == 1
-    assert reads == {"roster": 1, "pending": 2, "processing": 2, "failed": 2}
-
-    paths = application_request_paths(requests, teacher_browser.server.base_url)
-    queue_reads = [path for path in paths if path in PANEL_PATHS.values()]
-    assert queue_reads[-3:] == [
-        "/api/conversations?queue=failed",
-        "/api/conversations?queue=processing",
-        "/api/conversations?queue=pending",
-    ]
+        paths = application_request_paths(requests, teacher_browser.server.base_url)
+        queue_reads = [path for path in paths if path in PANEL_PATHS.values()]
+        assert queue_reads[-3:] == [
+            "/api/conversations?queue=failed",
+            "/api/conversations?queue=processing",
+            "/api/conversations?queue=pending",
+        ]
+    finally:
+        handler_closing = True
+        cleanup_held_retry_routes(
+            page,
+            retry_url=retry_url,
+            handler=hold_retry,
+            held_routes=retry_posts,
+            request_started=lambda: any(
+                request.url == retry_url and request.method == "POST"
+                for request in requests
+            ),
+            listeners=(("request", record_request),),
+        )
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -469,7 +530,11 @@ def test_teacher_today_renders_pending_processing_and_failed_rows_with_retry_bou
 def test_teacher_today_analysis_retry_is_single_flight_and_refreshes_three_queues_in_order(teacher_browser, viewport, retry_body):
     _context, page = open_teacher(teacher_browser, viewport)
     requests = []
-    page.on("request", lambda request: requests.append(request))
+
+    def record_request(request):
+        requests.append(request)
+
+    page.on("request", record_request)
     failed_reads = 0
 
     def failed(route):
@@ -481,41 +546,81 @@ def test_teacher_today_analysis_retry_is_single_flight_and_refreshes_three_queue
     handlers["failed"] = failed
     install_panel_routes(page, teacher_browser, handlers)
     posts = []
+    retry_url = f"{teacher_browser.server.base_url}/api/conversations/42/analysis/retry"
+    handler_closing = False
 
     def hold_retry(route):
+        nonlocal handler_closing
         assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
         posts.append(route)
+        if handler_closing:
+            try:
+                route.abort("failed")
+            except PlaywrightError:
+                pass
 
-    page.route(f"{teacher_browser.server.base_url}/api/conversations/42/analysis/retry", hold_retry)
-    setup_teacher(page)
-    button = panel(page, "failed").get_by_role("button", name="重试分析：雨雨", exact=True)
-    button.wait_for()
-    button.dblclick()
-    assert button.is_disabled()
-    page.keyboard.press("Enter")
-    assert len(posts) == 1
-    fulfill_json(posts[0], retry_body)
-    panel(page, "failed").get_by_text("暂无分析失败会话", exact=True).wait_for()
-    paths = application_request_paths(requests, teacher_browser.server.base_url)
-    queue_reads = [path for path in paths if path in PANEL_PATHS.values()]
-    assert queue_reads[-3:] == [
-        "/api/conversations?queue=failed",
-        "/api/conversations?queue=processing",
-        "/api/conversations?queue=pending",
-    ]
-    assert failed_reads == 2
+    page.route(retry_url, hold_retry)
+    try:
+        setup_teacher(page)
+        button = panel(page, "failed").get_by_role("button", name="重试分析：雨雨", exact=True)
+        button.wait_for()
+        button.dblclick()
+        held_post = wait_for_condition(
+            page,
+            lambda: posts[0] if posts else None,
+            "retry route capture before success pending assertions",
+        )
+        assert button.is_disabled()
+        page.keyboard.press("Enter")
+        assert len(posts) == 1
+        fulfill_json(held_post, retry_body)
+        panel(page, "failed").get_by_text("暂无分析失败会话", exact=True).wait_for()
+        paths = application_request_paths(requests, teacher_browser.server.base_url)
+        queue_reads = [path for path in paths if path in PANEL_PATHS.values()]
+        assert queue_reads[-3:] == [
+            "/api/conversations?queue=failed",
+            "/api/conversations?queue=processing",
+            "/api/conversations?queue=pending",
+        ]
+        assert failed_reads == 2
+    finally:
+        handler_closing = True
+        cleanup_held_retry_routes(
+            page,
+            retry_url=retry_url,
+            handler=hold_retry,
+            held_routes=posts,
+            request_started=lambda: any(
+                request.url == retry_url and request.method == "POST"
+                for request in requests
+            ),
+            listeners=(("request", record_request),),
+        )
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 @pytest.mark.parametrize("failure", ["mismatch", "malformed", "401", "404", "409", "500", "non-json"])
 def test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy(teacher_browser, viewport, failure):
     _context, page = open_teacher(teacher_browser, viewport)
-    handlers = empty_handlers()
-    handlers["failed"] = lambda route: fulfill_json(route, [queue_row("failed")])
+    requests = []
+    page.on("request", lambda request: requests.append(request))
+    reads = {key: 0 for key in PANEL_PATHS}
+
+    def panel_handler(key):
+        def handler(route):
+            reads[key] += 1
+            fulfill_json(route, [queue_row("failed")] if key == "failed" else [])
+
+        return handler
+
+    handlers = {key: panel_handler(key) for key in PANEL_PATHS}
     install_panel_routes(page, teacher_browser, handlers)
+    retry_posts = []
+    retry_path = "/api/conversations/42/analysis/retry"
 
     def fail_retry(route):
         assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
+        retry_posts.append(route.request.url)
         if failure == "mismatch":
             fulfill_json(route, {"conversation_id": 7, "analysis_job_id": 19, "analysis_status": "pending", "attempt_count": 0, "retry_accepted": True, "replayed": False})
         elif failure == "malformed":
@@ -525,18 +630,41 @@ def test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_
         else:
             route.fulfill(status=int(failure), content_type="application/json", body='{"error":{"message":"raw-retry-detail"}}')
 
-    page.route(f"{teacher_browser.server.base_url}/api/conversations/42/analysis/retry", fail_retry)
+    page.route(f"{teacher_browser.server.base_url}{retry_path}", fail_retry)
     errors = []
     page.on("pageerror", lambda error: errors.append(str(error)))
     setup_teacher(page)
     failed_panel = panel(page, "failed")
     button = failed_panel.get_by_role("button", name="重试分析：雨雨", exact=True)
     button.click()
-    assert button.is_disabled()
     feedback = failed_panel.locator(".today-retry-feedback")
     feedback.get_by_text("暂时无法重试分析，请稍后再试。", exact=True).wait_for()
     assert button.is_enabled()
     assert failed_panel.get_by_text("会话 #42", exact=True).count() == 1
+    assert failed_panel.get_by_text("雨雨", exact=True).count() == 1
+    assert failed_panel.get_by_text(EMPTY_COPY["failed"], exact=True).count() == 0
+    assert failed_panel.locator(".today-queue-row").count() == 1
+    assert failed_panel.locator(".today-analysis-retry").count() == 1
+    assert page.locator(".today-analysis-retry").count() == 1
+    assert panel(page, "roster").get_by_text(EMPTY_COPY["roster"], exact=True).count() == 1
+    assert panel(page, "roster").get_by_role("link", name="前往值日排班", exact=True).count() == 1
+    assert panel(page, "pending").get_by_text(EMPTY_COPY["pending"], exact=True).count() == 1
+    assert panel(page, "processing").get_by_text(EMPTY_COPY["processing"], exact=True).count() == 1
+    assert panel(page, "pending").get_by_text("雨雨", exact=True).count() == 0
+    assert panel(page, "processing").get_by_text("雨雨", exact=True).count() == 0
+    assert page.get_by_role("link", name="开始幼儿对话", exact=True).count() == 1
+
+    application_paths = application_request_paths(requests, teacher_browser.server.base_url)
+    assert [path for path in application_paths if path in PANEL_PATHS.values()] == TODAY_REQUESTS
+    retry_requests = [
+        request
+        for request in requests
+        if request.url == f"{teacher_browser.server.base_url}{retry_path}"
+    ]
+    assert len(retry_requests) == 1
+    assert retry_requests[0].method == "POST"
+    assert retry_posts == [f"{teacher_browser.server.base_url}{retry_path}"]
+    assert reads == {"roster": 1, "pending": 1, "processing": 1, "failed": 1}
     assert "raw-retry-detail" not in page.locator("body").inner_text()
     assert errors == []
 
@@ -637,19 +765,63 @@ def test_teacher_today_held_retry_cannot_mutate_after_navigation(teacher_browser
     handlers["failed"] = lambda route: fulfill_json(route, [queue_row("failed")])
     install_panel_routes(page, teacher_browser, handlers)
     posts = []
+    retry_requests = []
     failed_requests = []
-    page.on("requestfailed", lambda request: failed_requests.append(request.url))
+    retry_url = f"{teacher_browser.server.base_url}/api/conversations/42/analysis/retry"
+    handler_closing = False
+
+    def record_retry_request(request):
+        if request.url == retry_url and request.method == "POST":
+            retry_requests.append(request)
+
+    def record_failed_request(request):
+        failed_requests.append(request.url)
+
+    page.on("request", record_retry_request)
+    page.on("requestfailed", record_failed_request)
 
     def hold_retry(route):
+        nonlocal handler_closing
         assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
         posts.append(route)
+        if handler_closing:
+            try:
+                route.abort("failed")
+            except PlaywrightError:
+                pass
 
-    page.route(f"{teacher_browser.server.base_url}/api/conversations/42/analysis/retry", hold_retry)
-    setup_teacher(page)
-    panel(page, "failed").get_by_role("button", name="重试分析：雨雨", exact=True).click()
-    assert len(posts) == 1
-    page.get_by_role("button", name="幼儿管理", exact=True).click()
-    page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
-    page.wait_for_timeout(100)
-    assert f"{teacher_browser.server.base_url}/api/conversations/42/analysis/retry" in failed_requests
-    assert "暂时无法重试分析，请稍后再试。" not in page.locator("#main").inner_text()
+    page.route(retry_url, hold_retry)
+    try:
+        setup_teacher(page)
+        panel(page, "failed").get_by_role(
+            "button", name="重试分析：雨雨", exact=True
+        ).click()
+        wait_for_condition(
+            page,
+            lambda: posts[0] if posts else None,
+            "retry route capture before navigation",
+        )
+        assert len(retry_requests) == 1
+        assert len(posts) == 1
+        page.get_by_role("button", name="幼儿管理", exact=True).click()
+        page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
+        wait_for_condition(
+            page,
+            lambda: retry_url if retry_url in failed_requests else None,
+            "exact retry request failure after navigation",
+        )
+        assert failed_requests.count(retry_url) == 1
+        assert "暂时无法重试分析，请稍后再试。" not in page.locator("#main").inner_text()
+    finally:
+        handler_closing = True
+        cleanup_held_retry_routes(
+            page,
+            retry_url=retry_url,
+            handler=hold_retry,
+            held_routes=posts,
+            request_started=lambda: bool(retry_requests),
+            listeners=(
+                ("request", record_retry_request),
+                ("requestfailed", record_failed_request),
+            ),
+        )

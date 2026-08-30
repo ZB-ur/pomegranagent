@@ -4,16 +4,17 @@ Date: 2026-08-29–30 (Asia/Shanghai)
 
 ## Verdict
 
-**Current status: NO-GO. Non-amend Commit A-triple-prime
-`2dfd807ed635faaa837ad592c71e992ce71fe09a` was independently authorized and
+**Current status: NO-GO. Non-amend Commit A-quadruple-prime (A⁗)
+`8a21619885261051349ce4c55738678325c807b9` was independently authorized and
 received exactly one canonical Unit 8 run. That run is truthful partial
 evidence, not a release candidate: runner, Lovable, and backend passed, then
-browser stopped the inventory at `431/432` on one offline-retry harness node.
-Systematic diagnosis found that the post-`Locator.click()` disabled assertion
-did not establish that the immediately aborted transport was still pending.
-No product defect or product change is authorized. The exact five-path harness
-repair below requires fresh scoped review, non-amend A-quadruple-prime (A⁗),
-and a complete new Unit 8 from command 1.**
+browser stopped the inventory at `431/432` on the settled-failure
+`non-json-1024x768` harness node. The earlier diagnosis was correct but applied
+too narrowly: post-`Locator.click()` disabled is not a pending witness for any
+immediately fulfilled or aborted route. No product defect or product change is
+authorized. The exact three-path harness repair below requires fresh scoped
+review, a new non-amend replacement candidate, and a complete new Unit 8 from
+command 1.**
 
 The eighth pre-Commit-A Contract/Code/Safety/Stage review returned **GO,
 P0=0, P1=0, P2=0**. Commit A
@@ -1407,6 +1408,123 @@ resource drift or tripwire fired.
   separate authorization of non-amend A-quadruple-prime (A⁗), and one complete
   fresh Unit 8 from command 1 against that exact clean HEAD.
 
+### Unit 8.10: A-quadruple-prime settled-failure harness repair
+
+- Scoped review authorized non-amend A⁗
+  `8a21619885261051349ce4c55738678325c807b9`, after which exactly one canonical
+  Unit 8 started from command 1. Immutable run
+  `20260830T103407247103Z-task9` recorded runner **507/507**, Lovable **18/18**,
+  and backend **266/266** passing before browser returned **431/432**. Commands
+  5--22 did not start; all fourteen gates are `BLOCKED`. The runner truthfully
+  returned `TECHNICAL_NO_GO`, exit `1`, for `COMMAND_FAILURE`, `GATE_FAILURE`,
+  and `LOVABLE_DELIVERABLE_MISSING`.
+- The sole browser failure was
+  `tests.browser.test_teacher_today::test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy[non-json-1024x768]`:
+  immediately after `button.click()`, `button.is_disabled()` was false. The
+  settled matrix executed all fourteen nodes; thirteen passed, including the
+  same-kind `non-json-1440x900` node. The immutable report JSON, report Markdown,
+  and browser JUnit SHA-256 values are respectively
+  `cdf02a6649844452e5461f943090da3088b246ced157d0c9559672427e29983b`,
+  `ca451f5c136a7e437c29abd858d50fb04085c5b09854bb0dd4ac476e3860a165`, and
+  `e5b5263077decf036d2f8e46c41b734c2d4e4388492610b1328e3f70e125017e`;
+  no artifact byte is edited or reused.
+- Read-only systematic diagnosis showed the same event boundary for every
+  immediate settlement: Today synchronously disables and records the flight;
+  route fulfill/abort allows the shared API parser or Today validator to reject;
+  Today's catch restores enabled plus fixed safe copy; Playwright can process
+  that complete chain before its cross-process click returns. This is a harness
+  scheduling observation, not a product-state distinction. The two held-offline
+  nodes passed because they enter pending assertions only after actual route
+  capture while the route remains unresolved.
+- The frozen repair separates evidence by phase. The exact settled 14-node row
+  proves only final safe failure/restoration and keeps its Gate 7/14 mapping.
+  Held-offline 2 and held accepted/replayed 4 remain the pending/single-flight
+  evidence for Gates 3/7/14. Node IDs, counts, suite inventory, manifest, and
+  gate mappings remain unchanged. The only behavioral test change is removal of
+  the settled row's transient post-click disabled assertion; all final-state
+  assertions remain exact and no product file changes.
+- Static pre-edit audit supplied a separate honest harness RED: three older
+  held-retry tests read their route list or asserted pending immediately after
+  click/double-click, whereas only the held-offline nodes condition-waited the
+  handler's own append. The repair mechanically reuses that existing bounded
+  condition pump before row-boundary, accepted/replayed, and navigation-away
+  route use. No artificial delay or repeated race run is used, and no node,
+  parameter, product expectation, manifest row, gate, or count changes.
+- The immutable A⁗ `431/432` result is the genuine RED. No repeated execution
+  was used to manufacture another race failure. Focused verification of the
+  settled 14, held-offline 2, held accepted/replayed 4, row-boundary 2, and
+  navigation-away 2 nodes passed **24 passed, 1 warning in 28.42s**. The
+  complete Today file passed **72 passed, 1 warning in 79.75s**. Both warnings
+  were the pre-existing Starlette/httpx deprecation; no skip, xfail, page error,
+  or unresolved route was observed.
+- The unchanged manifest plus Gates 1--14 deletion/substitution matrix passed
+  **16 passed in 0.82s**. Complete pure runner verification used
+  `--noconftest`, `xfail_strict`, and distinct JUnit outputs and passed twice:
+  **507 passed in 22.65s** and **507 passed in 22.64s**. Read-only AST validation
+  was `syntax_ok=1`.
+- Every pytest's adjacent before/after ResourceSnapshot retained exact SHA-256
+  `179395c604498a7a3806edbf416c098835b73e0420ae76b03e000cb0f1456009`,
+  logical SQLite
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  log SHA/size/mtime
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7` /
+  `2961585` / `1787939944391406243`, TTS digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  HEAD A⁗, and `unsafe=[]`. No provider, external network, real service,
+  backend, full browser suite, Node, canonical Unit 8, or artifact command ran.
+- Status remains **NO-GO**. The repair owns only
+  `tests/browser/test_teacher_today.py`, the Task 9 brief, and this report; it
+  requires fresh scoped review, separate authorization of a new non-amend
+  replacement candidate, and one complete fresh Unit 8 from command 1.
+
+### Unit 8.11: settled-count and held-teardown scoped-review repair
+
+- Independent review found two P1 harness coverage gaps in the staged A⁗⁗
+  repair. Verify-first inspection confirmed both without changing the product
+  diagnosis. These reviewer findings are retained as honest RED evidence; no
+  repeated race, artificial sleep, product failure, or teardown leak is
+  manufactured.
+- P1-1: settled14 did not count the exact retry POST or the four initial panel
+  reads. Because its handlers returned the same usable fixture on duplicates, a
+  second retry or failure-triggered reload could preserve the final DOM and pass.
+  The repair must bind both real request events and handler invocations to one
+  exact conversation-42 POST plus one read each of roster/pending/processing/
+  failed, with no reload. Final assertions retain the failed row, sole retry
+  action, sibling empty states/actions, no success migration, safe fixed copy,
+  no raw detail, and no page error.
+- P1-2: row-boundary, accepted/replayed, and navigation-away held routes lacked
+  the held-offline test's exception-safe cleanup. Each group must own named
+  listeners, `handler_closing`, bounded late-capture pumping, abort attempts for
+  every captured route, exact unroute, and listener removal in `finally`.
+  Navigation must condition-wait the exact retry URL in `failed_requests`; its
+  fixed 100 ms sleep is removed.
+- The repair remains exact-three-path and harness-only. Node IDs, parameters,
+  14+2+4 inventory, suite count, manifest, Gate 3/7/14 mappings, product code,
+  runner code/tests, and every Unit 8 artifact remain unchanged.
+- Reviewer findings are the honest RED. The settled counter/control nodes were
+  direct-GREEN at **14 passed, 1 warning in 17.18s** and the three cleanup
+  groups were direct-GREEN at **8 passed, 1 warning in 10.64s**. The combined
+  focused selector passed **24 passed, 1 warning in 27.66s**; the complete
+  Today file passed **72 passed, 1 warning in 78.78s**; the unchanged manifest
+  plus Gates 1--14 deletion/substitution selector passed **16 passed in
+  0.80s**; complete pure runner passed twice with `--noconftest`,
+  `xfail_strict`, and distinct JUnit outputs at **507 passed in 22.30s** and
+  **507 passed in 22.20s**. Read-only AST validation was `syntax_ok=1`; browser
+  warnings were only the pre-existing Starlette/httpx deprecation.
+- Every pytest's immediately adjacent resource guard retained exact snapshot
+  SHA-256 `7705305f232b234478efe36771cc02a13a28bbd19a138f9333311b775e4ecc34`,
+  logical SQLite
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  log SHA/size/mtime
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7` /
+  `2961585` / `1787939944391406243`, TTS digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  HEAD A⁗, and `unsafe=[]`. No provider, external network, real service,
+  backend, full browser suite, Node, canonical Unit 8, or artifact command ran.
+- Status remains **NO-GO** pending fresh scoped review of the exact staged
+  three-path bytes, a separately authorized non-amend replacement candidate,
+  and one complete fresh Unit 8 from command 1.
+
 ## Final policy and staging evidence
 
 - No `pytest.skip`, `pytest.xfail`, skip/skipif/xfail marker exists in the
@@ -1435,7 +1553,7 @@ resource drift or tripwire fired.
 - The seventh-review final read-only AST syntax check passed for both changed
   Python files (`syntax_ok=2`), and the unstaged `git diff --check` exited `0`
   before exact restaging.
-- The A-quadruple-prime harness repair's exact cached path list and
+- The current A⁗⁗ harness repair's exact cached path list and
   `git diff --cached --check` are recorded below after explicit staging; the
   invalidated earlier implementation commits are not amended and no repair
   commit is made in this task.
@@ -1460,31 +1578,33 @@ No agent, runner, or reviewer can accept these risks for the release owner.
   integrity NO-GO verdicts invalidate release use of all three candidates.
   Commit A-triple-prime received exactly one canonical Unit 8 run; it stopped
   truthfully at command 4 with browser `431/432`, so that immutable partial
-  evidence is also a release NO-GO. Unit 9 evidence-only reporting has not
-  started and is not claimed.
+  evidence is also a release NO-GO. A⁗ likewise received exactly one canonical
+  Unit 8 run and stopped truthfully at command 4 with browser `431/432`; its
+  immutable partial evidence is not a release candidate. Unit 9 evidence-only
+  reporting has not started and is not claimed.
 - Lovable remains a blank private bootstrap without a valid reviewed
   `prototype-reference.md`; no scope waiver has been authorized.
 - Historical incident disposition remains human-owned and unresolved.
-- Commit A-triple-prime exists at
-  `2dfd807ed635faaa837ad592c71e992ce71fe09a`; its one partial run is preserved
-  at `artifacts/acceptance/20260830T084330976903Z-task9` and is not rerun or
-  repaired in place. The current exact five-path harness repair stage requires
-  independent Contract/Code/Safety/Stage review, a new non-amend Commit
-  A-quadruple-prime (A⁗), and a complete replacement Unit 8 run from command 1.
+- Commit A-triple-prime and A⁗ exist at
+  `2dfd807ed635faaa837ad592c71e992ce71fe09a` and
+  `8a21619885261051349ce4c55738678325c807b9`; their one partial run each is
+  preserved at `artifacts/acceptance/20260830T084330976903Z-task9` and
+  `artifacts/acceptance/20260830T103407247103Z-task9`. Neither run is rerun or
+  repaired in place. The current exact three-path harness repair requires
+  independent Contract/Code/Safety/Stage review, a new authorized non-amend
+  replacement candidate, and a complete replacement Unit 8 run from command 1.
   Any new P0/P1 invalidates that repair verdict and requires another focused
   RED/GREEN loop.
 
 ### Exact cached paths after staging
 
-The final explicit A-quadruple-prime harness repair cached-name check returned
-exactly these five paths:
+The final explicit A⁗⁗ harness repair cached-name check returned exactly
+these three paths:
 
 ```text
 .superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-brief.md
 .superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-report.md
-scripts/run_interaction_acceptance.py
 tests/browser/test_teacher_today.py
-tests/test_interaction_acceptance_runner.py
 ```
 
 No inherited user path, plan, brainstorm artifact, unrelated product file,
