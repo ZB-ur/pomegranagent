@@ -4,8 +4,6 @@ import vm from 'node:vm';
 import { readFileSync } from 'node:fs';
 
 const source = readFileSync(new URL('../../../app/frontend/shared/api.js', import.meta.url), 'utf8');
-const teacherHtml = readFileSync(new URL('../../../app/frontend/teacher.html', import.meta.url), 'utf8');
-const teacherSource = teacherHtml.match(/<script>([\s\S]*)<\/script>\s*<\/body>/)[1];
 const jsonResponse = value => ({
   ok: true, status: 200,
   headers: new Headers({ 'content-type': 'application/json' }),
@@ -67,84 +65,6 @@ function loadVersionGateHarness(fetchImpl) {
     setTimeout, clearTimeout, document, console,
   });
   return { api: window.DuckAPI, dispatched, document, stateWrites };
-}
-
-function loadTeacherWithPendingGates() {
-  const listeners = {};
-  const requests = [];
-  let statusCalls = 0;
-  let resolveReady;
-  let rejectReady;
-  let resolveStatus;
-  let rejectStatus;
-  const readyPromise = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
-  const statusPromise = new Promise((resolve, reject) => { resolveStatus = resolve; rejectStatus = reject; });
-  const button = {
-    dataset: { v: 'overview' },
-    disabled: false,
-    classList: { add() {}, remove() {} },
-    closest: () => button,
-  };
-  const nav = {
-    attributes: {},
-    addEventListener(type, listener) { listeners[`nav:${type}`] = listener; },
-    querySelectorAll: () => [button],
-    setAttribute(name, value) { this.attributes[name] = value; },
-    removeAttribute(name) { delete this.attributes[name]; },
-  };
-  const genericElement = () => ({
-    children: [],
-    style: {},
-    classList: { add() {}, remove() {}, toggle() {} },
-    append(...children) { this.children.push(...children); },
-    appendChild(child) { this.children.push(child); },
-    replaceChildren(...children) { this.children = children; },
-    addEventListener() {},
-    setAttribute() {},
-    focus() {},
-  });
-  const main = genericElement();
-  const aside = genericElement();
-  let runtimeMaintenance = null;
-  const document = {
-    getElementById: id => ({ nav, main, 'runtime-maintenance': runtimeMaintenance }[id] || null),
-    querySelector: selector => (selector === 'aside' ? aside : null),
-    querySelectorAll: () => [button],
-    createElement: genericElement,
-  };
-  const window = {
-    addEventListener(type, listener) { listeners[type] = listener; },
-  };
-  const location = { hash: '' };
-  vm.runInNewContext(teacherSource, {
-    window, document, location,
-    DuckAPI: {
-      ready: () => readyPromise,
-      request: path => {
-        requests.push(path);
-        return new Promise(() => {});
-      },
-    },
-    DuckAuth: {
-      status: () => {
-        statusCalls += 1;
-        return statusPromise;
-      },
-    },
-    URLSearchParams,
-    Object,
-    Array,
-    Set,
-    Math,
-    String,
-    Number,
-    console,
-  });
-  return {
-    button, listeners, nav, main, location, requests, rejectReady, resolveReady, rejectStatus, resolveStatus,
-    get statusCalls() { return statusCalls; },
-    showRuntimeMaintenance() { runtimeMaintenance = genericElement(); },
-  };
 }
 
 test('a repeated sequenceKey cancels the older request without a network error', async () => {
@@ -285,55 +205,4 @@ test('a failed gate is shared by later bootstrapVersionGate and ready calls with
   assert.deepEqual(harness.dispatched.map(event => event.type), ['duck:runtime-blocked']);
   assert.equal(harness.document.body.replacements.length, 1);
   assert.equal(harness.document.body.replacements[0][0].id, 'runtime-maintenance');
-});
-
-test('teacher navigation and hash routes cannot start business requests before runtime and authentication readiness', async () => {
-  const teacher = loadTeacherWithPendingGates();
-  teacher.location.hash = '#children';
-  teacher.listeners.hashchange();
-  teacher.listeners['nav:click']({ target: teacher.button });
-  await Promise.resolve();
-  assert.deepEqual(teacher.requests, []);
-  assert.equal(teacher.button.disabled, true);
-  assert.equal(teacher.nav.attributes['aria-busy'], 'true');
-
-  teacher.resolveReady();
-  await Promise.resolve();
-  await Promise.resolve();
-  assert.equal(teacher.statusCalls, 1);
-  assert.deepEqual(teacher.requests, []);
-  assert.equal(teacher.button.disabled, true);
-  assert.equal(teacher.nav.attributes['aria-busy'], 'true');
-
-  teacher.resolveStatus({ configured: true, authenticated: true });
-  await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual(teacher.requests, ['/api/children']);
-  assert.equal(teacher.button.disabled, false);
-  assert.equal(teacher.nav.attributes['aria-busy'], undefined);
-});
-
-test('a rejected teacher auth status renders its safe error instead of leaving the main panel blank', async () => {
-  const teacher = loadTeacherWithPendingGates();
-  teacher.resolveReady();
-  await Promise.resolve();
-  await Promise.resolve();
-
-  teacher.rejectStatus({ message: '教师认证服务不可用' });
-  await new Promise(resolve => setImmediate(resolve));
-
-  assert.equal(teacher.main.children.length, 1);
-  assert.equal(teacher.main.children[0].children[1].children[0], '教师认证服务不可用');
-  assert.equal(teacher.button.disabled, true);
-  assert.equal(teacher.nav.attributes['aria-busy'], 'true');
-});
-
-test('a failed runtime readiness check preserves the existing maintenance screen', async () => {
-  const teacher = loadTeacherWithPendingGates();
-  teacher.showRuntimeMaintenance();
-  teacher.rejectReady({ message: '应用正在更新' });
-  await new Promise(resolve => setImmediate(resolve));
-
-  assert.equal(teacher.main.children.length, 0);
-  assert.equal(teacher.button.disabled, true);
-  assert.equal(teacher.nav.attributes['aria-busy'], 'true');
 });

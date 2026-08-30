@@ -1,4 +1,5 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import importlib.util
 import os
 from pathlib import Path
@@ -336,8 +337,12 @@ def test_edge_tts_fake_stream_trips_before_network(monkeypatch, tmp_path):
         async for _chunk in module.FakeCommunicate("synthetic", "synthetic-voice").stream():
             raise AssertionError("fake stream yielded transport data")
 
-    with pytest.raises(AssertionError, match="external edge_tts disabled in browser tests"):
+    def consume_in_isolated_thread():
         asyncio.run(consume())
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        with pytest.raises(AssertionError, match="external edge_tts disabled in browser tests"):
+            executor.submit(consume_in_isolated_thread).result()
     assert tripwire.read_text(encoding="utf-8") == "edge_tts blocked\n"
 
 

@@ -1,7 +1,12 @@
 import hashlib
+import json
 import os
+import socket
+import sqlite3
 import subprocess
 import sys
+import textwrap
+import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
@@ -37,6 +42,7 @@ def _safe_pytest_subprocess_env(test_db_path: Path) -> dict[str, str]:
             "APP_DB_PATH": str(test_db_path.resolve()),
             "DISABLE_EXTERNAL_AI": "1",
             "PYTHONNOUSERSITE": "1",
+            "PYTHON_DOTENV_DISABLED": "1",
         }
     )
     return env
@@ -63,9 +69,46 @@ def test_safe_pytest_subprocess_env_discards_hostile_parent_configuration(monkey
     assert env["APP_DB_PATH"] == str(child_db.resolve())
     assert env["DISABLE_EXTERNAL_AI"] == "1"
     assert env["PYTHONNOUSERSITE"] == "1"
+    assert env["PYTHON_DOTENV_DISABLED"] == "1"
     assert {key for key in env if key.startswith("APP_DB_")} == {"APP_DB_MODE", "APP_DB_PATH"}
     forbidden = ("DEEPSEEK", "OPENAI", "API_KEY", "PROVIDER", "PROXY")
     assert all(not any(marker in key for marker in forbidden) for key in env)
+
+
+def test_nested_ai_import_disables_synthetic_dotenv_before_module_import(tmp_path: Path):
+    package_root = tmp_path / "isolated-ai-import"
+    backend_package = package_root / "app" / "backend"
+    backend_package.mkdir(parents=True)
+    (package_root / "app" / "__init__.py").write_text("", encoding="utf-8")
+    (backend_package / "__init__.py").write_text("", encoding="utf-8")
+    (backend_package / "ai_engine.py").symlink_to(ROOT / "app" / "backend" / "ai_engine.py")
+    (package_root / ".env").write_text(
+        "TASK9_DOTENV_SENTINEL=loaded\n",
+        encoding="utf-8",
+    )
+    probe_path = package_root / "probe.py"
+    probe_path.write_text(
+        "import os\n"
+        "import app.backend.ai_engine\n"
+        "loaded = os.getenv('TASK9_DOTENV_SENTINEL') == 'loaded'\n"
+        "print(f\"sentinel_loaded={str(loaded).lower()}\")\n",
+        encoding="utf-8",
+    )
+    child_database = package_root / "isolated.db"
+    child_env = _safe_pytest_subprocess_env(child_database)
+    child_env["PYTHONPATH"] = str(package_root)
+
+    result = subprocess.run(
+        [sys.executable, str(probe_path)],
+        cwd=package_root,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == "sentinel_loaded=false\n"
 
 
 def test_lowest_level_ai_test_breaker_fails_before_the_provider_transport(monkeypatch):
@@ -87,7 +130,7 @@ def test_lowest_level_ai_test_breaker_fails_before_the_provider_transport(monkey
     try:
         ai_engine._llm([{"role": "user", "content": "synthetic test input"}], retries=0)
     except AssertionError as error:
-        assert str(error) == "external AI disabled in tests"
+        assert str(error) == "TEST_TRIPWIRE:external_ai"
     else:
         pytest.fail(f"test breaker did not run before outbound={outbound!r}")
     assert outbound == []
@@ -108,6 +151,526 @@ def test_pytest_application_logging_uses_only_the_disposable_runtime_file():
     if APPLICATION_FILE_HANDLER_INSTALLED:
         assert TEST_APPLICATION_LOG_PATH in handler_paths
         assert TEST_APPLICATION_LOG_PATH.is_relative_to(TEST_RUNTIME_DIR)
+
+
+def test_application_resource_guard_captures_db_sidecars_log_and_tts_tree(
+    tmp_path: Path,
+):
+    from conftest import (
+        application_resource_violations,
+        capture_application_resources,
+    )
+
+    database = tmp_path / "guard.db"
+    application_log = tmp_path / "app.log"
+    tts_cache = tmp_path / "tts-cache"
+    application_log.write_bytes(b"before-log")
+    tts_cache.mkdir()
+    (tts_cache / "voice.mp3").write_bytes(b"before-audio")
+
+    with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        connection.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO evidence VALUES ('before')")
+        connection.commit()
+        before = capture_application_resources(database, application_log, tts_cache)
+        assert before.database.database.kind.value == "regular"
+        assert before.database.wal.kind.value == "regular"
+        assert before.database.shm.kind.value == "regular"
+        assert before.log.kind.value == "regular"
+        assert before.tts.root.kind.value == "directory"
+        assert before.tts.entries[0].relative_path == "voice.mp3"
+        assert before.unsafe_reasons == ()
+
+        connection.execute("INSERT INTO evidence VALUES ('after')")
+        connection.commit()
+        application_log.write_bytes(b"after-log")
+        (tts_cache / "voice.mp3").write_bytes(b"after-audio")
+        after = capture_application_resources(database, application_log, tts_cache)
+
+    violations = set(application_resource_violations(before, after))
+    assert "DATABASE_LOGICAL_CHANGED" in violations
+    assert "DATABASE_WAL_CHANGED" in violations
+    assert "APPLICATION_LOG_CHANGED" in violations
+    assert "TTS_TREE_CHANGED" in violations
+
+
+def test_real_application_resource_baseline_is_complete_and_stable():
+    from conftest import (
+        APPLICATION_RESOURCE_BASELINE,
+        REAL_APPLICATION_DATABASE_PATH,
+        REAL_APPLICATION_LOG_PATH,
+        REAL_TTS_CACHE_PATH,
+        capture_application_resources,
+    )
+
+    baseline = APPLICATION_RESOURCE_BASELINE
+    assert REAL_APPLICATION_DATABASE_PATH == (ROOT / "data" / "duck_diary.db").resolve()
+    assert REAL_APPLICATION_LOG_PATH == (ROOT / "logs" / "app.log").resolve()
+    assert REAL_TTS_CACHE_PATH == (ROOT / "data" / "tts_cache").resolve()
+    assert baseline.database.database.kind.value == "regular"
+    assert baseline.database.wal.kind.value in {"missing", "regular"}
+    assert baseline.database.shm.kind.value in {"missing", "regular"}
+    assert baseline.log.kind.value == "regular"
+    assert baseline.tts.root.kind.value == "directory"
+    assert baseline.unsafe_reasons == ()
+    assert capture_application_resources() == baseline
+
+
+def test_import_guard_blocks_tts_provider_and_nonlocal_network_before_transport():
+    import edge_tts
+
+    from app.backend import main as main_module
+    from conftest import (
+        BLOCKED_NETWORK_ATTEMPTS,
+        EXTERNAL_NETWORK_TRIPWIRE_INSTALLED,
+        REAL_TTS_CACHE_PATH,
+        TEST_RUNTIME_DIR,
+        TEST_TTS_CACHE_PATH,
+        TTS_PROVIDER_TRIPWIRE_INSTALLED,
+    )
+
+    assert EXTERNAL_NETWORK_TRIPWIRE_INSTALLED is True
+    assert TTS_PROVIDER_TRIPWIRE_INSTALLED is True
+    assert main_module.TTS_CACHE_DIR == TEST_TTS_CACHE_PATH
+    assert TEST_TTS_CACHE_PATH.is_relative_to(TEST_RUNTIME_DIR)
+    assert main_module.TTS_CACHE_DIR != REAL_TTS_CACHE_PATH
+    with pytest.raises(AssertionError) as tts_error:
+        edge_tts.Communicate("synthetic text", "synthetic voice")
+    assert str(tts_error.value) == "TEST_TRIPWIRE:edge_tts"
+
+    before_attempts = len(BLOCKED_NETWORK_ATTEMPTS)
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
+        with pytest.raises(AssertionError) as network_error:
+            candidate.connect(("provider.invalid", 443))
+    assert str(network_error.value) == "TEST_TRIPWIRE:external_network"
+    assert len(BLOCKED_NETWORK_ATTEMPTS) == before_attempts + 1
+
+
+def test_uncaught_tripwire_probe_exposes_exact_junit_types_and_frames(
+    tmp_path: Path,
+):
+    probe = tmp_path / "test_uncaught_tripwire_probe.py"
+    junit = tmp_path / "tripwire-probe.junit.xml"
+    browser_child = ROOT / "tests" / "browser" / "child_server.py"
+    browser_conftest = ROOT / "tests" / "browser" / "conftest.py"
+    probe.write_text(
+        textwrap.dedent(
+            f"""
+            import asyncio
+            import importlib.util
+            import os
+            import pytest
+            import socket
+            import types
+            from pathlib import Path
+
+            def load(path, name):
+                spec = importlib.util.spec_from_file_location(name, path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                return module
+
+            def test_root_external_ai():
+                import conftest
+                conftest._blocked_external_ai()
+
+            def test_root_edge_tts():
+                import edge_tts
+                edge_tts.Communicate("synthetic", "synthetic")
+
+            def test_root_external_network():
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
+                    candidate.connect(("provider.invalid", 443))
+
+            def test_root_external_network_connect_ex():
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
+                    candidate.connect_ex(("provider.invalid", 443))
+
+            def test_browser_edge_tts():
+                module = load({str(browser_child)!r}, "task9_child_server_edge")
+                os.environ["BROWSER_AI_TRIPWIRE_PATH"] = {str(tmp_path / "edge.tripwire")!r}
+                stream = module.FakeCommunicate().stream()
+                asyncio.run(stream.__anext__())
+
+            def test_browser_external_ai():
+                module = load({str(browser_child)!r}, "task9_child_server_ai")
+                os.environ["BROWSER_AI_TRIPWIRE_PATH"] = {str(tmp_path / "ai.tripwire")!r}
+                os.environ["BROWSER_NETWORK_TRIPWIRE_PATH"] = {str(tmp_path / "ai-network.tripwire")!r}
+                os.environ["BROWSER_CONTEXT_EGRESS_TRIPWIRE_PATH"] = {str(tmp_path / "ai-context.tripwire")!r}
+                main = types.SimpleNamespace(
+                    ai_engine=types.SimpleNamespace(_llm=lambda: None)
+                )
+                module._install_external_tripwires(main)
+                main.ai_engine._llm()
+
+            def test_browser_external_network():
+                module = load({str(browser_child)!r}, "task9_child_server_network")
+                guarded = module.make_loopback_connect_guard(
+                    Path({str(tmp_path / "network.tripwire")!r}), lambda *_args: None
+                )
+                guarded(None, ("provider.invalid", 443))
+
+            @pytest.fixture
+            def browser_file_guard():
+                module = load({str(browser_conftest)!r}, "task9_browser_conftest")
+                tripwire = {str(tmp_path / "browser_ai.tripwire")!r}
+                open(tripwire, "wb").close()
+                environment = {{
+                    "BROWSER_AI_TRIPWIRE_PATH": tripwire,
+                    "BROWSER_NETWORK_TRIPWIRE_PATH": {str(tmp_path / "absent-network")!r},
+                    "BROWSER_CONTEXT_EGRESS_TRIPWIRE_PATH": {str(tmp_path / "absent-context")!r},
+                }}
+                sentinel = object()
+                fake_module = types.SimpleNamespace(
+                    capture_resource_snapshots=lambda *_args: sentinel,
+                    REAL_DATABASE_PATH=None,
+                    REAL_LOG_PATH=None,
+                    REAL_TTS_CACHE_PATH=None,
+                )
+                server = types.SimpleNamespace(
+                    real_snapshots=sentinel, environment=environment
+                )
+                yield
+                module._verify_server_safety(fake_module, server)
+
+            def test_browser_fixture_file(browser_file_guard):
+                pass
+            """
+        ),
+        encoding="utf-8",
+    )
+    child_env = _safe_pytest_subprocess_env(tmp_path / "tripwire-probe.db")
+    child_env["PYTHONPATH"] = str(ROOT / "tests")
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "scripts.run_interaction_acceptance",
+            "--capture=sys",
+            "-p",
+            "conftest",
+            f"--junitxml={junit}",
+            str(probe),
+        ],
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 1, result.stdout + result.stderr
+    cases = {
+        case.attrib["name"]: case
+        for case in ET.parse(junit).getroot().iter("testcase")
+    }
+    expected = {
+        "test_root_external_ai": (
+            "AssertionError",
+            "tests/conftest.py",
+            "TEST_TRIPWIRE:external_ai",
+            "external_ai",
+            "tests/conftest.py:_blocked_external_ai",
+        ),
+        "test_root_edge_tts": (
+            "AssertionError",
+            "tests/conftest.py",
+            "TEST_TRIPWIRE:edge_tts",
+            "edge_tts",
+            "tests/conftest.py:__init__",
+        ),
+        "test_root_external_network": (
+            "AssertionError",
+            "tests/conftest.py",
+            "TEST_TRIPWIRE:external_network",
+            "external_network",
+            "tests/conftest.py:_guarded_socket_connect",
+        ),
+        "test_root_external_network_connect_ex": (
+            "AssertionError",
+            "tests/conftest.py",
+            "TEST_TRIPWIRE:external_network",
+            "external_network",
+            "tests/conftest.py:_guarded_socket_connect_ex",
+        ),
+        "test_browser_edge_tts": (
+            "AssertionError",
+            "tests/browser/child_server.py",
+            "external edge_tts disabled in browser tests",
+            "browser_edge_tts",
+            "tests/browser/child_server.py:stream",
+        ),
+        "test_browser_external_ai": (
+            "AssertionError",
+            "tests/browser/child_server.py",
+            "external AI disabled in browser tests",
+            "browser_ai",
+            "tests/browser/child_server.py:blocked_llm",
+        ),
+        "test_browser_external_network": (
+            "PermissionError",
+            "tests/browser/child_server.py",
+            "non-loopback socket blocked:",
+            "browser_network",
+            "tests/browser/child_server.py:guarded",
+        ),
+        "test_browser_fixture_file": (
+            "AssertionError",
+            "tests/browser/conftest.py",
+            "browser tripwire fired: BROWSER_AI_TRIPWIRE_PATH",
+            "browser_file",
+            "tests/browser/conftest.py:_verify_server_safety",
+        ),
+    }
+    assert set(cases) == set(expected)
+    for name, (
+        exception_type,
+        frame_path,
+        message,
+        event_id,
+        frame,
+    ) in expected.items():
+        failure = cases[name].find("failure")
+        if failure is None:
+            failure = cases[name].find("error")
+        assert failure is not None
+        assert message in failure.attrib["message"]
+        assert failure.attrib["message"].startswith(
+            f"{exception_type}: {message}"
+        ) or name == "test_browser_fixture_file"
+        assert frame_path in (failure.text or "")
+        properties = cases[name].findall("./properties/property")
+        assert [(item.attrib["name"], item.attrib["value"]) for item in properties] == [
+            (
+                "task9.tripwire_event",
+                json.dumps(
+                    {
+                        "event_id": event_id,
+                        "exception_type": exception_type,
+                        "frame": frame,
+                    },
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            )
+        ]
+
+    from scripts import run_interaction_acceptance as runner
+
+    sidecar = runner.parse_tripwire_sidecar(
+        result.stderr.encode("utf-8"), command_id="tripwire-probe"
+    )
+    assert sidecar.integrity_valid is True, sidecar
+    assert len(sidecar.records) == len(expected)
+    evidence = runner.parse_pytest_junit_bytes(
+        junit.read_bytes(),
+        stderr_payload=result.stderr.encode("utf-8"),
+        command_id="tripwire-probe",
+        require_tripwire_auth=True,
+    )
+    assert evidence.reason == "NONPASS_TESTS"
+    assert tuple(
+        (item.node_id, item.event_id, item.exception_type, item.frame)
+        for item in evidence.tripwire_events
+    ) == tuple(
+        (name, values[3], values[0], values[4])
+        for name, values in expected.items()
+    )
+
+
+def _run_authenticated_tripwire_probe(
+    tmp_path: Path,
+    *,
+    name: str,
+    source: str,
+    extra_plugins: tuple[str, ...] = (),
+):
+    probe = tmp_path / f"test_{name}.py"
+    junit = tmp_path / f"{name}.junit.xml"
+    probe.write_text(textwrap.dedent(source), encoding="utf-8")
+    child_env = _safe_pytest_subprocess_env(tmp_path / f"{name}.db")
+    child_env["PYTHONPATH"] = os.pathsep.join(
+        (str(tmp_path), str(ROOT / "tests"))
+    )
+    arguments = [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "-p",
+        "scripts.run_interaction_acceptance",
+        "--capture=sys",
+        "-p",
+        "conftest",
+    ]
+    for plugin in extra_plugins:
+        arguments.extend(("-p", plugin))
+    arguments.extend((f"--junitxml={junit}", str(probe)))
+    result = subprocess.run(
+        arguments,
+        cwd=ROOT,
+        env=child_env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    return result, junit
+
+
+def test_authenticated_tripwire_plugin_covers_all_phases_without_stale_events(
+    tmp_path: Path,
+):
+    from scripts import run_interaction_acceptance as runner
+
+    lifecycle, lifecycle_junit = _run_authenticated_tripwire_probe(
+        tmp_path,
+        name="lifecycle",
+        source="""
+            import conftest
+            import pytest
+            import socket
+
+            @pytest.fixture
+            def setup_breaker():
+                conftest._blocked_external_ai()
+
+            @pytest.fixture
+            def teardown_breaker():
+                yield
+                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as candidate:
+                    candidate.connect_ex(("provider.invalid", 443))
+
+            def test_setup_phase(setup_breaker):
+                pass
+
+            def test_call_and_teardown_phases(teardown_breaker):
+                conftest._blocked_external_ai()
+        """,
+    )
+    assert lifecycle.returncode == 1, lifecycle.stdout + lifecycle.stderr
+    lifecycle_sidecar = runner.parse_tripwire_sidecar(
+        lifecycle.stderr.encode("utf-8"), command_id="lifecycle"
+    )
+    assert lifecycle_sidecar.integrity_valid is True, lifecycle_sidecar
+    assert tuple(
+        (item.node_id, item.phase, item.sequence, item.event.event_id)
+        for item in lifecycle_sidecar.records
+    ) == (
+        ("test_setup_phase", "setup", 1, "external_ai"),
+        ("test_call_and_teardown_phases", "call", 2, "external_ai"),
+        (
+            "test_call_and_teardown_phases",
+            "teardown",
+            3,
+            "external_network",
+        ),
+    )
+    lifecycle_evidence = runner.parse_pytest_junit_bytes(
+        lifecycle_junit.read_bytes(),
+        stderr_payload=lifecycle.stderr.encode("utf-8"),
+        command_id="lifecycle",
+        require_tripwire_auth=True,
+    )
+    assert tuple(
+        (item.node_id, item.event_id)
+        for item in lifecycle_evidence.tripwire_events
+    ) == (
+        ("test_setup_phase", "external_ai"),
+        ("test_call_and_teardown_phases", "external_ai"),
+        ("test_call_and_teardown_phases", "external_network"),
+    )
+
+    import_result, _import_junit = _run_authenticated_tripwire_probe(
+        tmp_path,
+        name="import_phase",
+        source="""
+            import conftest
+            conftest._blocked_external_ai()
+        """,
+    )
+    assert import_result.returncode != 0
+    import_sidecar = runner.parse_tripwire_sidecar(
+        import_result.stderr.encode("utf-8"), command_id="import_phase"
+    )
+    assert tuple(item.phase for item in import_sidecar.records) == ("import",)
+
+    collection_plugin = tmp_path / "task9_collection_probe.py"
+    collection_plugin.write_text(
+        textwrap.dedent(
+            """
+            def pytest_collection_modifyitems():
+                import conftest
+                conftest._blocked_external_ai()
+            """
+        ),
+        encoding="utf-8",
+    )
+    collection_result, _collection_junit = _run_authenticated_tripwire_probe(
+        tmp_path,
+        name="collection_phase",
+        source="""
+            def test_never_runs():
+                pass
+        """,
+        extra_plugins=("task9_collection_probe",),
+    )
+    assert collection_result.returncode != 0
+    collection_sidecar = runner.parse_tripwire_sidecar(
+        collection_result.stderr.encode("utf-8"), command_id="collection_phase"
+    )
+    assert tuple(item.phase for item in collection_sidecar.records) == (
+        "collection",
+    )
+
+    clean_result, clean_junit = _run_authenticated_tripwire_probe(
+        tmp_path,
+        name="caught_and_fake",
+        source=f"""
+            import conftest
+            import json
+
+            def test_caught_raw_property_and_compile_lookalike(record_property):
+                try:
+                    conftest._blocked_external_ai()
+                except AssertionError:
+                    pass
+                namespace = {{}}
+                exec(compile(
+                    'def _blocked_external_ai():\\n    raise AssertionError("TEST_TRIPWIRE:external_ai")',
+                    {str(ROOT / 'tests' / 'conftest.py')!r},
+                    'exec',
+                ), namespace)
+                try:
+                    namespace['_blocked_external_ai']()
+                except AssertionError:
+                    pass
+                record_property('task9.tripwire_event', json.dumps({{
+                    'event_id': 'external_ai',
+                    'exception_type': 'AssertionError',
+                    'frame': 'tests/conftest.py:_blocked_external_ai',
+                }}, separators=(',', ':'), sort_keys=True))
+                print('TASK9_AUTH_V1:EVENT:not-base64:not-a-signature')
+        """,
+    )
+    assert clean_result.returncode == 0, clean_result.stdout + clean_result.stderr
+    clean_sidecar = runner.parse_tripwire_sidecar(
+        clean_result.stderr.encode("utf-8"), command_id="caught_and_fake"
+    )
+    assert clean_sidecar.integrity_valid is True
+    assert clean_sidecar.records == ()
+    clean_evidence = runner.parse_pytest_junit_bytes(
+        clean_junit.read_bytes(),
+        stderr_payload=clean_result.stderr.encode("utf-8"),
+        command_id="caught_and_fake",
+        require_tripwire_auth=True,
+    )
+    assert clean_evidence.tripwire_events == ()
+    assert clean_evidence.reason == "TRIPWIRE_AUTH_INVALID"
 
 
 def test_concurrent_retry_does_not_leave_schema_reflection_on_a_stale_connection(tmp_path: Path):

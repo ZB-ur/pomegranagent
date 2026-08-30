@@ -129,6 +129,36 @@ def unavailable_detail(status: str) -> dict:
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_review_queue_and_detail_show_identity_time_id_and_status(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher(teacher_browser, viewport)
+    install_review_reads(
+        page,
+        teacher_browser,
+        queue_handler=lambda route: fulfill_json(route, [queue_row()]),
+        detail_handler=lambda route: fulfill_json(route, review_detail()),
+    )
+
+    unlock_review(page)
+
+    queue = page.locator("[data-review-panel='queue'] .review-queue-row")
+    detail = page.locator("[data-review-panel='detail'] .review-detail-header")
+    queue.get_by_role("link", name="审阅雨雨的会话 #42", exact=True).wait_for()
+    detail.get_by_role("heading", name="雨雨", exact=True).wait_for()
+    queue_text = queue.inner_text()
+    detail_text = detail.inner_text()
+    assert "雨雨" in queue_text
+    assert "完成于 16:59" in queue_text
+    assert "会话 #42" in queue_text
+    assert "草稿" in queue_text
+    assert "雨雨" in detail_text
+    assert "完成于 16:59" in detail_text
+    assert "会话 #42" in detail_text
+    assert "分析已完成" in detail_text
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_review_deep_link_renders_split_read_only_shell_before_parallel_queue_and_detail_loads(teacher_browser, viewport):
     _context, page = open_teacher(teacher_browser, viewport)
     held_queue = []

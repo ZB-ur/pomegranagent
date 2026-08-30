@@ -1,0 +1,847 @@
+# Teacher Task 9 execution report
+
+Date: 2026-08-29–30 (Asia/Shanghai)
+
+## Verdict
+
+**NO-GO pending a fresh independent Code/Safety/Stage review. The
+seventh-review repair candidate passed the affected local gates described below,
+but it is not review-approved, committed, or release GO.**
+
+Units 0–7 of the frozen Task 9 plan were executed strictly serially. The final
+seventh-review pure runner suite passed twice with `322 passed`. This repair
+changed only the runner, its pure tests, the brief, and this report, so the
+database-safety, backend, browser, and Node gates were not rerun; their prior
+results remain historical rather than newly claimed in this loop. Every
+protected-resource check remained byte/logical/metadata identical to the
+baseline. The exact Commit A allow-list is staged after this report update, and
+execution stops for independent review.
+
+The first independent Code/Safety/Stage review of the earlier staged bytes was
+**NO-GO, P0=0, P1=8, P2=2**. Those bytes and that staged verdict are invalid.
+All findings were verified against the frozen contract, repaired with focused
+RED/GREEN or honestly recorded direct-GREEN evidence, and the affected full
+gates were rerun. A later narrow ownership amendment for one pre-existing
+Playwright/`asyncio.run` order defect received independent Contract **GO,
+P0=0, P1=0, P2=0**. The bytes described below still require a fresh independent
+review; this report does not promote the earlier NO-GO to GO.
+
+The next independent Code/Safety/Stage review also returned **NO-GO, P0=0,
+P1=4, P2=0**: one global-baseline finding, one schema-v2 cross-field finding,
+one process-cleanup-totality finding, and one exact 9,999/10,000 ms timeout-
+boundary finding. Those staged bytes and their verdict are invalid; the four
+findings were verified against the current brief and repaired under focused TDD
+or explicitly recorded direct-GREEN evidence. Those repaired bytes were then
+submitted to the third independent review.
+
+The third independent review returned **NO-GO, P0=0, P1=3, P2=1**. Those staged
+bytes and their verdict are invalid. Its three P1 findings and one P2 report
+correction were repaired and submitted to the fourth independent review.
+
+The fourth independent review returned **NO-GO, P0=0, P1=5, P2=1**. Those staged
+bytes and verdict are invalid. Its five P1 findings and one P2 correction were
+repaired and submitted to the fifth independent review.
+
+The fifth independent review returned **NO-GO, P0=0, P1=4, P2=1**: unconditional
+tested-HEAD binding, semantic resource reconstruction, authenticated JUnit
+tripwire provenance, and an exact immutable incident ledger, plus correction of
+the preceding review totals. Those staged bytes and verdict are invalid. The
+fifth-review repairs below were submitted to a sixth fresh independent
+Code/Safety/Stage review; this report does not claim GO.
+
+The sixth independent review returned **NO-GO, P0=0, P1=3, P2=0**; Contract,
+Code, and Safety were NO-GO while Stage was GO. Its three findings covered the
+complete authenticated-event lifecycle, symmetric directory-snapshot failure
+semantics, and monotonic artifact-failure safety. The initial hostile-code
+authentication wording was impossible inside the frozen same-process design,
+so implementation stopped until a minimal normative threat-model amendment
+received independent Contract GO. The repaired bytes below now require the
+seventh fresh independent Code/Safety/Stage review.
+
+The seventh independent review returned **NO-GO, P0=0, P1=1, P2=0**. Its sole
+P1 found that completed rendering verified evidence artifact hashes but did not
+bind the full canonical `SuiteEvidence` to the exact verified JUnit/TAP bytes.
+Those staged bytes and verdict are invalid. The finding was verified and
+repaired below; the current bytes require an eighth fresh independent
+Code/Safety/Stage review and do not claim GO.
+
+No full 22-command release evidence run has been claimed. That clean-HEAD run
+belongs to Unit 8 after an independently reviewed Commit A exists. The three
+historical incidents still require explicit release-owner disposition, and the
+Lovable prototype/reference or an explicit owner waiver is still missing.
+Overall release therefore remains **NO-GO**.
+
+## Frozen identity, authorization, and boundaries
+
+- Required and current implementation HEAD before Commit A:
+  `89b3459973bb7cd6e8be43b1251ac6cdb5dfa292`.
+- Frozen brief:
+  `.superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-brief.md`.
+- Original implementation brief verification: SHA-256
+  `191af8e82737961081108404da5825900afb0fdfc3ee94651109b8d729267a91`,
+  exactly `1328` lines.
+- Independently approved Unit 7.6 narrow-amendment brief verification:
+  SHA-256
+  `7ea9485d17e2c9fc3196ac120020c5f882b065f3f31b0fe4d9ab2333be03ba5b`,
+  exactly `1349` lines.
+- Historical second-review repair-amended brief verification: SHA-256
+  `638bb1eefab0485b855c17218b2f39f491ea601aedce35466d6c20eca1a63c66`,
+  exactly `1383` lines.
+- Historical third-review repair-amended brief verification: SHA-256
+  `32305faf4bdb2c6cb98c0da46034ce0a055451b809eef1df282c077b1369be49`,
+  exactly `1412` lines.
+- Historical fourth-review repair-amended brief verification: SHA-256
+  `91618226f11c663389701a36b650733d94cbbfa6eeecd333413e65bcaeea955c`,
+  exactly `1467` lines.
+- Historical fifth-review repair-amended brief verification: SHA-256
+  `5bed8b77c1f3536ea3b89bea39a6cb92a54157d4c1119fa66ba0ce490bf32b34`,
+  exactly `1491` lines.
+- Current sixth-review threat-model and repair-amended brief verification:
+  SHA-256
+  `07829e847d8ee35601939ef10f42b2f97442f383eeb710a347202af10b0afd65`,
+  exactly `1572` lines.
+- Current seventh-review evidence-binding amendment verification: SHA-256
+  `f696bcf9e27e82359277a5cfa2661d222df7ff6de125eb561dded904b3716585`,
+  exactly `1587` lines.
+- Independent Contract review before implementation: **GO, P0=0, P1=0,
+  P2=0**.
+- Independent Contract review of the sixth-review cooperative-TCB amendment:
+  **GO, P0=0, P1=0, P2=0**.
+- All Git, Python, pytest, syntax, policy, runner, browser, and Node subprocesses
+  used the frozen `/usr/bin/env -i` launcher allow-list. Top-level commands were
+  strictly serial; no background work, parallel pytest/Node command, provider,
+  installer, real service, worker, rebuild, or external network call was used.
+- The inherited paths `.workbuddy/memory/2026-08-22.md`,
+  `docs/superpowers/specs/2026-08-23-interaction-stabilization-design.md`,
+  `.superpowers/brainstorm/`, and `docs/superpowers/plans/` were never edited,
+  staged, restored, or cleaned by Task 9.
+
+## Protected-resource evidence
+
+The exact protected summary before and after every allowed execution remained:
+
+```text
+protected snapshot SHA-256: 44ef3cadcee753194b663d705dd914515f4f5c105f808a5d2a4d290bc9135804
+SQLite logical digest:      c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3
+logs/app.log SHA-256:       5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7
+logs/app.log size:          2961585
+logs/app.log mtime_ns:      1787939944391406243
+unsafe reasons:             ()
+```
+
+The displayed manual protected digest includes the application SQLite logical
+view and physical database/WAL/SHM metadata, real log bytes/size/mtime,
+recursive TTS cache, and inherited user paths. The runner's full
+`ResourceSnapshot` additionally records Git HEAD and porcelain bytes; expected
+Task 9-owned diff/stage evolution was audited separately, while each actual
+runner command enforces its own before/after porcelain equality. No protected
+resource drift or tripwire fired.
+
+## Unit-by-unit TDD ledger
+
+### Unit 0: clean launcher and preflight
+
+- The original key-only probe correctly failed because Darwin synthesized
+  `__CF_USER_TEXT_ENCODING`. Contract review revised only that platform
+  exception. The revised exact key-only probe passed without reading or
+  printing any environment value. This first failure is a harness-only contract
+  correction, not a passing probe.
+- Three independent clean-environment Git preflights confirmed the exact HEAD,
+  inherited-only dirty categories, and a clean initial diff check.
+
+### Unit 1: shared API-client migration
+
+- Genuine RED: the shared Node file raised the expected top-level `TypeError`
+  because `teacher.html` no longer contains the obsolete inline script.
+- Removed only the obsolete Teacher inline harness and its three dependent
+  tests. The owning shared API-client behavior remained external-module based.
+- GREEN twice: `6 passed`, zero failure/skip/todo/cancel each time. Five owning
+  Python/browser-equivalent selectors passed `8` tests.
+
+### Unit 2: import-safe runner and 22 CommandSpecs
+
+- Genuine RED: importing the not-yet-created runner failed with a missing
+  module.
+- Genuine inventory RED preceded the complete implementation of all 22 frozen
+  IDs, timeouts, conftest modes, JUnit/TAP evidence paths, sorted Node targets,
+  and forbidden-target exclusions.
+- One harness expectation incorrectly used manual lexical ordering for Child
+  files (`api` before `app-effects`); it was corrected to the actual required
+  sorted path order. The focused pure runner slice then passed `5` tests.
+
+### Unit 3: environment and protected resources
+
+- Hostile `Mapping` tests proved rejected provider/key/token/proxy and Darwin
+  keys have no value reads. The production sanitized mapping contains only the
+  allowed neutral keys plus the three forced breakers.
+- Genuine dotenv sentinel RED printed the fixed token `sentinel_loaded=true`;
+  after adding `PYTHON_DOTENV_DISABLED=1` to project and nested subprocess
+  setup, the same real temporary-package import printed `false`.
+- Database-safety matrix: `12 passed`.
+- File, database, directory, user-path, Git-porcelain, and total protected
+  snapshot matrices all had RED before implementation and GREEN after it.
+- The first WAL-visible implementation opened the temporary database directly
+  in `mode=ro`, allowing SQLite to touch a temporary SHM file. The isolation
+  harness was corrected to copy DB/WAL/SHM before the read-only logical dump.
+- Execution-order deviation recorded honestly: strict file/database capture
+  implementation (3.5c) preceded the directory matrix RED (3.5b). The final
+  combined Unit 3 runner slice passed `13` tests.
+
+### Unit 4: process groups and evidence parsers
+
+- Process-group lifecycle matrix covered normal exit, spontaneous signal,
+  timeout TERM, KILL escalation, residual descendants, incomplete drain/reap,
+  canonical cleanup failures, and absence of a later command start: `12`
+  focused passes.
+- JUnit parser: RED `5`, then GREEN `5`. TAP parser including invalid UTF-8:
+  RED `9`, then GREEN `9`.
+- Full pure runner suite at this boundary: `39 passed`.
+
+### Unit 5: manifest, gates, decisions, canonical reports, and run-one
+
+- Frozen manifest: exactly `96` rows, materializing `259` unique node IDs,
+  `14` gates, and `5` internal evidence IDs.
+- Manifest-shape RED/GREEN: `1/1`; Gates 1–7 deletion RED/GREEN: `7/7`;
+  Gates 8–14 deletion and same-count substitution RED/GREEN: `7/7`.
+- Decision/external-artifact strict JSON RED/GREEN: `17/17`. The runner owns
+  only `SAFETY_NO_GO` (`3`), `TECHNICAL_NO_GO` (`1`), and
+  `TECHNICAL_PASS_HUMAN_DECISION_PENDING` (`2`); it never emits final GO.
+- Canonical JSON/Markdown golden tests had genuine RED, then passed twice with
+  timeout final-reap values `-15` and `-9` retained.
+- Genuine ignore RED: `artifacts/acceptance/probe/report.json` was initially
+  not ignored. Added and staged only exact `/artifacts/acceptance/`; the final
+  positive rule is `.gitignore:25`, while sibling artifacts/logs/databases/
+  screenshots and tracked reports remain unignored.
+- The first negative ignore probe accidentally included the independently
+  ignored Task 9 report; the corrected six-path negative probe had no output.
+  This was a harness selection correction, not a policy pass.
+- `run-one` RED was `9` failing tests. An intermediate patch misplaced duplicate
+  golden assertions and caused one harness `NameError`; after correcting only
+  that anchor, `9` passed. Full pure runner suite: `81 passed`.
+
+### Unit 6: missing browser evidence
+
+- Focus test's first harness used programmatic `focus()`, which does not assert
+  `:focus-visible`; actual keyboard Tab navigation replaced it. Genuine product
+  RED then measured the existing single `#ffb800` ring at dark ratios
+  `7.475/9.050` but light/blue ratios only `2.229/1.604`.
+- Minimal conditional product repair changed only the common focus rule to the
+  two-tone `#111827` outline plus `#ffffff` ring. The 1024 selector, both
+  viewports, and complete Teacher accessibility run-one all passed.
+- Disposable SQLite action initially overconstrained the fixture's seeded
+  children table. The corrected collision-resistant business-value query
+  proved visible UI action persistence exactly `0 -> 1` against the fixture's
+  resolved `browser-app.db`, outside repository `data/`; both viewports passed.
+- Review identity/time/conversation/status evidence was direct GREEN at 1024
+  and both viewports.
+- First-chat timeout initially waited on the wrong roster-only `aria-busy`
+  signal. The corrected actual `/api/chat` request boundary proved `9999/10000`
+  ms, durable text/request ID, no fake reply/TTS/completion, and exactly one
+  retry request; both viewports passed.
+- Completion-delay row had genuine collection RED, then passed at 1024 and both
+  viewports with one request and one completed projection.
+- Page-keyboard Child core row had genuine collection RED. Two harness
+  assumptions about automatic child focus/routing were corrected; final flow
+  uses only `page.keyboard` user actions, controlled speech/audio seams,
+  multiple rounds, one completion, and safe exit at both viewports.
+- Today three-status row had genuine collection RED. Its first implementation
+  only needed row-local whitespace normalization for rendered line breaks; both
+  viewports then passed with failed-only retry and stable identity.
+- During timeout editing, one patch accidentally touched the Unit 6.8 route;
+  inspection caught and restored it before any GREEN/full claim.
+
+### Unit 7: CLI, state validation, final verification
+
+- The first focused CLI invocation incorrectly combined `python -I -m pytest`,
+  producing a harness-only import error. The frozen `python -m pytest
+  --noconftest` invocation then produced genuine RED for unavailable baseline,
+  artifact-write exception, post-artifact drift precedence, invalid
+  `CommandResult` cross-products, and missing Markdown outcome.
+- Implemented strict CommandResult validation; missing/unsafe baseline
+  fail-close; spawn/exit/signal/timeout/residual/incomplete-cleanup states;
+  artifact-write failure; final post-artifact resource recheck; drift safety
+  precedence; and explicit Markdown classification. Focused CLI/process/drift/
+  state groups passed `6/3/3/3` tests.
+- The first complete run was `87 passed, 9 failed`; all nine were old harness
+  fixtures still supplying two snapshots or constructing now-illegal
+  `PASS/FAIL` states. Legal fixture combinations yielded `96 passed` twice.
+- Valid `run`/`render-report` coverage then recorded genuine missing-symbol RED
+  and GREEN for serial orchestration, ordered/hash-addressed ignored artifacts,
+  strict canonical one-way rendering, and top-level CLI dispatch.
+- Exact JUnit layout had one final genuine RED because the temporary root JUnit
+  copy remained after the ordered copy. The runner now retains only
+  `commands/<order>-<id>.junit.xml` in completed full-run artifacts. Final pure
+  runner verification passed twice: `100 passed in 0.97s` and
+  `100 passed in 0.93s`.
+- A read-only resource probe once serialized `tts` from the log snapshot by
+  typo, producing a false summary hash. Immediate rerun of the frozen exact
+  probe matched the baseline; no resource changed.
+- The first-cycle syntax checks passed for the runner and release browser file.
+- Final strict serial Node verification: shared `6`, Child `252`, Teacher `47`;
+  zero failure, skip, todo, cancel, or unhandled rejection.
+
+### Unit 7.6: independent-review NO-GO repair loop
+
+- Finding 1, full-suite extras: genuine focused RED proved that every ordinary
+  full-suite node outside the 96-row manifest was being classified unknown,
+  making the complete Child/Teacher suites impossible to pass. The evaluator
+  now requires every manifest selector to remain exact and unambiguous while
+  allowing extra ordinary passing nodes only when the entire SuiteEvidence is
+  internally valid and clean. Missing, duplicate, and same-count substituted
+  manifest rows remain blocking. Focused boundary: `17 failed, 1 passed`, then
+  `39 passed` after the minimal evaluator/fixture correction.
+- Finding 2, evidence totals: SuiteEvidence now validates nonnegative integral
+  counters, exact total sums, node-ID count/uniqueness, zero/nonpass states,
+  reasons, and canonical structured properties. Gate evaluation independently
+  revalidates even hostile constructed states and fails closed for any skip,
+  xfail, XPASS, TODO, cancel, failure, error, or zero evidence. A real frozen
+  `xfail_strict` JUnit probe established that strict XPASS is a `<failure>` with
+  `[XPASS(strict)]`; the first probe passed a tuple to `pytest.main` and raised
+  a harness-only TypeError, while the corrected list probe exited nonzero and
+  was detected without guessing.
+- Finding 3, focus matrix: the expanded 1024 seed genuinely failed because the
+  white ring was only `2px` and the programmatically focused route `h2` had
+  only a `1px` UA ring. A first `3px` outer-ring repair then genuinely failed
+  the nav clipping bound. The final common rule uses visibly distinct dark and
+  white inset bands, each at least `3px`, and explicitly covers
+  `h1/h2[tabindex="-1"]:focus-visible`. The exact 13-category matrix covers
+  h1/h2, dialog target/return, native button, link, input, select, textarea,
+  nav, blue, gray, and white-panel controls using nearest opaque backgrounds.
+  `release_focus_1024` passed `1/1`, `release_focus_all` passed `2/2`, and the
+  complete Teacher accessibility file passed `22/22` with no skip.
+- Finding 4, candidate identity/dirt: focused tests genuinely failed before the
+  runner rejected a wrong candidate HEAD or staged/modified/untracked
+  implementation path. Full-run preflight now requires the exact designated
+  40-hex candidate, exact runtime version, empty index, and only the four
+  permitted inherited unstaged categories. Focused boundary: `7 failed`, then
+  `9 passed`.
+- Finding 5, canonical evidence/report: genuine schema/golden RED preceded
+  strict structured JUnit properties for focus, disposable-DB action, and
+  timeout evidence. Canonical command records now include argv, conftest mode,
+  timeout/duration/counts/hashes, gate reasons/evidence, lifecycle/snapshots,
+  viewport/focus measurements, resources, all three incident facts and
+  corrective controls, Lovable blocker, P0/P1/P2 and review/pending authority.
+  One-way schema validation rejects missing mandatory fields. Focused
+  parser/report/orchestration group passed `7`; stable SHA-256 goldens are JSON
+  `3eb609d0dd25a7b9d9f81f14e4aa03f6a17220c0225de77e666e2d4079b71724`
+  and Markdown
+  `80f4cbba2029e8868ffaf45d5a73144c58a7d0c7d89e49574d6471a4b2dafd61`.
+- Finding 6, process/resources: genuine `3/3` RED covered lstat/read/readlink
+  failure totalization, spawn-success/get-PGID failure, and drift between outer
+  preflight and child start. File capture now returns explicit unreadable
+  states for every OSError path; `start_new_session=True` makes the child PID
+  the PGID and eliminates fallible post-spawn lookup; run-one passes its exact
+  established baseline into run_command so there is no double-baseline gap.
+  Focused process/resource group passed `5`.
+- Finding 7, project conftest: three focused tests genuinely failed before a
+  complete real-resource guard and pre-import tripwires existed. The session
+  guard now freezes real DB logical content plus DB/WAL/SHM physical metadata,
+  real log metadata/content, and recursive TTS root/entries/content. Before app
+  routes import, non-loopback `socket.connect/connect_ex`, Edge TTS
+  `Communicate`, and the shared `_llm` seam fail closed; normal pytest TTS cache
+  is redirected to its disposable runtime. Focused `3/3`, complete database
+  safety `15/15`, and affected backend `264/264` passed, with no provider hit.
+- Finding 8, timeout UX: the strengthened row was direct GREEN. The retry is
+  now activated rapidly by real page-keyboard `Enter/Space/Enter`, produces
+  exactly one retry, reuses the exact body and matching `X-Request-ID`, and has
+  zero TTS/completion requests throughout the failure boundary. Both viewport
+  nodes passed `2/2` and emit canonical timeout evidence.
+- P2 disposable-DB evidence was direct GREEN after strengthening: the resolved
+  fixture must be outside the entire repository `data/` tree, the business name
+  is collision-resistant and run/viewport-derived, and the database transition
+  remains exactly `0 -> 1`. Both viewport nodes passed `2/2` and emit canonical
+  DB evidence.
+- The first affected full browser rerun exposed a pre-existing order defect:
+  `431/432` passed, while the Edge-TTS tripwire node called main-thread
+  `asyncio.run` after the session-scoped Playwright sync loop existed. The node
+  passed alone but a minimal ordered pair was stably `1 passed, 1 failed`.
+  Work stopped because the file was initially unowned. After independent
+  amendment GO, only that exact node plus one stdlib import changed: its
+  coroutine is created and `asyncio.run` executes inside one synchronously
+  joined worker thread. The ordered pair then passed `2/2`; the exact
+  `FakeCommunicate.stream` boundary, expected AssertionError, and
+  `edge_tts blocked\n` evidence remain unchanged. Full browser then passed
+  `432/432`, failures/errors/skips all zero.
+- Final post-repair pure runner verification used the exact frozen
+  `python -m pytest --noconftest` argv and passed twice: `129 passed in 1.07s`
+  and `129 passed in 1.31s`. One preceding attempt incorrectly added `-I`, so
+  all 129 nodes failed import of `scripts`; no implementation changed, the
+  invocation was corrected to the frozen argv, and that harness-only result is
+  not counted as a RED or pass. Shared/Child/Teacher Node reruns remained
+  `6/252/47` all-pass, and all protected resource summaries stayed identical.
+
+### Unit 7.6: second independent-review NO-GO repair loop
+
+- P1-1, one global baseline: two genuine REDs proved that an `A -> B`
+  resource change between commands could be adopted as the next command's
+  baseline and that forged `B/B` per-command records could pass internal
+  evidence despite global baseline `A`. Full orchestration now passes the one
+  captured global baseline into every `run_command`; every command must record
+  `A/A`, and internal evidence independently requires both snapshots to equal
+  `A`. Focused boundary: `2 failed`, then `2 passed`. The `A -> B` case is
+  `NOT_STARTED/RESOURCE_DRIFT`, runner exit `3`, with zero second-command start;
+  `A/A` remains accepted.
+- P1-2, schema-v2 cross-fields: the focused rejection matrix initially had
+  `22 failed, 1 passed`. It now rejects zero/21/duplicate/substituted commands,
+  wrong order/argv/timeout/conftest mode, nonzero commands, zero or invalid
+  parser evidence, missing/empty/duplicate/substituted or malformed structured
+  focus/DB/timeout properties, forged PASS gates, inconsistent baselines,
+  missing tripwire evidence, and absent Lovable status. Pending is possible
+  only for the exact ordered 22 frozen commands with successful nonzero valid
+  raw suite evidence, recomputed gates, exact five internal-evidence IDs,
+  one global/per-command baseline, exact six structured browser properties,
+  clean tripwires, and provided Lovable status. The valid technical-pending
+  golden remains accepted; completed schema/report coverage passed `26` tests.
+  Stable valid-pending SHA-256 goldens are JSON
+  `fe3987a584e3c333870489eff38961a8fa43dd72afe1a22b847872be43047d28`
+  and Markdown
+  `9c372480543d0ba1b10922318f20f4731b6b38eaf9ac1bd1ba090735d814ceea`;
+  truthful technical-NO-GO goldens are JSON
+  `422483cc4920d293938a166434100c9df0bbf6559119018395341fde9ab449c9`
+  and Markdown
+  `c78be23a6600db5361afbf8a9cb99aaca4f18b58586c518d3438373819be9d3d`.
+  A custom partial inventory also moved from an uncontrolled render exception
+  to a deterministic technical NO-GO report.
+- P1-3, cleanup totality: a genuine `7 failed` matrix injected
+  `PermissionError` into process-group existence probes, TERM, and KILL across
+  timeout/residual paths plus the no-next-command case. Only `ESRCH` now proves
+  extinction; every other `OSError` is a bounded potentially-live state that
+  yields stable `PROCESS_CLEANUP_INCOMPLETE`, exit `3`, no after snapshot, and
+  no later command start. The focused matrix passed `7`; the broader process-
+  group suite passed `20`. Test doubles never signal a real process group.
+- P1-4, the exact timeout boundary: the strengthened 1024 run proved the
+  product-state assertions direct GREEN at 9,999 and 10,000 ms, but its new
+  transition observer was initially attached to a replaced `.child-view` and
+  produced one harness-only failure. Moving only the observer to the stable
+  document-body subtree yielded `1 passed`, then both viewports passed `2/2`.
+  At 9,999 ms the state is still `submitting`, durable/session bytes are
+  unchanged, exactly one chat is outstanding, and retry/TTS/completion/success
+  are zero. At 10,000 ms failure and one retry control appear exactly once;
+  later time cannot duplicate them. Keyboard `Enter/Space/Enter` retry keeps
+  the exact body/header request ID with one retry and zero TTS/completion.
+- Final affected-gate verification used the frozen commands strictly serially.
+  The complete pure runner suite passed twice: `170 passed in 2.03s` and
+  `170 passed in 2.01s`. Backend passed `264/264`; browser passed `432/432`;
+  shared/Child/Teacher Node passed `6/252/47`. All nonpass counters were zero.
+  The completed browser JUnit contained and passed schema validation for the
+  exact six structured properties: focus `2`, disposable DB `2`, and timeout
+  `2`. The long browser run used one polled session only. The protected-resource
+  digest and every underlying DB/log/TTS/user-path field remained exact, with
+  `unsafe=()` and zero provider hit.
+
+### Unit 7.6: third independent-review NO-GO repair loop
+
+- P1-1, full-run cleanup boundary: a six-case genuine RED covered timeout and
+  residual paths with injected probe/TERM/KILL `PermissionError`. All six
+  incorrectly continued to completed report generation. Full orchestration now
+  appends the incomplete result and immediately returns `SAFETY_NO_GO`, exit
+  `3`. GREEN `6/6` fake-executor spies proved the orchestration stop, exact
+  global and pre-start resource captures, no `resources.after`, no completed
+  report, no later command, and no real process-group signal. They did **not**
+  exercise the production stream writer, so the earlier zero-JUnit-I/O claim
+  was unproven and is superseded by the fourth-review production-writer evidence
+  below.
+- P1-2, central safety and decision invariants: the focused matrix was genuine
+  `13 failed, 2 passed`. Runtime dataclasses and canonical Mappings now share
+  one unsafe predicate; any unsafe before/after or mismatch invalidates a
+  technical exit-zero evidence failure, signal, or timeout and requires
+  `SAFETY_FAILURE/RESOURCE_DRIFT`. Canonical validation recomputes safety,
+  technical, and pending outcomes, exits, and ordered reasons from raw command,
+  resource, gate, tripwire, and Lovable state. Forged safety/technical types,
+  exits, and reasons are rejected, while truthful partial technical evidence is
+  accepted only without a safety fact. GREEN was `15/15`; the broader
+  command/schema/orchestration slice passed `46/46`. Existing valid-pending and
+  technical JSON/Markdown SHA-256 goldens remained byte-identical.
+- P1-3, unified tripwire: full-orchestration RED was `4 failed, 1 passed`.
+  Existing exact browser-child Edge-TTS and non-loopback markers were missed,
+  the ordinary word `tripwire` was a false hit, and caught-success evidence did
+  not agree with report state; the new backend prefix case was direct GREEN.
+  Project-conftest breaker messages separately had genuine `2/2` RED. The
+  destination-free `TEST_TRIPWIRE:` prefix now covers root AI/TTS/network
+  breakers, while the runner recognizes only that prefix and the exact legacy
+  browser-child markers. The same classifier derives canonical
+  `PASS/FAIL/NOT_PROVEN`, and successful breaker self-tests cannot be false
+  hits. GREEN was runner `5/5` and conftest breaker `2/2`.
+- P2: the preceding review verdict is corrected above to exact
+  `P0=0, P1=3, P2=1`; the earlier statement that P0 was not supplied has been
+  removed.
+- The first complete runner attempt after these changes was `193 passed,
+  1 failed`: an old child-exit JSON/Markdown fixture used the non-contract
+  reason `CHILD_COMMAND_FAILED`. Its actual 2/3/64 exit-identity assertions
+  passed; only the fixture decision was corrected to the independently
+  recomputable technical reasons. This is a harness-only correction, not a
+  product RED or pass. Final pure runner verification then passed twice:
+  `194 passed in 2.28s` and `194 passed in 2.10s`.
+- Affected complete gates passed: database safety `15/15` and backend
+  `264/264`, all nonpass counters zero. Exact legacy Edge-TTS/socket/context
+  browser seams passed `13/13`. Third-review changes did not modify browser
+  product code, Node code, or their command inventories; per the review scope,
+  classifier full-orchestration tests plus the 13 exact browser seams replaced
+  another six-minute full-browser run, and Node was not rerun. The earlier
+  complete browser `432/432` and Node `6/252/47` remain historical evidence,
+  not newly claimed third-review gates.
+- Every adjacent resource check remained the exact protected digest
+  `44ef3cadcee753194b663d705dd914515f4f5c105f808a5d2a4d290bc9135804`,
+  with unchanged database/log metadata, `unsafe=()`, and zero provider hit.
+
+### Unit 7.6: fourth independent-review NO-GO repair loop
+
+- P1-1, production JUnit zero-I/O boundary: the six timeout/residual ×
+  probe/TERM/KILL production-writer cases produced a genuine `6 failed` RED;
+  raw logs were preserved but the writer attempted JUnit stat after cleanup was
+  unproven. The production stream writer now owns stdout/stderr only. The full
+  complete branch performs JUnit stat/read/copy/unlink after containment and a
+  nonnull after snapshot. GREEN was `6/6`; the separate normal-path check was
+  `1/1` and retained the exact ordered JUnit bytes/layout/hash.
+- P1-2, tested HEAD and safe report validation: the focused matrix was genuine
+  `2 failed, 4 passed`. A truthful post-Commit-A synthetic 40-hex HEAD was
+  rejected by the frozen start hash, and a completed-report validation error
+  escaped as `CliMisuseError`; global/command/top/version mismatch rejection was
+  already direct GREEN. The report now binds `tested_head` to every complete
+  global and per-command snapshot and exact runtime versions, and normalizes
+  validation failure to `REPORT_INTEGRITY_FAILURE` unless safety drift has
+  priority. GREEN was `6/6`.
+- P1-3, recursive resource and artifact trust boundary: four noncanonical
+  resource shapes plus eight missing/hash/size/type/path/traversal/symlink/extra
+  artifact mutations produced genuine `12 failed, 1 passed`; the one complete
+  real temporary artifact tree was direct GREEN. Canonical validation now
+  reconstructs exact recursive DB/WAL/SHM/log/TTS/user/Git resource types, and
+  completed rendering verifies exact relative nonsymlink regular files,
+  bytes/sizes/hashes, canonical resource bytes, and an exact tree before
+  Markdown. GREEN was `13/13`; the broader schema/report/orchestration slice was
+  `67/67` before the structured-tripwire additions below.
+- P1-4, residual/drift precedence: the exited/signaled × runtime/canonical
+  Mapping matrix was genuine `4 failed, 1 passed`. A residual group with an
+  unsafe or unequal pair now requires `SAFETY_FAILURE/RESOURCE_DRIFT`; only a
+  safe unchanged pair may use `RESIDUAL_PROCESS_GROUP`. GREEN was `5/5`, with
+  unchanged-residual and drift-without-residual controls remaining distinct.
+- P1-5, structured tripwire evidence: focused RED was `7 failed, 3 passed`.
+  Real backend/browser breakers already reached safety but lacked canonical
+  command events; source/caught-marker cases exposed the genuine false positive
+  where a caught breaker plus unrelated failure was classified as safety.
+  Anchored whole exception-line parsing now emits only the seven frozen event
+  IDs; top/internal/gates/decision are recomputed from that one state, and
+  completed rendering recomputes events from hash-verified command logs. GREEN
+  was `10/10`; the broader tripwire/schema/report/orchestration slice was
+  `73/73`. No provider, TTS, or external socket was contacted.
+- P2: the third-review verdict is corrected above to exact
+  `P0=0, P1=3, P2=1`. The prior fake-writer zero-JUnit statement is explicitly
+  retracted rather than carried forward as production evidence.
+- The first pure-runner full attempt after strict resource reconstruction was
+  `222 passed, 1 failed`: one old child-exit Markdown fixture still supplied a
+  token-shaped command snapshot. The production behavior and exit-identity
+  assertions were already correct; replacing only that harness snapshot with
+  the complete strict fixture made the focused node `1/1`. Final pure runner
+  verification then passed twice: `223 passed in 2.64s` and
+  `223 passed in 2.63s`.
+- Affected complete gates passed database safety `15/15` and backend `264/264`,
+  all nonpass counters zero. Exact Edge-TTS/socket/context browser seams passed
+  `13/13`. Fourth-review changes did not modify browser product code, Node code,
+  or their command inventories; classifier full-orchestration tests plus those
+  exact browser seams replaced another complete browser run, and Node was not
+  rerun. Earlier browser `432/432` and Node `6/252/47` remain historical, not
+  newly claimed fourth-review evidence.
+- Every adjacent resource check remained the exact protected digest
+  `44ef3cadcee753194b663d705dd914515f4f5c105f808a5d2a4d290bc9135804`,
+  with SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  unchanged log SHA/size/mtime, `unsafe=()`, and zero provider hit.
+
+### Unit 7.6: fifth independent-review NO-GO repair loop
+
+- P1-1, unconditional tested HEAD: the pending/technical/safety ×
+  top/global/per-command mismatch matrix produced genuine `9 failed, 4 passed`
+  RED. Validation had enforced the complete head chain only on pending records.
+  It now reconstructs the global before/after and every command before/after
+  snapshot first and requires all heads to equal top-level `tested_head` for all
+  three outcomes. GREEN was `13/13`, including one consistent synthetic
+  post-Commit-A 40-hex control for each outcome and normalized CLI rendering.
+- P1-2, semantic `ResourceSnapshot` reconstruction: missing database with empty
+  reasons, nested unsafe under top-level safe, log/TTS/user/Git reason mismatch,
+  wrong directory digest, and forged scan-reason cases produced genuine
+  `7 failed, 2 passed` plus a separate `1 failed` RED. Reconstruction now derives
+  database physical/logical reasons, WAL/SHM/log protected-path reasons, exact
+  directory digests from root plus ordered entry metadata/content, Git/user
+  safety, and the exact top-level unsafe union. GREEN was `10/10`; the broader
+  snapshot/schema slice was `105/105` after updating only two deterministic
+  JSON/Markdown golden pairs for the expanded canonical schema.
+- P1-3, authenticated tripwire provenance: a real seven-breaker nested pytest
+  probe produced genuine `1 failed` RED because JUnit had exact failure frames
+  but no authenticated property. The first hook attempt appended after report
+  construction and remained `1 failed`; this was a hook-timing harness
+  correction, not a pass. Appending the canonical property before report
+  construction made the seven-event probe `1/1`. The runner parser then
+  produced a second genuine `1 failed` RED (`MALFORMED_PROPERTIES`) before it
+  learned the exact property/failure/frame schema, followed by `1/1` GREEN.
+  Full orchestration now ignores three exact raw-log breaker strings as
+  technical and escalates hash-verified authenticated backend/browser JUnit
+  events to safety; that matrix is `5/5`. Ordinary wording, source/caught
+  mentions, a caught breaker self-test, forged properties without the trusted
+  frame, caller top/internal rewrites, raw hash mismatch, and rehashed JUnit
+  property removal were covered by `11/11` additional focused checks. One
+  intermediate `5 failed` run was caused by removing the legacy raw-parser
+  constant before all callers were migrated; it is recorded as a partial-
+  implementation diagnostic, not as the functional RED. No provider, TTS, or
+  external socket was contacted.
+  During final verification the `browser_file` probe was strengthened from a
+  direct call to an actual fixture-teardown error. That produced one further
+  genuine `1 failed` RED because pytest wraps teardown errors as
+  `failed on teardown with "AssertionError: ..."`; the parser now accepts only
+  that exact setup/teardown wrapper after the property and trusted final frame
+  have already authenticated the event. Focused GREEN was `1/1`.
+- P1-4, immutable incident ledger: the exact ten-mutation matrix plus one legal
+  control initially returned `5 failed, 6 passed`; fact bytes, corrective-
+  control bytes, status, technical status, and an extra key were accepted.
+  Completed reports now require the exact three rows/order/values and only the
+  frozen acknowledgement/status fields. GREEN was `11/11`, including stable
+  rejection of missing/extra/reordered and non-Mapping inputs without an
+  uncaught `KeyError` or `AttributeError`.
+- P2: the fourth-review verdict is corrected to exact
+  `P0=0, P1=5, P2=1`; this fifth review is recorded as exact
+  `P0=0, P1=4, P2=1` and remains NO-GO.
+- The first complete pure-runner attempt after these changes was
+  `260 passed, 2 failed`: only the two canonical JSON/Markdown golden records
+  retained their previous schema hashes. Updating those four expected hashes
+  was harness-only. Final pure runner verification passed twice:
+  `262 passed in 3.38s` and `262 passed in 2.87s` after the teardown-shape fix.
+- The exact database-safety seam passed `16/16`; the frozen complete backend
+  target passed `265/265`. Because project conftest now emits authenticated
+  JUnit properties for actual uncaught breakers, the complete browser suite was
+  required and passed `432/432 in 433.74s`. Node code and command inventory were
+  unchanged, so Node was not rerun in this fifth-review loop.
+- Every adjacent resource check remained the exact protected digest
+  `44ef3cadcee753194b663d705dd914515f4f5c105f808a5d2a4d290bc9135804`,
+  with SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  unchanged log SHA/size/mtime, `unsafe=()`, and zero provider hit.
+
+### Unit 7.6: sixth independent-review NO-GO repair loop
+
+- The sixth formal verdict was exact `P0=0, P1=3, P2=0`: Contract, Code,
+  and Safety were NO-GO while Stage was GO. No final GO is inferred from the
+  clean stage.
+- P1-1, authenticated tripwire lifecycle: the original sixth-review wording
+  required a capability to be unavailable to arbitrary same-process repository
+  code. Implementation stopped before editing because that promise is
+  impossible inside the frozen same-process boundary. An independent contract
+  amendment then returned GO and explicitly defined the cooperative,
+  non-adversarial TCB, private-as-contract boundary, live code-object/final-frame
+  validation, import/collection/setup/call/teardown lifecycle, command/node/
+  phase/sequence binding, monotonic event union, and run-one/full parsing after
+  every exit. Malicious same-process code is explicitly outside Task 9; future
+  hostile-code scope requires an external/kernel-isolated supervisor. The
+  amended/reconciled brief is 1,572 lines with SHA-256
+  `07829e847d8ee35601939ef10f42b2f97442f383eeb710a347202af10b0afd65`.
+- The first authenticated-event matrix was a genuine `18 failed, 7 passed`
+  RED. The runner now installs its explicit plugin before project conftest,
+  collection, test, app, plugin, and library imports; creates a fresh
+  command-local Ed25519 producer; emits only a public-key header plus signed,
+  destination-free event envelopes in the existing captured stderr artifact;
+  and pairs runtime events with exact JUnit properties. Parser focused GREEN
+  was `9/9`, the seven-breaker run-one/full nonzero matrix was `14/14`, and the
+  aggregate focused tripwire slice was `24/24`.
+- The live eight-event probe had two honest harness REDs before success. First,
+  pytest's default fd capture swallowed `sys.__stderr__`; adding the frozen
+  `--capture=sys` argv made the already early plugin channel observable.
+  Second, a dynamically loaded browser module was not in `sys.modules`; exact
+  traceback-frame globals plus the real module origin/code object supplied the
+  same trusted identity without weakening the check. The lifecycle probe then
+  produced two further genuine `1 failed` REDs: duplicate testcase names erased
+  call+teardown events, and module import was mislabeled collection. Preserving
+  authenticated distinct-phase duplicates and classifying the exact traceback
+  phase made the live uncaught probe `1/1` and the combined import/collection/
+  setup/call+teardown/no-stale probe `1/1`. The matrix covers all seven breaker
+  IDs, both `connect` and `connect_ex`, valid-plus-malformed retention, valid
+  idempotent duplicates, fresh node/command attribution, raw/source/caught/
+  lookalike/ordinary-property/wrong-capability/tamper rejection, and child
+  nonzero parsing before decision.
+- A final brief reconciliation exposed one additional harness-contract RED:
+  the pure runner test directly imported `cryptography` despite the frozen
+  stdlib-plus-pytest rule. The AST import guard failed exactly on
+  `cryptography` (`1 failed`), then passed `1/1` after the test delegated only
+  independent offline parser-vector signing to a lazy runner-owned helper.
+  That helper creates an unrelated key and cannot read or reuse live producer
+  state/capability; the live plugin path was unchanged. The signer/parser slice
+  passed `14/14`.
+- P1-2, symmetric directory snapshots: the new focused matrix produced genuine
+  `5 failed, 1 passed` RED. Root capture failure, ordinary file/symlink root,
+  and zero/partial `scandir` failure were conflated. Paired `scan_error` and
+  relative `scan_source` fields plus one shared semantic constructor now retain
+  a valid root and partial entries, distinguish `DIRECTORY_ROOT_UNREADABLE`,
+  `DIRECTORY_NOT_DIRECTORY`, and
+  `SCANDIR:<source>:<exception-class>`, and recompute exact reasons/digest for
+  both capture and report reconstruction. New focused GREEN was `7/7`; the
+  combined directory/resource reconstruction slice was `18/18`, including safe
+  round-trip, allowed protected-directory symlink, truthful unsafe safety
+  rendering, and forged source/reason/digest rejection.
+- P1-3, artifact-failure safety monotonicity: tripwire/residual/transient-drift
+  safety crossed with `OSError` and `CliMisuseError` produced genuine
+  `6 failed, 2 passed` RED: all six safety cases were incorrectly replaced by
+  technical exit `1`, while both technical controls passed. The completed-
+  artifact failure merger now retains safety/exit `3`, appends the exact write
+  or integrity failure as secondary evidence, retains transiently observed
+  drift even after recovery, and leaves a pure artifact failure technical/
+  exit `1`. Partial untrusted `report.json`/`report.md` files are discarded and
+  no report record is returned. GREEN was `9/9`, including the prior normalized
+  completed-report validation case.
+- The first complete pure-runner attempt after the directory schema and early
+  plugin argv changes was `298 passed, 3 failed`. One exact argv fixture omitted
+  the now-mandatory plugin/`--capture=sys`, and two deterministic canonical
+  JSON/Markdown golden records retained their pre-schema hashes. Those were
+  harness-only corrections; no behavior assertion was weakened. After the
+  stdlib import guard, final pure runner verification passed twice:
+  `302 passed in 11.90s` and `302 passed in 10.49s`.
+- Affected complete gates passed database safety `17/17`, backend `266/266`,
+  and browser `432/432 in 442.55s`, all nonpass counters zero and no
+  authenticated event. Node code and inventory were unchanged, so Node was not
+  rerun in this loop; earlier Node results remain historical rather than newly
+  claimed sixth-review evidence.
+- Every adjacent check retained the exact physical protected-resource digest
+  `44ef3cadcee753194b663d705dd914515f4f5c105f808a5d2a4d290bc9135804`,
+  SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  log SHA-256
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`
+  with size `2961585` and `mtime_ns=1787939944391406243`, exact HEAD
+  `89b3459973bb7cd6e8be43b1251ac6cdb5dfa292`, `unsafe=()`, and zero provider
+  hit. The canonical directory serialization digest changed mechanically when
+  the two explicit scan fields were added; no protected filesystem byte or
+  metadata changed.
+- Commit A remains uncommitted and pending a seventh independent
+  Code/Safety/Stage review. This section records implementation evidence only;
+  it does not claim final GO or start Unit 8.
+
+### Unit 7.6: seventh independent-review NO-GO repair loop
+
+- The seventh formal verdict was exact `P0=0, P1=1, P2=0`. The sole P1 was
+  valid: completed rendering rehashed and parsed JUnit only for authenticated
+  event IDs, did not compare the full canonical `SuiteEvidence`, did not parse
+  TAP at all, and rejected a valid authenticated event merely because an
+  adjacent malformed sidecar record made the suite reason
+  `TRIPWIRE_AUTH_INVALID`. No contract conflict was found.
+- The first focused run was `17 failed, 2 passed`, but eight JUnit mutation
+  cases plus the JUnit positive control stopped in synthetic report setup
+  because the fixture used a non-manifest command, and the safety fixture
+  omitted its derived tripwire internal row. Those failures were harness-only
+  and were not credited as functional RED. After correcting only the synthetic
+  construction, the genuine RED was `16 failed, 3 passed`: all eight rehashed
+  JUnit mutations, all six rehashed TAP mutations, and the project-JUnit
+  substitution were incorrectly accepted, while the valid-event-plus-malformed
+  safety record was incorrectly rejected. The valid full JUnit/TAP and
+  legitimate partial child-nonzero controls passed.
+- The renderer now constructs the canonical suite map once, reads and
+  hash-verifies each evidence artifact once, reparses JUnit from those exact XML
+  plus stderr byte objects and TAP from that exact stdout byte object, and
+  requires complete dataclass equality: validity; total/pass and every nonpass
+  counter; ordered unique node IDs; reason; structured properties; and
+  authenticated event records. Every suite entry must bind to a command, every
+  JUnit descriptor must bind to a suite entry, and truthful partial child-
+  nonzero evidence absence remains supported. The functional focused GREEN was
+  `19/19`.
+- A narrow JUnit/TAP path-read-count preservation check was added after the
+  implementation and passed direct-GREEN `2/2`; it proves parsing consumes the
+  already verified byte object rather than reopening the path. The combined
+  focused slice therefore passed `21/21`.
+- Complete pure-runner verification passed twice with `322 passed in 12.36s`
+  and `322 passed in 12.14s`. Because this loop changed only the runner, its
+  pure tests, the brief, and this report, database-safety, backend, browser, and
+  Node gates were not rerun and are not newly claimed seventh-review evidence.
+- Pre-, between-, and post-run resource checks retained SQLite logical digest
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  log SHA-256
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`
+  with size `2961585` and `mtime_ns=1787939944391406243`, TTS canonical digest
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  exact HEAD `89b3459973bb7cd6e8be43b1251ac6cdb5dfa292`, and `unsafe=()`.
+  No provider, TTS, external socket, real service, or worker was contacted.
+- Commit A remains uncommitted and pending an eighth independent
+  Code/Safety/Stage review. This section records implementation evidence only;
+  it does not claim final GO or start Unit 8.
+
+## Final policy and staging evidence
+
+- No `pytest.skip`, `pytest.xfail`, skip/skipif/xfail marker exists in the
+  Task 9-owned browser/safety files.
+- No Node skip/todo form exists in the owned shared Node test.
+- Runner scan found no `shell=True`, forbidden seed/screenshot/image/rebuild
+  target, stale aggregate target, or `--confirm-rebuild`.
+- `git diff --check`: exit `0`.
+- `git check-ignore` positive: only
+  `.gitignore:25:/artifacts/acceptance/` matched.
+- Negative siblings `artifacts/sibling.txt`, `logs/sibling.txt`,
+  `databases/sibling.txt`, `screenshots/sibling.txt`,
+  `docs/interaction-acceptance-report.md`, and `docs/acceptance-report.md`:
+  no match, expected exit `1`.
+- `rg` was unavailable in this environment, so the frozen policy scans used
+  `/usr/bin/grep` with the same explicit patterns. Two attempted hard-coded
+  `rg` paths failed harness-only and performed no repository mutation.
+- The sixth-review final read-only AST syntax check passed for the runner and
+  all eight owned Python test/conftest files (`syntax_ok=9`). The pure runner's
+  self-AST dependency guard also passed after proving its import set is exactly
+  Python standard-library modules plus pytest. One earlier final
+  stale-aggregate grep was initially
+  shell-misquoted and did not execute; the corrected scan ran without changing
+  repository bytes. This was a harness-only policy-command correction and is
+  not counted as a policy pass by itself.
+- The seventh-review final read-only AST syntax check passed for both changed
+  Python files (`syntax_ok=2`), and the unstaged `git diff --check` exited `0`
+  before exact restaging.
+- Final exact cached path list and `git diff --cached --check` are recorded
+  below after explicit staging; no commit is made in this task.
+
+## Historical incidents carried forward unchanged
+
+1. `PIPELINE_T8_PROVIDER_20260823`: two real DeepSeek HTTP 200 calls on
+   synthetic transcript/disposable SQLite before the permanent lowest-level
+   breaker. No recurrence in Task 9.
+2. `CHILD_T9_REAL_LOG_20260827`: pending-route teardown reached the real app log
+   through inherited logging; bytes remain preserved. No recurrence in Task 9.
+3. `TEACHER_T5_REAL_LOG_20260829`: an earlier concurrent non-browser/browser
+   orchestration wrote preserved test log bytes before Task 5A isolation. Task 9
+   ran strictly serially with no recurrence.
+
+No agent, runner, or reviewer can accept these risks for the release owner.
+
+## Residual risks and independent-review handoff
+
+- Unit 8 clean-Commit-A execution of the full 22-command inventory and Unit 9
+  evidence-only report commit have not started and are not claimed.
+- Lovable remains a blank private bootstrap without a valid reviewed
+  `prototype-reference.md`; no scope waiver has been authorized.
+- Historical incident disposition remains human-owned and unresolved.
+- Commit A has not been committed. The current staged bytes require independent
+  Code/Safety/Stage review. Any P0/P1 invalidates the staged verdict and requires
+  focused RED/GREEN repair, affected full reruns, refreshed report/stage checks,
+  and a fresh review.
+
+### Exact cached paths after staging
+
+The final explicit Commit A cached-name check returned exactly these 14 paths:
+
+```text
+.gitignore
+.superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-brief.md
+.superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-report.md
+app/frontend/teacher/styles.css
+scripts/run_interaction_acceptance.py
+tests/browser/test_child_faults.py
+tests/browser/test_child_shell.py
+tests/browser/test_release_viewports.py
+tests/browser/test_teacher_review_loading.py
+tests/browser/test_teacher_today.py
+tests/conftest.py
+tests/frontend/shared/api-client.test.mjs
+tests/test_database_safety.py
+tests/test_interaction_acceptance_runner.py
+```
+
+`app/frontend/teacher/styles.css` is present only because the documented
+focus-contrast product RED activated conditional ownership.
+`tests/browser/test_child_shell.py` is present only because the independently
+reviewed ordered Playwright-loop RED activated its narrow conditional ownership.
+`tests/browser/test_teacher_accessibility.py` is absent because Task 9 did not
+modify it. No inherited user path, plan, brainstorm artifact, unrelated product
+file, tracked acceptance report, generated release evidence, or other path is
+staged. After force-adding this updated report, the fresh cached-name comparison
+returned the same 14 paths and `git diff --cached --check` exited `0`; no commit
+is made before the fresh independent review.

@@ -304,6 +304,144 @@ def test_teacher_today_data_links_and_retry_controls_are_touch_sized_without_ove
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_today_renders_pending_processing_and_failed_rows_with_retry_boundaries(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher(teacher_browser, viewport)
+    requests = []
+    page.on("request", lambda request: requests.append(request))
+
+    def distinct_row(queue, conversation_id, child, completed_at):
+        row = queue_row(queue)
+        row.update({
+            "id": conversation_id,
+            "child": child,
+            "completed_at": completed_at,
+        })
+        return row
+
+    pending_row = distinct_row(
+        "pending",
+        42,
+        {"id": 7, "name": "小雨", "nickname": "雨雨", "avatar": "rain.png"},
+        "2026-08-23T08:59:00Z",
+    )
+    processing_row = distinct_row(
+        "processing",
+        43,
+        {"id": 8, "name": "小云", "nickname": "云云", "avatar": "cloud.png"},
+        "2026-08-23T09:05:00Z",
+    )
+    failed_row = distinct_row(
+        "failed",
+        44,
+        {"id": 9, "name": "小星", "nickname": "星星", "avatar": "star.png"},
+        "2026-08-23T09:11:00Z",
+    )
+    retried_processing_row = dict(failed_row)
+    retried_processing_row["analysis_status"] = "pending"
+
+    reads = {key: 0 for key in PANEL_PATHS}
+
+    def roster(route):
+        reads["roster"] += 1
+        fulfill_json(route, [ROSTER_ROW])
+
+    def pending(route):
+        reads["pending"] += 1
+        fulfill_json(route, [pending_row])
+
+    def processing(route):
+        reads["processing"] += 1
+        rows = [processing_row]
+        if reads["processing"] > 1:
+            rows.append(retried_processing_row)
+        fulfill_json(route, rows)
+
+    def failed(route):
+        reads["failed"] += 1
+        fulfill_json(route, [failed_row] if reads["failed"] == 1 else [])
+
+    install_panel_routes(page, teacher_browser, {
+        "roster": roster,
+        "pending": pending,
+        "processing": processing,
+        "failed": failed,
+    })
+    retry_posts = []
+
+    def hold_retry(route):
+        assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
+        retry_posts.append(route)
+
+    page.route(
+        f"{teacher_browser.server.base_url}/api/conversations/44/analysis/retry",
+        hold_retry,
+    )
+    setup_teacher(page)
+
+    expected = {
+        "pending": ("雨雨", "16:59", 42, "待审阅"),
+        "processing": ("云云", "17:05", 43, "分析中"),
+        "failed": ("星星", "17:11", 44, "分析失败"),
+    }
+    for key, (name, completed_time, conversation_id, status) in expected.items():
+        target = panel(page, key)
+        target.get_by_text(name, exact=True).wait_for()
+        details = " ".join(
+            target.locator(".today-row-details").inner_text().split()
+        )
+        assert details == (
+            f"完成于 {completed_time} · 会话 #{conversation_id} · 2 轮 · {status}"
+        )
+        for other_name in {"雨雨", "云云", "星星"} - {name}:
+            assert target.get_by_text(other_name, exact=True).count() == 0
+
+    assert panel(page, "pending").locator(".today-analysis-retry").count() == 0
+    assert panel(page, "processing").locator(".today-analysis-retry").count() == 0
+    retry = panel(page, "failed").get_by_role(
+        "button", name="重试分析：星星", exact=True
+    )
+    assert retry.count() == 1
+    assert page.locator(".today-analysis-retry").count() == 1
+
+    retry.dblclick()
+    assert retry.is_disabled()
+    page.keyboard.press("Enter")
+    assert len(retry_posts) == 1
+    fulfill_json(retry_posts[0], {
+        "conversation_id": 44,
+        "analysis_job_id": 29,
+        "analysis_status": "pending",
+        "attempt_count": 0,
+        "retry_accepted": True,
+        "replayed": False,
+    })
+
+    panel(page, "failed").get_by_text("暂无分析失败会话", exact=True).wait_for()
+    moved = panel(page, "processing")
+    moved.get_by_text("星星", exact=True).wait_for()
+    moved_row = moved.locator(".today-queue-row").filter(has_text="星星")
+    assert moved_row.count() == 1
+    assert " ".join(moved_row.locator(".today-row-details").inner_text().split()) == (
+        "完成于 17:11 · 会话 #44 · 2 轮 · 分析中"
+    )
+    assert moved.get_by_text("云云", exact=True).count() == 1
+    assert panel(page, "pending").get_by_text("雨雨", exact=True).count() == 1
+    assert page.locator(".today-analysis-retry").count() == 0
+    assert len(retry_posts) == 1
+    assert reads == {"roster": 1, "pending": 2, "processing": 2, "failed": 2}
+
+    paths = application_request_paths(requests, teacher_browser.server.base_url)
+    queue_reads = [path for path in paths if path in PANEL_PATHS.values()]
+    assert queue_reads[-3:] == [
+        "/api/conversations?queue=failed",
+        "/api/conversations?queue=processing",
+        "/api/conversations?queue=pending",
+    ]
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 @pytest.mark.parametrize(
     "retry_body",
     [

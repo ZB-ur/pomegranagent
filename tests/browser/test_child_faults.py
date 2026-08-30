@@ -1,3 +1,4 @@
+import hashlib
 import json
 from pathlib import Path
 
@@ -21,6 +22,18 @@ SYNTHETIC_ACTIVE = {
         ],
     }
 }
+
+
+def _keyboard_focus(page, target, *, limit=80):
+    assert target.count() == 1
+    for _index in range(limit + 1):
+        if target.evaluate("node => document.activeElement === node"):
+            return
+        page.keyboard.press("Tab")
+    raise AssertionError(
+        f"target was not reached through {limit} page-keyboard Tab actions: "
+        f"{target.evaluate('node => node.outerHTML')}"
+    )
 
 
 def _start_held_chat(child_page, exact_fixture_url, viewport):
@@ -476,6 +489,467 @@ def test_chat_retryable_fault_reuses_persisted_request_id_once(
     assert page.get_by_role("log", name="对话记录").get_by_text(
         "我给小鸭添了清水。", exact=True
     ).count() == 1
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
+def test_first_chat_timeout_retains_draft_and_reuses_request_id_once(
+    child_page, exact_fixture_url, viewport, record_property
+):
+    page = child_page.page
+    page.clock.install(time=1_700_000_000)
+    page.set_viewport_size(viewport)
+    port = child_page.server.port
+    held = []
+    chat_bodies = []
+    chat_header_ids = []
+    tts_requests = []
+    completion_requests = []
+
+    child_page.fulfill_json("**/api/roster/today", [SYNTHETIC_CHILD])
+    child_page.fulfill_json(
+        "**/api/children/1/active-conversation", SYNTHETIC_ACTIVE
+    )
+
+    def chat(route):
+        assert exact_fixture_url(route.request.url, port)
+        chat_bodies.append(route.request.post_data_json)
+        chat_header_ids.append(route.request.headers.get("x-request-id"))
+        held.append(route)
+
+    def tts(route):
+        assert exact_fixture_url(route.request.url, port)
+        tts_requests.append(route.request.url)
+        route.fulfill(status=200, content_type="audio/mpeg", body=b"synthetic-audio")
+
+    def complete(route):
+        assert exact_fixture_url(route.request.url, port)
+        completion_requests.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body="{}")
+
+    page.route("**/api/chat", chat)
+    page.route("**/api/tts?*", tts)
+    page.route("**/api/conversations/*/complete", complete)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="开始", exact=True).click()
+    page.get_by_role("button", name="开始说话", exact=True).click()
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+    page.evaluate(
+        "window.__childTest.recognition.emitResult(0, '我给小鸭准备了超时证据。', true)"
+    )
+    page.clock.pause_at(page.evaluate("Date.now()") / 1000 + 1)
+    with page.expect_request(lambda request: request.url.endswith("/api/chat")) as requested:
+        page.evaluate("window.__childTest.recognition.emitEnd()")
+    assert exact_fixture_url(requested.value.url, port)
+    page.evaluate("() => Promise.resolve()")
+    assert len(chat_bodies) == 1
+    request_id = chat_bodies[0]["request_id"]
+    assert chat_header_ids == [request_id]
+    serialized_before = page.evaluate(
+        "sessionStorage.getItem('duck-diary.child-session.v1')"
+    )
+    assert serialized_before is not None
+    stored_before = json.loads(serialized_before)
+    assert "我给小鸭准备了超时证据。" in serialized_before
+    assert request_id in serialized_before
+    page.evaluate(
+        """() => {
+          window.__task9TimeoutTransitions = [];
+          window.__task9TimeoutLastState = document.querySelector('.child-view').dataset.state;
+          window.__task9TimeoutObserver = new MutationObserver(() => {
+            const state = document.querySelector('.child-view')?.dataset.state;
+            if (state && state !== window.__task9TimeoutLastState) {
+              window.__task9TimeoutTransitions.push(state);
+              window.__task9TimeoutLastState = state;
+            }
+          });
+          window.__task9TimeoutObserver.observe(document.body, {
+            attributes: true,
+            childList: true,
+            subtree: true,
+          });
+        }"""
+    )
+
+    page.clock.fast_forward(9_999)
+    page.evaluate("() => Promise.resolve()")
+    state_at_9999 = page.locator(".child-view").get_attribute("data-state")
+    durable_at_9999 = page.evaluate(
+        "sessionStorage.getItem('duck-diary.child-session.v1')"
+    )
+    retry_controls_at_9999 = page.get_by_role(
+        "button", name="重新发送", exact=True
+    ).count()
+    page_text_at_9999 = page.locator("body").inner_text()
+    success_copy_at_9999 = any(
+        copy in page_text_at_9999
+        for copy in ("今天的小鸭很开心。", "今天的话已经安全记下来啦")
+    )
+    assert state_at_9999 == "submitting"
+    assert durable_at_9999 == serialized_before
+    assert len(held) == 1
+    assert retry_controls_at_9999 == 0
+    assert len(chat_bodies) == 1
+    assert tts_requests == []
+    assert completion_requests == []
+    assert success_copy_at_9999 is False
+
+    page.clock.fast_forward(1)
+    retry = page.get_by_role("button", name="重新发送", exact=True)
+    retry.wait_for()
+    state_at_10000 = page.locator(".child-view").get_attribute("data-state")
+    retry_controls_at_10000 = retry.count()
+    timeout_transitions = page.evaluate("window.__task9TimeoutTransitions")
+    failure_transitions_at_10000 = timeout_transitions.count("submission_failed")
+    assert state_at_10000 == "submission_failed"
+    assert retry_controls_at_10000 == 1
+    assert failure_transitions_at_10000 == 1
+    assert len(held) == 1
+    assert len(chat_bodies) == 1
+    assert tts_requests == []
+    assert completion_requests == []
+    serialized_after = page.evaluate(
+        "sessionStorage.getItem('duck-diary.child-session.v1')"
+    )
+    stored_after = json.loads(serialized_after)
+    assert stored_after["draft"] == stored_before["draft"]
+    assert stored_after["draft"]["request_id"] == request_id
+    assert stored_after["draft"]["text"] == "我给小鸭准备了超时证据。"
+    page_text = page.locator("body").inner_text()
+    assert "今天的小鸭很开心。" not in page_text
+    assert "今天的话已经安全记下来啦" not in page_text
+    assert tts_requests == []
+    assert completion_requests == []
+    page.clock.fast_forward(10_000)
+    page.evaluate("() => Promise.resolve()")
+    timeout_transitions = page.evaluate("window.__task9TimeoutTransitions")
+    assert timeout_transitions.count("submission_failed") == 1
+    assert retry.count() == 1
+    assert len(chat_bodies) == 1
+    assert len(held) == 1
+    assert tts_requests == []
+    assert completion_requests == []
+
+    _keyboard_focus(page, retry)
+    assert retry.evaluate("node => document.activeElement === node")
+    with page.expect_request(lambda request: request.url.endswith("/api/chat")) as retried:
+        page.keyboard.press("Enter")
+        page.keyboard.press("Space")
+        page.keyboard.press("Enter")
+    assert exact_fixture_url(retried.value.url, port)
+    page.evaluate("() => Promise.resolve()")
+    assert len(chat_bodies) == 2
+    assert chat_bodies[1] == chat_bodies[0]
+    assert [body["request_id"] for body in chat_bodies] == [request_id, request_id]
+    assert [body["text"] for body in chat_bodies] == ["我给小鸭准备了超时证据。"] * 2
+    assert chat_header_ids == [request_id, request_id]
+    assert len(held) == 2
+    assert tts_requests == []
+    assert completion_requests == []
+    record_property(
+        "task9.timeout_evidence",
+        json.dumps(
+            {
+                "activation_sequence": ["Enter", "Space", "Enter"],
+                "body_reused_exactly": chat_bodies[1] == chat_bodies[0],
+                "chat_attempts": len(chat_bodies),
+                "completion_requests_at_9999": 0,
+                "completion_requests_during_failure_boundary": len(completion_requests),
+                "durable_bytes_unchanged_at_9999": durable_at_9999
+                == serialized_before,
+                "failure_transitions_at_10000": failure_transitions_at_10000,
+                "header_matches_body_request_id": chat_header_ids
+                == [request_id, request_id],
+                "outstanding_chat_requests_at_9999": 1,
+                "request_id_sha256": hashlib.sha256(
+                    request_id.encode("utf-8")
+                ).hexdigest(),
+                "retry_controls_at_10000": retry_controls_at_10000,
+                "retry_controls_at_9999": retry_controls_at_9999,
+                "retry_requests": len(chat_bodies) - 1,
+                "state_at_10000": state_at_10000,
+                "state_at_9999": state_at_9999,
+                "success_copy_at_9999": success_copy_at_9999,
+                "timeout_ms": 10_000,
+                "tts_requests_at_9999": 0,
+                "tts_requests_during_failure_boundary": len(tts_requests),
+                "viewport": viewport,
+                "viewport_id": f'{viewport["width"]}x{viewport["height"]}',
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+    for pending_route in held:
+        pending_route.abort("failed")
+    page.evaluate("() => Promise.resolve()")
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
+def test_completion_delay_is_single_flight_and_saves_once(
+    child_page, exact_fixture_url, viewport
+):
+    page = child_page.page
+    page.set_viewport_size(viewport)
+    port = child_page.server.port
+    complete_requests = []
+    held_completions = []
+
+    child_page.fulfill_json("**/api/roster/today", [SYNTHETIC_CHILD])
+    child_page.fulfill_json(
+        "**/api/children/1/active-conversation", SYNTHETIC_ACTIVE
+    )
+
+    def chat(route):
+        assert exact_fixture_url(route.request.url, port)
+        body = route.request.post_data_json
+        payload = _chat_success_for(body)
+        payload.update({"ended": True, "end_reason": "complete"})
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(payload),
+        )
+
+    def tts(route):
+        assert exact_fixture_url(route.request.url, port)
+        route.fulfill(status=200, content_type="audio/mpeg", body=b"synthetic-audio")
+
+    def complete(route):
+        assert exact_fixture_url(route.request.url, port)
+        complete_requests.append(route.request.post_data_json)
+        held_completions.append(route)
+
+    page.route("**/api/chat", chat)
+    page.route("**/api/tts?*", tts)
+    page.route("**/api/conversations/17/complete", complete)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="开始", exact=True).click()
+    page.get_by_role("button", name="开始说话", exact=True).click()
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+    page.evaluate(
+        "window.__childTest.recognition.emitResult(0, '我给小鸭讲了一个故事。', true)"
+    )
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.wait_for_function("window.__childTest.audio.instances.length === 1")
+    page.evaluate("window.__childTest.audio.emitPlaying(0)")
+    with page.expect_request(
+        lambda request: request.url.endswith("/api/conversations/17/complete")
+    ) as requested:
+        page.evaluate("window.__childTest.audio.emitEnded(0)")
+    assert exact_fixture_url(requested.value.url, port)
+    page.evaluate("() => Promise.resolve()")
+
+    assert complete_requests == [{"expected_last_message_id": 104}]
+    assert len(held_completions) == 1
+    assert page.locator(".child-view").get_attribute("data-state") == "saving_conversation"
+    stored = json.loads(
+        page.evaluate("sessionStorage.getItem('duck-diary.child-session.v1')")
+    )
+    assert stored["state"] == "saving_conversation"
+    assert stored["last_message_id"] == 104
+
+    page.keyboard.press("Enter")
+    page.keyboard.press("Space")
+    page.locator(".child-view").click()
+    page.keyboard.press("Enter")
+    page.keyboard.press("Space")
+    page.evaluate("() => Promise.resolve()")
+    assert complete_requests == [{"expected_last_message_id": 104}]
+    assert len(held_completions) == 1
+
+    acknowledgement = {
+        "conversation_id": 17,
+        "conversation_saved": True,
+        "status": "completed",
+        "completed_at": "2026-08-23T00:01:00.000Z",
+        "message_count": 4,
+        "last_message_id": 104,
+        "analysis_job_id": 3,
+        "analysis_status": "pending",
+        "replayed": False,
+    }
+    held_completions[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(acknowledgement),
+    )
+    completed = page.get_by_role("button", name="换下一位小朋友", exact=True)
+    completed.wait_for()
+
+    assert complete_requests == [{"expected_last_message_id": 104}]
+    assert acknowledgement["analysis_job_id"] == 3
+    assert acknowledgement["analysis_status"] == "pending"
+    assert completed.count() == 1
+    assert page.locator(".child-view").get_attribute("data-state") == "completed"
+    assert page.get_by_role("status").inner_text() == "今天的话已经安全记下来啦"
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
+def test_child_core_flow_is_page_keyboard_only_and_saves_once(
+    child_page, exact_fixture_url, viewport
+):
+    page = child_page.page
+    page.clock.install(time=1_700_000_000)
+    page.set_viewport_size(viewport)
+    port = child_page.server.port
+    chat_requests = []
+    tts_requests = []
+    complete_requests = []
+    user_actions = []
+    second_child = {
+        "id": 2,
+        "name": "键盘候选幼儿",
+        "nickname": "小键",
+        "avatar": None,
+    }
+
+    child_page.fulfill_json(
+        "**/api/roster/today", [SYNTHETIC_CHILD, second_child]
+    )
+    child_page.fulfill_json(
+        "**/api/children/1/active-conversation", {"conversation": None}
+    )
+    child_page.fulfill_json(
+        "**/api/children/2/active-conversation", {"conversation": None}
+    )
+
+    def chat(route):
+        assert exact_fixture_url(route.request.url, port)
+        body = route.request.post_data_json
+        chat_requests.append(body)
+        round_index = len(chat_requests)
+        assert round_index in {1, 2}
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "request_id": body["request_id"],
+                "conversation_id": 17,
+                "child_message_id": (round_index * 2) - 1,
+                "diary_message_id": round_index * 2,
+                "reply": f"第{round_index}轮日记回复。",
+                "round": round_index,
+                "ended": round_index == 2,
+                "end_reason": "complete" if round_index == 2 else None,
+                "replayed": False,
+            }),
+        )
+
+    def tts(route):
+        assert exact_fixture_url(route.request.url, port)
+        tts_requests.append(route.request.url)
+        route.fulfill(status=200, content_type="audio/mpeg", body=b"synthetic-audio")
+
+    def complete(route):
+        assert exact_fixture_url(route.request.url, port)
+        body = route.request.post_data_json
+        complete_requests.append(body)
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "conversation_id": 17,
+                "conversation_saved": True,
+                "status": "completed",
+                "completed_at": "2026-08-23T00:01:00.000Z",
+                "message_count": 4,
+                "last_message_id": body["expected_last_message_id"],
+                "analysis_job_id": 3,
+                "analysis_status": "pending",
+                "replayed": False,
+            }),
+        )
+
+    def press(stage, key):
+        user_actions.append((stage, "page.keyboard", key))
+        page.keyboard.press(key)
+
+    page.route("**/api/chat", chat)
+    page.route("**/api/tts?*", tts)
+    page.route("**/api/conversations/17/complete", complete)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+
+    assert page.locator(".child-view").get_attribute("data-state") == "welcome"
+    page.wait_for_function("document.activeElement?.id === 'start-button'")
+    press("welcome", "Enter")
+    page.wait_for_function(
+        "document.querySelector('.child-view')?.dataset.state === 'selecting_child'"
+    )
+    assert page.locator(".child-view").get_attribute("data-state") == "selecting_child"
+    press("child-selection-focus", "Tab")
+    page.wait_for_function("document.activeElement?.id === 'child-card-1'")
+    press("child-selection", "Enter")
+    page.wait_for_function("window.__childTest.audio.instances.length === 1")
+    page.evaluate("window.__childTest.audio.emitPlaying(0)")
+    page.evaluate("window.__childTest.audio.emitEnded(0)")
+    page.wait_for_function("document.activeElement?.id === 'record-button'")
+    assert page.locator(".child-view").get_attribute("data-state") == "ready"
+
+    page.clock.pause_at(page.evaluate("Date.now()") / 1000 + 1)
+    for round_index, child_text in enumerate(
+        ["第一轮我给小鸭添了水。", "第二轮我给小鸭讲了故事。"]
+    ):
+        press(f"round-{round_index + 1}-record", "Space")
+        page.wait_for_function(
+            f"window.__childTest.recognition.starts === {round_index + 1}"
+        )
+        page.evaluate(
+            "([index, text]) => window.__childTest.recognition.emitResult(index, text, true)",
+            [round_index, child_text],
+        )
+        page.clock.fast_forward(1_499)
+        assert page.evaluate("window.__childTest.recognition.stops") == round_index
+        page.clock.fast_forward(1)
+        assert page.evaluate("window.__childTest.recognition.stops") == round_index + 1
+        page.evaluate("window.__childTest.recognition.emitEnd()")
+        audio_index = round_index + 1
+        page.wait_for_function(
+            f"window.__childTest.audio.instances.length === {audio_index + 1}"
+        )
+        page.evaluate(
+            "index => window.__childTest.audio.emitPlaying(index)", audio_index
+        )
+        page.evaluate(
+            "index => window.__childTest.audio.emitEnded(index)", audio_index
+        )
+        if round_index == 0:
+            page.wait_for_function("document.activeElement?.id === 'record-button'")
+
+    completed = page.get_by_role("button", name="换下一位小朋友", exact=True)
+    completed.wait_for()
+    page.wait_for_function("document.activeElement?.id === 'reset-button'")
+
+    assert [body["text"] for body in chat_requests] == [
+        "第一轮我给小鸭添了水。",
+        "第二轮我给小鸭讲了故事。",
+    ]
+    assert len({body["request_id"] for body in chat_requests}) == 2
+    assert len(tts_requests) == 3
+    assert complete_requests == [{"expected_last_message_id": 4}]
+    assert page.locator(".child-view").get_attribute("data-state") == "completed"
+    assert page.get_by_role("status").inner_text() == "今天的话已经安全记下来啦"
+    log = page.get_by_role("log", name="对话记录")
+    for text in [
+        "第一轮我给小鸭添了水。",
+        "第1轮日记回复。",
+        "第二轮我给小鸭讲了故事。",
+        "第2轮日记回复。",
+    ]:
+        assert log.get_by_text(text, exact=True).count() == 1
+
+    press("completed-exit", "Enter")
+    page.get_by_role("button", name="开始", exact=True).wait_for()
+    assert page.locator(".child-view").get_attribute("data-state") == "welcome"
+    assert complete_requests == [{"expected_last_message_id": 4}]
+    assert user_actions == [
+        ("welcome", "page.keyboard", "Enter"),
+        ("child-selection-focus", "page.keyboard", "Tab"),
+        ("child-selection", "page.keyboard", "Enter"),
+        ("round-1-record", "page.keyboard", "Space"),
+        ("round-2-record", "page.keyboard", "Space"),
+        ("completed-exit", "page.keyboard", "Enter"),
+    ]
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
