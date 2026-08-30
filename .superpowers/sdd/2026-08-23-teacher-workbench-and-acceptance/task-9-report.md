@@ -4,13 +4,16 @@ Date: 2026-08-29–30 (Asia/Shanghai)
 
 ## Verdict
 
-**Current status: NO-GO. Commit A-double-prime completed one exact replacement
-22-command Unit 8 run with truthful Evidence and canonical-run Safety bytes,
-but its artifact remains invalid for release. The latest scoped repair review
-found one remaining P1 after the no-subprocess logical-reader repair:
-`packed-refs` used `splitlines()` and could normalize noncanonical control-byte
-separators into valid-looking records. Commit A-triple-prime remains denied and
-no further Unit 8 run has started.**
+**Current status: NO-GO. Non-amend Commit A-triple-prime
+`2dfd807ed635faaa837ad592c71e992ce71fe09a` was independently authorized and
+received exactly one canonical Unit 8 run. That run is truthful partial
+evidence, not a release candidate: runner, Lovable, and backend passed, then
+browser stopped the inventory at `431/432` on one offline-retry harness node.
+Systematic diagnosis found that the post-`Locator.click()` disabled assertion
+did not establish that the immediately aborted transport was still pending.
+No product defect or product change is authorized. The exact five-path harness
+repair below requires fresh scoped review, non-amend A-quadruple-prime (A⁗),
+and a complete new Unit 8 from command 1.**
 
 The eighth pre-Commit-A Contract/Code/Safety/Stage review returned **GO,
 P0=0, P1=0, P2=0**. Commit A
@@ -1267,6 +1270,143 @@ resource drift or tripwire fired.
   non-amend A-triple-prime, and a complete replacement Unit 8 against that
   exact clean HEAD.
 
+### Unit 8.8: A-triple-prime partial run and offline retry harness diagnosis
+
+- Fresh scoped review authorized non-amend A-triple-prime
+  `2dfd807ed635faaa837ad592c71e992ce71fe09a`. Its one canonical Unit 8 run was
+  never restarted or rerun. Run `20260830T084330976903Z-task9` naturally
+  returned `TECHNICAL_NO_GO`, runner exit `1`, with exact reasons
+  `COMMAND_FAILURE`, `GATE_FAILURE`, and `LOVABLE_DELIVERABLE_MISSING`.
+- The exact truthful prefix was runner **507/507**, Lovable **18/18**, backend
+  **266/266**, then browser **431/432**. The sole failure was
+  `tests.browser.test_teacher_today::test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy[offline-1440x900]`:
+  immediately after Playwright `button.click()`, `button.is_disabled()` was
+  false. Commands 5--22 did not start and all fourteen gates are `BLOCKED`.
+- The partial artifact root is immutable
+  `artifacts/acceptance/20260830T084330976903Z-task9`. Canonical JSON SHA-256 is
+  `eaada3d7280706e07cba6aea2f16a59ccdb9a24aadf1686d9daa6d522c67c779`;
+  Markdown SHA-256 is
+  `14440f63170875e1b3178b8ab00e06a6d87a03dbb33d64697c3efb8301cc9918`;
+  browser JUnit/stdout/stderr SHA-256 values are respectively
+  `bb4cc7d49af22569b304c81e9585a2f9c3a87d024c5c86f7959bbcb090ac0b1a`,
+  `fc5a1ebb989990558fcd2edc15b394dd418f1580b824fff2fba16ca9a487ba60`,
+  and `a290c3a4c01b1fd4b07ac901186476aef33c0e57c58e65f39f17ea703306d1a3`.
+  Production completed rendering passed against the real source root and the
+  trusted logical HEAD. All four authenticated sidecars were valid with zero
+  events; the top-level tripwire is `NOT_PROVEN` only because execution stopped
+  early, not because an unsafe event was observed.
+- Global before/after and all four command before/after snapshots were exact.
+  Canonical protected-resource SHA-256 remained
+  `9038ca3db247c372c0695b538d04f4dbcc903f4eabbb1227cb5386dde3708be1`,
+  SQLite logical digest remained
+  `c31f80875458d37e7b9badf086a5ff904a73d1d7f2ef1f5ab716c1f2c9755af3`,
+  database SHA-256 remained
+  `f04f7a8928ae519dbf28fb4c6eaedaba35f1c65354bb7fd69074a419d5800a56`,
+  log SHA-256 remained
+  `5ee47c6b8322aee20aefecbf2344e8134cec18154fb7eb2d00c60116379fbeb7`,
+  TTS digest remained
+  `daa5c5f3e1438b25230a28812a4f3303455c68ec64e9ba54c7be3c359173e4cd`,
+  and `unsafe=[]`.
+- Read-only systematic-debugging Phases 1--3 found no viewport-dependent
+  product branch. The listener synchronously disables and installs one flight;
+  immediate `route.abort("failed")` can drive `fetch` rejection, shared API
+  catch/finally, and Today's catch back to enabled plus safe copy before the
+  cross-process `Locator.click()` call returns. The sibling offline 1024 node
+  and all fourteen settled HTTP/shape variants passed, while six existing
+  held-success cases proved disabled/single-flight at the actual pending
+  boundary. The canonical failure is therefore honest RED for an ambiguous
+  harness observation, not evidence authorizing a product change.
+- This loop owns exactly runner, pure runner tests, Today browser tests, brief,
+  and report. The repair removes `offline` only from the immediate settled-
+  failure matrix, preserves every remaining final-state assertion, and adds a
+  held-then-abort dual-viewport characterization. The route must be captured
+  before pending-state assertions, rapid repeated interactions must remain one
+  POST, explicit abort must lead to fixed safe copy and enabled state, and a
+  `finally` must settle any held route. No sleep or product-file change is
+  permitted.
+- The two removed and two added node IDs preserve the complete browser count
+  while changing the literal selector inventory from 96 to 97 rows and keeping
+  259 materialized node IDs. Pure runner tests received the new literal expected
+  IDs first and exposed genuine manifest RED before the production manifest
+  changed. The new browser characterization is direct GREEN and is not
+  relabeled as a product RED.
+- The exact new-node command passed **2 passed, 1 warning in 4.17s**. After the
+  final cleanup-path audit, the complete Today file passed **72 passed, 1
+  warning in 79.43s**. Both
+  warnings were the pre-existing Starlette/httpx deprecation; no skip, xfail,
+  page error, unresolved route, tripwire event, or protected-resource change
+  occurred.
+- The focused manifest test produced genuine RED **1 failed in 0.31s** with the
+  exact old `16`-node offline-inclusive row versus the expected settled `14`
+  plus held-offline `2` rows. Minimal production splitting produced GREEN **1
+  passed in 0.05s**. The exact manifest and Gates 1--14 deletion/same-count-
+  substitution matrix passed **16 passed in 0.80s**.
+- The first full pure runner verification exposed expected canonical-golden
+  migration RED **505 passed, 2 failed in 22.65s**. Both failures were literal
+  JSON SHA-256 assertions changed by the 97-row serialized manifest; the other
+  505 tests passed. The new pending JSON/Markdown hashes are respectively
+  `1b909818d5454dbc4bdbaef0394389cf893b6d1129b745807a901ccbfaa6d367`
+  and `2aa9d5c2dbdb59801350cbb6bcd108c5b6720bf2facf6352afa63c6a653444f7`;
+  the timeout golden hashes are
+  `5a6cd3647544d5bfa81c04ffb955c10e89964fe0877590c0761326e113333a5c`
+  and `fe9622915a97310c41346643a5b127987b737af12025779def1692a78d5a5ff5`.
+  Focused migration GREEN was **2 passed in 0.30s**. Complete pure verification
+  then passed twice at **507 passed in 22.35s** and **507 passed in 22.95s**,
+  with separate JUnit files; read-only AST syntax was `syntax_ok=3`.
+- Every pytest guard retained canonical current-worktree resource snapshot
+  SHA-256 `293f226d6d4bacfeec79269f908b173963af0a6586a87208445913cb706c97a8`,
+  the exact protected digests above, HEAD A-triple-prime, and `unsafe=[]`.
+  No provider, external network, real service, backend, full browser, Node,
+  Lovable connector, canonical Unit 8, or artifact command ran in this loop.
+- Status remains **NO-GO**. A-triple-prime and its immutable partial artifact
+  are not release candidates. The repaired exact five paths require fresh
+  scoped review, authorization of non-amend A-quadruple-prime (A⁗), and one
+  complete fresh Unit 8 from command 1 against that exact clean HEAD.
+
+### Unit 8.9: held-route capture scoped-review repair
+
+- The next scoped review found one P1 in the otherwise direct-GREEN offline
+  characterization. `page.expect_request(retry_url)` waited for request-event
+  delivery, not for the independently dispatched route callback. The immediate
+  `held_routes` read could therefore race; on an early exception, `finally`
+  could also see no captured route and allow a later callback to retain an
+  unresolved request. The previous passing invocation did not establish this
+  ordering contract.
+- No honest deterministic real-browser RED was available on this host because
+  its observed schedule delivered the callback before the old immediate read.
+  The independent P1 finding is therefore retained explicitly as RED evidence,
+  as authorized by the review instructions; no sleep, delayed fake, or rerun of
+  the removed canonical node was manufactured.
+- The repaired node records request notification only as a request-started
+  cleanup signal. A bounded condition helper pumps the Playwright event loop at
+  10 ms poll intervals until the callback itself appends the route, the page
+  closes, or the 5-second deadline is reached. Pending-state, disabled, and
+  single-flight assertions occur only after that actual capture. The real node
+  also asserted the observed ordering exactly as `request`, then `route`.
+- Cleanup now marks the handler closing before any wait. If request-started is
+  visible without route capture, it keeps pumping to capture or a clear
+  terminal condition. It then attempts `abort("failed")` on every captured
+  route regardless of whether the main body or closing handler already settled
+  it, contains expected already-handled Playwright errors, unroutes the exact
+  callback, and finally removes the request listener. No product file, node ID,
+  manifest row, or suite count changed.
+- The exact new-node command passed **2 passed, 1 warning in 4.05s**. The
+  complete Today file passed **72 passed, 1 warning in 79.06s**. Both warnings
+  were the existing Starlette/httpx deprecation; no page error, unresolved
+  route, skip, or xfail was observed. The unchanged manifest/Gates 1--14 matrix
+  passed **16 passed in 0.81s**.
+- Complete pure runner verification with `--noconftest`, `xfail_strict`, and
+  distinct JUnit files passed twice: **507 passed in 22.33s** and **507 passed
+  in 22.30s**. Read-only AST validation remained `syntax_ok=3`.
+- Every adjacent resource guard retained current-worktree ResourceSnapshot
+  SHA-256 `1a4ee03dde328e9bd33f043573596d6e0f3b1042ba7ddaf307a1445f24964273`,
+  the frozen SQLite/log/TTS/user-path fields, exact HEAD A-triple-prime, and
+  `unsafe=[]`. No provider, external network, real service, backend, full
+  browser, Node, canonical Unit 8, or artifact command ran.
+- Status remains **NO-GO**. These exact five paths require fresh scoped review,
+  separate authorization of non-amend A-quadruple-prime (A⁗), and one complete
+  fresh Unit 8 from command 1 against that exact clean HEAD.
+
 ## Final policy and staging evidence
 
 - No `pytest.skip`, `pytest.xfail`, skip/skipif/xfail marker exists in the
@@ -1295,7 +1435,7 @@ resource drift or tripwire fired.
 - The seventh-review final read-only AST syntax check passed for both changed
   Python files (`syntax_ok=2`), and the unstaged `git diff --check` exited `0`
   before exact restaging.
-- The A-triple-prime repair's exact cached path list and
+- The A-quadruple-prime harness repair's exact cached path list and
   `git diff --cached --check` are recorded below after explicit staging; the
   invalidated earlier implementation commits are not amended and no repair
   commit is made in this task.
@@ -1318,27 +1458,32 @@ No agent, runner, or reviewer can accept these risks for the release owner.
 - The original Commit A, replacement A-prime, and replacement A-double-prime
   Unit 8 executions all completed, but their successive Artifact/renderer
   integrity NO-GO verdicts invalidate release use of all three candidates.
-  A-triple-prime Unit 8 and Unit 9 evidence-only reporting have not started and
-  are not claimed.
+  Commit A-triple-prime received exactly one canonical Unit 8 run; it stopped
+  truthfully at command 4 with browser `431/432`, so that immutable partial
+  evidence is also a release NO-GO. Unit 9 evidence-only reporting has not
+  started and is not claimed.
 - Lovable remains a blank private bootstrap without a valid reviewed
   `prototype-reference.md`; no scope waiver has been authorized.
 - Historical incident disposition remains human-owned and unresolved.
-- Commit A-double-prime exists at
-  `8d2b9c60532333b577b1cadf0ff8bea3f1b3c4ec` but is now an invalid verifier
-  candidate. The current four-path repair stage requires independent Contract/
-  Code/Safety/Stage review, a new non-amend Commit A-triple-prime, and a complete
-  replacement Unit 8 run. Any new P0/P1 invalidates that repair verdict and
-  requires another focused RED/GREEN loop.
+- Commit A-triple-prime exists at
+  `2dfd807ed635faaa837ad592c71e992ce71fe09a`; its one partial run is preserved
+  at `artifacts/acceptance/20260830T084330976903Z-task9` and is not rerun or
+  repaired in place. The current exact five-path harness repair stage requires
+  independent Contract/Code/Safety/Stage review, a new non-amend Commit
+  A-quadruple-prime (A⁗), and a complete replacement Unit 8 run from command 1.
+  Any new P0/P1 invalidates that repair verdict and requires another focused
+  RED/GREEN loop.
 
 ### Exact cached paths after staging
 
-The final explicit A-triple-prime repair cached-name check returned exactly
-these four paths:
+The final explicit A-quadruple-prime harness repair cached-name check returned
+exactly these five paths:
 
 ```text
 .superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-brief.md
 .superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-report.md
 scripts/run_interaction_acceptance.py
+tests/browser/test_teacher_today.py
 tests/test_interaction_acceptance_runner.py
 ```
 

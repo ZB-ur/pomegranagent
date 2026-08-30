@@ -2348,6 +2348,21 @@ EXPECTED_INTERNAL_EVIDENCE = (
     ),
 )
 
+EXPECTED_TODAY_RETRY_SELECTOR_ROWS = (
+    (
+        "browser",
+        r"^test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy\[(mismatch|malformed|401|404|409|500|non-json)-(1024x768|1440x900)\]$",
+        14,
+        (7, 14),
+    ),
+    (
+        "browser",
+        r"^test_teacher_today_analysis_retry_offline_is_single_flight_until_transport_rejects\[(1024x768|1440x900)\]$",
+        2,
+        (3, 7, 14),
+    ),
+)
+
 
 def _frozen_manifest_rows():
     brief = (
@@ -2448,8 +2463,16 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
         for row in module.SELECTOR_MANIFEST
     )
 
+    actual_today_retry_rows = tuple(
+        row
+        for row in actual_rows
+        if "test_teacher_today_analysis_retry_failures_restore" in row[1]
+        or "test_teacher_today_analysis_retry_offline_is_single_flight" in row[1]
+    )
+
+    assert actual_today_retry_rows == EXPECTED_TODAY_RETRY_SELECTOR_ROWS
     assert actual_rows == expected_rows
-    assert len(actual_rows) == 96
+    assert len(actual_rows) == 97
     assert module.GATE_TITLES == EXPECTED_GATE_TITLES
     assert tuple(
         (item.source, item.evidence_id, item.expected_count, item.gates)
@@ -3646,8 +3669,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "0b8f3972d17e956d1d0b4fa6cb764ad47c1eeb3ef485303db84c1924e6fab7ed"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "532813b6e29b2f2ad473d281a95f07817c2d43f8ca9cd8ee55a8df072cc5d442"
+    assert hashlib.sha256(json_bytes).hexdigest() == "1b909818d5454dbc4bdbaef0394389cf893b6d1129b745807a901ccbfaa6d367"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "2aa9d5c2dbdb59801350cbb6bcd108c5b6720bf2facf6352afa63c6a653444f7"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4212,8 +4235,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "00e13127086c3fbe0f37d2e4093952e33322e98790a7ef951e2be3ba0ef9c63e"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "d2d177c2225e1dde58b7a00f871d980b46b78197ff3e39ad9ca157c9380110fb"
+    assert hashlib.sha256(json_bytes).hexdigest() == "5a6cd3647544d5bfa81c04ffb955c10e89964fe0877590c0761326e113333a5c"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "fe9622915a97310c41346643a5b127987b737af12025779def1692a78d5a5ff5"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown

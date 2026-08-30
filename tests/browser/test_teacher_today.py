@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+from time import monotonic
 from urllib.parse import urlsplit
 
 import pytest
+from playwright.sync_api import Error as PlaywrightError
+from playwright.sync_api import expect
 
 from tests.browser.conftest import is_exact_fixture_url
 
@@ -106,6 +109,19 @@ def fulfill_json(route, body, status: int = 200) -> None:
 
 def empty_handlers():
     return {key: lambda route: fulfill_json(route, []) for key in PANEL_PATHS}
+
+
+def wait_for_condition(page, condition, description: str, timeout_ms: int = 5_000):
+    deadline = monotonic() + timeout_ms / 1_000
+    while True:
+        result = condition()
+        if result:
+            return result
+        if page.is_closed():
+            raise AssertionError(f"page closed while waiting for {description}")
+        if monotonic() >= deadline:
+            raise AssertionError(f"timed out waiting for {description}")
+        page.wait_for_timeout(10)  # Event-pump poll interval, not a fixed-state delay.
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -491,7 +507,7 @@ def test_teacher_today_analysis_retry_is_single_flight_and_refreshes_three_queue
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-@pytest.mark.parametrize("failure", ["mismatch", "malformed", "401", "404", "409", "500", "non-json", "offline"])
+@pytest.mark.parametrize("failure", ["mismatch", "malformed", "401", "404", "409", "500", "non-json"])
 def test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy(teacher_browser, viewport, failure):
     _context, page = open_teacher(teacher_browser, viewport)
     handlers = empty_handlers()
@@ -506,8 +522,6 @@ def test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_
             fulfill_json(route, {"conversation_id": 42})
         elif failure == "non-json":
             route.fulfill(status=200, content_type="text/plain", body="raw-retry-detail")
-        elif failure == "offline":
-            route.abort("failed")
         else:
             route.fulfill(status=int(failure), content_type="application/json", body='{"error":{"message":"raw-retry-detail"}}')
 
@@ -525,6 +539,95 @@ def test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_
     assert failed_panel.get_by_text("会话 #42", exact=True).count() == 1
     assert "raw-retry-detail" not in page.locator("body").inner_text()
     assert errors == []
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_today_analysis_retry_offline_is_single_flight_until_transport_rejects(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher(teacher_browser, viewport)
+    handlers = empty_handlers()
+    handlers["failed"] = lambda route: fulfill_json(route, [queue_row("failed")])
+    install_panel_routes(page, teacher_browser, handlers)
+    held_routes = []
+    retry_requests = []
+    event_order = []
+    handler_closing = False
+
+    retry_url = f"{teacher_browser.server.base_url}/api/conversations/42/analysis/retry"
+
+    def record_retry_request(request):
+        if request.url == retry_url and request.method == "POST":
+            retry_requests.append(request)
+            event_order.append("request")
+
+    def hold_retry(route):
+        nonlocal handler_closing
+        assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
+        held_routes.append(route)
+        event_order.append("route")
+        if handler_closing:
+            try:
+                route.abort("failed")
+            except PlaywrightError:
+                pass
+
+    page.on("request", record_retry_request)
+    page.route(retry_url, hold_retry)
+    errors = []
+    page.on("pageerror", lambda error: errors.append(str(error)))
+    setup_teacher(page)
+    failed_panel = panel(page, "failed")
+    button = failed_panel.get_by_role("button", name="重试分析：雨雨", exact=True)
+    try:
+        button.dblclick()
+        held_route = wait_for_condition(
+            page,
+            lambda: held_routes[0] if held_routes else None,
+            "retry route capture",
+        )
+        assert len(retry_requests) == 1
+        assert len(held_routes) == 1
+        assert event_order == ["request", "route"]
+        expect(button).to_be_disabled()
+        page.keyboard.press("Enter")
+        assert len(held_routes) == 1
+
+        held_route.abort("failed")
+        feedback = failed_panel.locator(".today-retry-feedback")
+        feedback.get_by_text("暂时无法重试分析，请稍后再试。", exact=True).wait_for()
+        expect(button).to_be_enabled()
+        assert len(held_routes) == 1
+        assert failed_panel.get_by_text("会话 #42", exact=True).count() == 1
+        assert failed_panel.get_by_text("暂无分析失败会话", exact=True).count() == 0
+        assert failed_panel.locator(".today-analysis-retry").count() == 1
+        assert panel(page, "pending").get_by_text("暂无待审阅会话", exact=True).count() == 1
+        assert panel(page, "processing").get_by_text("暂无分析中的会话", exact=True).count() == 1
+        assert "raw-retry-detail" not in page.locator("body").inner_text()
+        assert errors == []
+    finally:
+        handler_closing = True
+        cleanup_error = None
+        if retry_requests and not held_routes and not page.is_closed():
+            try:
+                wait_for_condition(
+                    page,
+                    lambda: held_routes[0] if held_routes else None,
+                    "late retry route capture during cleanup",
+                )
+            except AssertionError as error:
+                cleanup_error = error
+        for held_route in tuple(held_routes):
+            try:
+                held_route.abort("failed")
+            except PlaywrightError:
+                pass
+        try:
+            page.unroute(retry_url, hold_retry)
+        finally:
+            page.remove_listener("request", record_retry_request)
+        if cleanup_error is not None:
+            raise cleanup_error
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)

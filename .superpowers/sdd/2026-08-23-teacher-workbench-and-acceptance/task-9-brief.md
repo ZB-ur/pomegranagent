@@ -1308,6 +1308,153 @@ no provider, TTS, network, real service, backend, browser, Node, Lovable,
 canonical Unit 8, or artifact command ran. Fresh scoped review is still
 required before A-triple-prime or a replacement Unit 8 can be authorized.
 
+#### A-triple-prime partial Unit 8 and offline-retry harness amendment
+
+Scoped review subsequently authorized and created non-amend implementation
+Commit A-triple-prime
+`2dfd807ed635faaa837ad592c71e992ce71fe09a`. Exactly one canonical Unit 8
+runner was then started from command 1 against that clean HEAD. Immutable run
+`20260830T084330976903Z-task9` completed a truthful first-failure prefix:
+runner `507/507`, Lovable `18/18`, and backend `266/266` passed; browser parsed
+`431/432` with the sole failure
+`tests.browser.test_teacher_today::test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy[offline-1440x900]`.
+The runner stopped before commands 5--22 and correctly returned
+`TECHNICAL_NO_GO`, exit `1`, for `COMMAND_FAILURE`, `GATE_FAILURE`, and
+`LOVABLE_DELIVERABLE_MISSING`. All fourteen gates are blocked rather than
+passed. The canonical artifact is immutable truthful RED evidence and must not
+be edited, restarted, or reused as a completed release candidate.
+
+Read-only systematic-debugging Phases 1--3 froze the cause before this
+amendment. The retry listener synchronously disables the row action and records
+one `retryFlights` entry. The immediate Playwright `route.abort("failed")`
+rejects `fetch`; the shared API catch/finally normalizes and settles that
+rejection, and Today's catch restores the enabled action plus fixed safe copy.
+`Locator.click()` is an asynchronous cross-process action and may return only
+after that complete rejection path has settled. Therefore a disabled assertion
+made merely after `click()` returns is not a guaranteed observation of the
+pending state. The product invariant remains exact: the action is disabled and
+single-flight while the transport is actually pending, then restored with
+fixed safe feedback after rejection. Existing held-success coverage proves the
+pending boundary; no product change is authorized.
+
+The exact repair ownership for this loop is limited to:
+
+```text
+scripts/run_interaction_acceptance.py
+tests/test_interaction_acceptance_runner.py
+tests/browser/test_teacher_today.py
+.superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-brief.md
+.superpowers/sdd/2026-08-23-teacher-workbench-and-acceptance/task-9-report.md
+```
+
+The browser harness contract is amended narrowly:
+
+- remove `offline` from the immediately settled failure parameter matrix; all
+  mismatch, malformed, HTTP, and non-JSON final-state assertions remain exact;
+- add exactly the two viewport nodes
+  `test_teacher_today_analysis_retry_offline_is_single_flight_until_transport_rejects[1024x768]`
+  and
+  `test_teacher_today_analysis_retry_offline_is_single_flight_until_transport_rejects[1440x900]`;
+- each new node holds the real retry POST unresolved, condition-waits until the
+  route is captured, proves exactly one request and a disabled action, applies
+  the already frozen rapid repeat interactions without creating a second
+  request, then explicitly aborts the held route;
+- each node condition-waits for the fixed network-failure copy, proves the
+  action is enabled, the row and unrelated actions remain intact, no false
+  success or raw transport detail appears, and no page error occurs; a `finally`
+  aborts any still-held route so teardown never owns an unresolved request;
+- no arbitrary delay, retry of the old canonical node, broad selector, product
+  mutation, external service, or provider access is permitted.
+
+Removing two ambiguous offline parameter nodes and adding two held-then-abort
+nodes preserves the browser suite total but changes its exact node-ID
+inventory. Literal runner selector expectations change first and must produce a
+genuine focused manifest RED against the old production manifest; only then may
+the production manifest be changed minimally. The new browser nodes are
+characterization coverage and may be direct GREEN; they are not relabeled as a
+product RED because the immutable A-triple-prime canonical failure already
+supplies the truthful RED observation.
+
+The repair followed that boundary exactly. The two new held-then-abort browser
+nodes were honest direct GREEN at **2 passed, 1 warning in 4.17s**; the warning
+was the existing Starlette/httpx deprecation and no skip/xfail occurred. The
+literal 97-row manifest test then produced genuine RED at **1 failed in 0.31s**:
+production still exposed the old one-row 16-node offline-inclusive pattern.
+Splitting only that row into the exact 14-node settled pattern and 2-node
+held-offline pattern produced focused GREEN **1 passed in 0.05s**. After the
+final cleanup-path audit, the complete Today browser file passed **72 passed, 1
+warning in 79.43s**, and the manifest
+plus Gates 1--14 deletion/same-count-substitution matrix passed **16 passed in
+0.80s**.
+
+The first complete pure runner attempt intentionally exposed canonical golden
+migration RED after the manifest became 97 rows: **505 passed, 2 failed in
+22.65s**. Both failures were exact JSON-hash assertions; no runtime, parser,
+gate, or resource test failed. Regenerating the two JSON/Markdown literal hash
+pairs for the reviewed manifest produced focused GREEN **2 passed in 0.30s**.
+The complete pure runner then passed twice at **507 passed in 22.35s** and
+**507 passed in 22.95s**, each with its own JUnit output. Read-only syntax
+validation was `syntax_ok=3`. Every pytest before/after guard retained the exact
+protected SQLite/log/TTS/user-path values with `unsafe=[]`; no provider,
+external network, real service, backend, full browser, Node, canonical Unit 8,
+or artifact command ran.
+
+Commit A-triple-prime and its partial artifact remain invalid release
+candidates. These exact five paths require fresh scoped review, a separately
+authorized non-amend Commit A-quadruple-prime (A⁗), and one complete fresh
+Unit 8 from command 1 against that exact clean HEAD. No old artifact byte,
+browser result, gate, or review verdict may be promoted into that rerun.
+
+#### Held-route capture scoped-review amendment
+
+The next scoped review found one P1 in the new offline characterization.
+`page.expect_request(retry_url)` proves only that Playwright delivered the
+request notification; it does not prove that the separately dispatched route
+callback has appended its `Route`. Reading `held_routes` immediately after the
+expectation can therefore race, and a `finally` that sees an empty list can
+leave a later callback holding an unresolved route. The earlier direct-GREEN
+run did not disprove that scheduling gap.
+
+The frozen harness contract is tightened without changing product behavior or
+node inventory:
+
+- the request notification is recorded only as a request-started/cleanup
+  signal; it is never route-capture authority;
+- assertions enter the pending-state boundary only after a bounded
+  condition-wait observes the route callback's own append. The wait pumps the
+  Playwright event loop in 10 ms poll intervals and stops on actual capture,
+  page closure, or a clear 5-second deadline; it is not a fixed sleep;
+- the node records the real ordering `request` then `route`, and proves route
+  capture before disabled/single-flight and rapid-repeat assertions;
+- cleanup first marks the handler closing. If a retry request was observed but
+  its route is not yet recorded, cleanup continues the same bounded event pump.
+  Every captured route is then offered `abort("failed")`, including one already
+  settled by the test or closing handler; expected already-handled errors are
+  contained. Only after those attempts does cleanup unroute the handler and
+  remove the request listener;
+- the old removed canonical node and canonical Unit 8 remain forbidden from
+  rerun in this repair.
+
+There was no honest deterministic way to force the framework scheduling gap
+in the real node on this host: the previous invocation happened to dispatch
+the route callback before the immediate list read. Per scoped-review policy,
+the independently demonstrated P1 is the RED evidence and is not replaced by
+an artificial sleep or delayed fake. With the condition authority and cleanup
+order repaired, the exact dual-viewport node passed **2 passed, 1 warning in
+4.05s** and its real event-order assertion passed. The complete Today file
+passed **72 passed, 1 warning in 79.06s**; the warning in both runs was the
+pre-existing Starlette/httpx deprecation. The unchanged manifest/Gates 1--14
+matrix passed **16 passed in 0.81s**. Complete pure runner verification passed
+twice at **507 passed in 22.33s** and **507 passed in 22.30s**, with separate
+JUnit outputs; read-only syntax validation was `syntax_ok=3`.
+
+Every pytest before/after guard retained the exact protected
+SQLite/log/TTS/user-path values, HEAD A-triple-prime, and `unsafe=[]`. No
+provider, external network, real service, backend, full browser, Node,
+canonical Unit 8, or artifact command ran. Status remains **NO-GO** pending a
+new scoped review of these exact five paths, separate A⁗ authorization, and a
+complete fresh Unit 8 from command 1.
+
 The report `tested_head` is not permanently bound to `FROZEN_START_HEAD`.
 Before Commit A it may equal that start hash; after Commit A it must equal the
 exact lowercase 40-hex candidate in the complete global before/after snapshot
@@ -1438,7 +1585,8 @@ browser | ^test_child_core_flow_is_page_keyboard_only_and_saves_once\[(1024x576|
 browser | ^test_teacher_today_renders_pending_processing_and_failed_rows_with_retry_boundaries\[(1024x768|1440x900)\]$ | 2 | 7,14
 browser | ^test_teacher_today_each_panel_has_its_fixed_empty_state\[(pending|processing|failed)-(1024x768|1440x900)\]$ | 6 | 7
 browser | ^test_teacher_today_analysis_retry_is_single_flight_and_refreshes_three_queues_in_order\[(accepted|replayed)-(1024x768|1440x900)\]$ | 4 | 3,7,14
-browser | ^test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy\[(mismatch|malformed|401|404|409|500|non-json|offline)-(1024x768|1440x900)\]$ | 16 | 7,14
+browser | ^test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy\[(mismatch|malformed|401|404|409|500|non-json)-(1024x768|1440x900)\]$ | 14 | 7,14
+browser | ^test_teacher_today_analysis_retry_offline_is_single_flight_until_transport_rejects\[(1024x768|1440x900)\]$ | 2 | 3,7,14
 browser | ^test_teacher_review_editor_saves_the_complete_normalized_draft_and_refreshes_only_queue\[(1024x768|1440x900)\]$ | 2 | 8
 browser | ^test_teacher_review_complete_confirm_uses_confirm_action_and_removes_the_pending_row\[(1024x768|1440x900)\]$ | 2 | 8
 browser | ^test_teacher_review_queue_and_detail_show_identity_time_id_and_status\[(1024x768|1440x900)\]$ | 2 | 9
@@ -1703,7 +1851,7 @@ and harness-only correction honestly in the Task 9 report.
 
 ### Unit 5 — gate map and honest decisions
 
-- [ ] **5.1a** Encode all 14 gates, the 96 unique selector rows, full literal
+- [ ] **5.1a** Encode all 14 gates, the 97 unique selector rows, full literal
   parameter-ID sets, reverse selector-to-gate index, and five internal evidence
   IDs in runner tests; run the manifest-shape RED.
 - [ ] **5.1b** For Gates 1–7, delete each owning selector/internal ID in turn and
