@@ -970,3 +970,66 @@ test('styles retain the standalone static accessibility and safety contract', ()
   assert.doesNotMatch(css, /overflow\s*:\s*hidden/i);
   assert.doesNotMatch(css, /@import|url\s*\(/i);
 });
+
+test('shell styles preserve pre-shell child components and private teacher dialog presentation', () => {
+  const css = readFileSync(new URL('../../../app/frontend/child/styles.css', import.meta.url), 'utf8');
+  const ruleBody = (selector, occurrence = 0) => {
+    let selectorStart = -1;
+    for (let index = 0; index <= occurrence; index += 1) {
+      selectorStart = css.indexOf(selector, selectorStart + 1);
+    }
+    assert.notEqual(selectorStart, -1, `missing CSS selector: ${selector}`);
+    const bodyStart = css.indexOf('{', selectorStart);
+    const bodyEnd = css.indexOf('}', bodyStart);
+    return css.slice(bodyStart + 1, bodyEnd);
+  };
+
+  const button = ruleBody('#child-app .child-view button {');
+  assert.match(button, /padding\s*:\s*10px\s+18px/);
+  assert.match(button, /border\s*:\s*3px\s+solid\s+var\(--child-action\)/);
+  assert.doesNotMatch(button, /box-shadow|transform|font-size/);
+  assert.equal(css.includes('#child-app .child-view button:hover'), false);
+
+  const card = ruleBody('#child-app .child-view .child-card {');
+  assert.match(card, /border-color\s*:\s*#7a4700/i);
+  assert.match(card, /background\s*:\s*#ffbf24/i);
+  assert.doesNotMatch(card, /box-shadow/);
+  assert.equal(css.includes('#child-app .child-view .child-card:hover'), false);
+
+  const record = ruleBody('#child-app .child-view #record-button {');
+  assert.match(record, /inline-size\s*:\s*clamp\(160px,\s*26vw,\s*200px\)/);
+  assert.match(record, /block-size\s*:\s*clamp\(160px,\s*26vw,\s*200px\)/);
+  assert.match(record, /border\s*:\s*8px\s+solid\s+#7a4700/i);
+  assert.match(record, /color\s*:\s*var\(--child-ink\)/);
+  assert.match(record, /background\s*:\s*#ffbf24/i);
+  assert.match(record, /font-weight\s*:\s*700/);
+
+  assert.match(ruleBody('#child-app .child-view [role="log"] {'), /max-block-size\s*:\s*min\(32vh,\s*300px\)/);
+  assert.match(ruleBody('#child-app .child-view .child-message {'), /border\s*:\s*2px\s+solid\s+#ffbf24/i);
+  assert.match(ruleBody('#child-app .child-view .child-message--child {'), /border-color\s*:\s*var\(--child-action\)/);
+  const speaker = ruleBody('#child-app .child-view .child-message__speaker {');
+  assert.match(speaker, /font-size\s*:\s*0\.8em/);
+  assert.doesNotMatch(speaker, /margin/);
+  assert.equal(css.includes('#child-app .child-view .child-message__text'), false);
+
+  const dialog = ruleBody('#child-app #teacher-help-dialog {');
+  assert.match(dialog, /padding\s*:\s*clamp\(18px,\s*3vw,\s*30px\)/);
+  assert.match(dialog, /border\s*:\s*3px\s+solid\s+#1d5fb0/i);
+  assert.match(dialog, /color\s*:\s*#242421/i);
+  assert.match(dialog, /background\s*:\s*#fffdf5/i);
+  assert.match(dialog, /font-family\s*:\s*"PingFang SC",\s*"Microsoft YaHei",\s*sans-serif/);
+  assert.match(dialog, /font-size\s*:\s*clamp\(17px,\s*2vw,\s*22px\)/);
+  assert.match(dialog, /line-height\s*:\s*1\.5/);
+
+  const dialogInputs = ruleBody('#child-app #teacher-help-dialog input,\n#child-app #teacher-help-dialog textarea {', 1);
+  assert.match(dialogInputs, /border\s*:\s*2px\s+solid\s+#5f6c78/i);
+  assert.match(dialogInputs, /color\s*:\s*#242421/i);
+  const dialogButton = ruleBody('#child-app #teacher-help-dialog button {');
+  assert.match(dialogButton, /padding\s*:\s*10px\s+16px/);
+  assert.match(dialogButton, /border\s*:\s*3px\s+solid\s+#1d5fb0/i);
+  assert.match(dialogButton, /background\s*:\s*#1d5fb0/i);
+  assert.doesNotMatch(dialogButton, /font-weight/);
+  assert.match(ruleBody('#child-app #teacher-help-error {'), /min-block-size\s*:\s*1\.5em/);
+  assert.match(css, /max-block-size\s*:\s*26vh/);
+  assert.match(css, /inline-size\s*:\s*min\(96vw,\s*680px\)/);
+});
