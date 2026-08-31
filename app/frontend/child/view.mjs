@@ -432,7 +432,8 @@ export function createChildView(root, actions, dom) {
     }
     const list = element('ul', { 'aria-label': '今日值日小朋友' });
     for (const rosterChild of snapshot.roster) {
-      const visibleLabel = childLabel(rosterChild);
+      const labelGraphemes = childLabelGraphemes(rosterChild);
+      const visibleLabel = labelGraphemes.join('');
       const item = element('li');
       const card = button({
         id: `child-card-${rosterChild.id}`,
@@ -441,7 +442,7 @@ export function createChildView(root, actions, dom) {
         className: 'child-card',
       });
       const avatar = element('span', { class: 'child-card__avatar', 'aria-hidden': 'true' });
-      appendText(avatar, firstVisibleGrapheme(visibleLabel));
+      appendText(avatar, labelGraphemes[0]);
       const label = element('span', { class: 'child-card__label' });
       appendText(label, visibleLabel);
       replaceChildren(card, avatar, label);
@@ -1140,23 +1141,69 @@ function titleFor(state) {
 }
 
 function childLabel(child) {
-  for (const candidate of [child?.nickname, child?.name]) {
-    if (typeof candidate !== 'string') continue;
-    const visible = candidate.replace(/^[\s\p{Cf}]+|[\s\p{Cf}]+$/gu, '');
-    if (visible.length > 0) return visible;
-  }
-  return '小朋友';
+  return childLabelGraphemes(child).join('');
 }
 
-function firstVisibleGrapheme(visibleLabel) {
+function childLabelGraphemes(child) {
+  for (const candidate of [child?.nickname, child?.name]) {
+    if (typeof candidate !== 'string') continue;
+    const graphemes = segmentGraphemes(candidate);
+    let start = 0;
+    let end = graphemes.length;
+    while (start < end && isInvisibleEdgeGrapheme(graphemes[start])) start += 1;
+    while (end > start && isInvisibleEdgeGrapheme(graphemes[end - 1])) end -= 1;
+    const normalized = graphemes.slice(start, end);
+    if (normalized.some(grapheme => !isInvisibleEdgeGrapheme(grapheme))) return normalized;
+  }
+  return ['小', '朋', '友'];
+}
+
+function segmentGraphemes(value) {
   try {
     if (typeof Intl.Segmenter === 'function') {
-      const segments = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }).segment(visibleLabel);
-      const first = segments[Symbol.iterator]().next();
-      if (first.done !== true && typeof first.value?.segment === 'string') return first.value.segment;
+      const segments = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }).segment(value);
+      return Array.from(segments, entry => entry.segment);
     }
   } catch {}
-  return Array.from(visibleLabel)[0] ?? '小';
+  return fallbackGraphemes(value);
+}
+
+function fallbackGraphemes(value) {
+  const graphemes = [];
+  for (const codePoint of value) {
+    if (graphemes.length === 0) {
+      graphemes.push(codePoint);
+      continue;
+    }
+    const lastIndex = graphemes.length - 1;
+    const previous = graphemes[lastIndex];
+    if (extendsFallbackGrapheme(previous, codePoint)) {
+      graphemes[lastIndex] += codePoint;
+    } else {
+      graphemes.push(codePoint);
+    }
+  }
+  return graphemes;
+}
+
+function extendsFallbackGrapheme(previous, codePoint) {
+  if (previous.endsWith('\r') && codePoint === '\n') return true;
+  if (/^(?:\p{Grapheme_Extend}|\p{Emoji_Modifier}|\p{Mc})$/u.test(codePoint)) return true;
+  if (codePoint === '\u200d') return true;
+  if (
+    previous.endsWith('\u200d')
+    && /\p{Extended_Pictographic}(?:\p{Grapheme_Extend}|\p{Emoji_Modifier}|\p{Mc})*\u200d$/u.test(previous)
+    && /^\p{Extended_Pictographic}$/u.test(codePoint)
+  ) return true;
+  if (/^\p{Regional_Indicator}$/u.test(codePoint)) {
+    const regionalCount = Array.from(previous).filter(point => /^\p{Regional_Indicator}$/u.test(point)).length;
+    return regionalCount % 2 === 1;
+  }
+  return false;
+}
+
+function isInvisibleEdgeGrapheme(grapheme) {
+  return /^(?:\s|\p{Default_Ignorable_Code_Point})+$/u.test(grapheme);
 }
 
 function statusFor(snapshot) {

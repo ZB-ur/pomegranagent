@@ -632,15 +632,19 @@ test('groups empty roster and renders ordered safe local avatar fallbacks with f
   assert.equal(fake.root.textContent.includes('https://example.invalid/avatar.png'), false);
 });
 
-test('normalizes one nonblank roster label for native text and avatar fallback', () => {
+test('normalizes one grapheme-visible roster label for native text and avatar fallback', () => {
   const fake = createFakeDOM();
   const view = createChildView(fake.root, actions(), fake.dom);
   const roster = [
     { id: 7, name: '小雨', nickname: '   ', avatar: 'javascript:alert(1)' },
     { id: 8, name: '备用', nickname: '\u200b雨点\ufeff', avatar: null },
-    { id: 9, name: '\u200b小林\ufeff', nickname: '\u200b\ufeff', avatar: null },
-    { id: 10, name: '备用', nickname: '\u200b👨‍👩‍👧 小队\ufeff', avatar: null },
-    { id: 11, name: ' \t\ufeff', nickname: '\u200b\ufeff', avatar: null },
+    { id: 9, name: '小林', nickname: '\ufe0f', avatar: null },
+    { id: 10, name: '小禾', nickname: '\u034f', avatar: null },
+    { id: 11, name: '备用', nickname: '\ufe0f\u034f雨点 \ufe0f\u034f', avatar: null },
+    { id: 12, name: '备用', nickname: '\u034f❤️ \ufe0f', avatar: null },
+    { id: 13, name: '备用', nickname: '\ufe0f👨‍👩‍👧 \u034f', avatar: null },
+    { id: 14, name: '备用', nickname: 'e\u0301', avatar: null },
+    { id: 15, name: ' \t\ufe0f', nickname: '\ufe0f\u034f', avatar: null },
   ];
 
   view.render(snapshotFor('selecting_child', { roster }));
@@ -648,14 +652,46 @@ test('normalizes one nonblank roster label for native text and avatar fallback',
   const cards = findAll(fake.root, node => node.getAttribute?.('class') === 'child-card');
   assert.deepEqual(
     cards.map(card => find(card, node => node.getAttribute?.('class') === 'child-card__label')?.textContent),
-    ['小雨', '雨点', '小林', '👨‍👩‍👧 小队', '小朋友'],
+    ['小雨', '雨点', '小林', '小禾', '雨点', '❤️', '👨‍👩‍👧', 'é', '小朋友'],
   );
   assert.deepEqual(
     cards.map(card => find(card, node => node.getAttribute?.('class') === 'child-card__avatar')?.textContent),
-    ['小', '雨', '小', '👨‍👩‍👧', '小'],
+    ['小', '雨', '小', '小', '雨', '❤️', '👨‍👩‍👧', 'é', '小'],
   );
-  assert.deepEqual(cards.map(card => card.getAttribute('data-child-id')), ['7', '8', '9', '10', '11']);
+  assert.deepEqual(
+    cards.map(card => card.getAttribute('data-child-id')),
+    ['7', '8', '9', '10', '11', '12', '13', '14', '15'],
+  );
   assert.equal(fake.root.textContent.includes('javascript:alert(1)'), false);
+});
+
+test('keeps visible variation and ZWJ graphemes intact without Intl.Segmenter', () => {
+  const segmenterDescriptor = Object.getOwnPropertyDescriptor(Intl, 'Segmenter');
+  assert.ok(segmenterDescriptor?.configurable);
+  Object.defineProperty(Intl, 'Segmenter', { ...segmenterDescriptor, value: undefined });
+  try {
+    const fake = createFakeDOM();
+    const view = createChildView(fake.root, actions(), fake.dom);
+    view.render(snapshotFor('selecting_child', {
+      roster: [
+        { id: 7, name: '备用', nickname: '❤️', avatar: null },
+        { id: 8, name: '备用', nickname: '👨‍👩‍👧', avatar: null },
+        { id: 9, name: '小雨', nickname: '\ufe0f\u034f', avatar: null },
+      ],
+    }));
+
+    const cards = findAll(fake.root, node => node.getAttribute?.('class') === 'child-card');
+    assert.deepEqual(
+      cards.map(card => find(card, node => node.getAttribute?.('class') === 'child-card__label')?.textContent),
+      ['❤️', '👨‍👩‍👧', '小雨'],
+    );
+    assert.deepEqual(
+      cards.map(card => find(card, node => node.getAttribute?.('class') === 'child-card__avatar')?.textContent),
+      ['❤️', '👨‍👩‍👧', '小'],
+    );
+  } finally {
+    Object.defineProperty(Intl, 'Segmenter', segmenterDescriptor);
+  }
 });
 
 test('uses panel log semantics, aligned visible speakers, and an in-panel unconfirmed draft', () => {

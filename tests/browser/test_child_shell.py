@@ -687,8 +687,8 @@ def test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping(
         {"id": 1, "name": "测试幼儿", "nickname": "   ", "avatar": "javascript:alert(1)"},
         {
             "id": 2,
-            "name": "\u200b小林\ufeff",
-            "nickname": "\u200b\ufeff",
+            "name": "小林",
+            "nickname": "\ufe0f\u034f",
             "avatar": "https://example.invalid/avatar.png",
         },
     ]
