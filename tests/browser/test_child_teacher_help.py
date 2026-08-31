@@ -154,7 +154,7 @@ def enter_ready_recovery(harness, viewport, *, active=True) -> None:
     page.wait_for_function("window.__childTest.recognition.instances.length > 0")
     page.evaluate("window.__childTest.recognition.emitError('not-allowed')")
     page.evaluate("window.__childTest.recognition.emitEnd()")
-    page.get_by_role("button", name="老师帮忙", exact=True).wait_for()
+    page.get_by_role("button", name="请老师帮忙", exact=True).wait_for()
 
 
 def open_teacher_dialog(page) -> None:
@@ -175,6 +175,78 @@ def test_microphone_denial_focuses_visible_teacher_help_then_opens_dialog(
     open_teacher_dialog(page)
     assert page.locator("#teacher-help-dialog").get_attribute("aria-labelledby") == "teacher-help-title"
     assert page.locator("#teacher-pin").is_visible()
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_unlocked_teacher_dialog_uses_bounded_non_overlapping_child_visual_groups(
+    child_page, exact_fixture_url, viewport
+):
+    route_child_api(child_page, exact_fixture_url)
+    route_teacher_auth(child_page, exact_fixture_url, {
+        "configured": True, "authenticated": True, "calls": [], "failure": None,
+    })
+    enter_ready_recovery(child_page, viewport)
+    page = child_page.page
+    open_teacher_dialog(page)
+    page.locator("#teacher-actions").wait_for(state="visible")
+
+    dialog = page.locator("#teacher-help-dialog")
+    header = dialog.locator(".teacher-help-dialog__header")
+    unlocked = dialog.locator(".teacher-help-dialog__section--unlocked")
+    footer = dialog.locator(".teacher-help-dialog__footer")
+    error = dialog.locator("#teacher-help-error")
+    assert header.count() == 1
+    assert header.locator("#teacher-help-title").count() == 1
+    assert header.locator("#teacher-help-description").count() == 1
+    assert unlocked.count() == 1
+    assert unlocked.get_attribute("id") == "teacher-actions"
+    assert footer.count() == 1
+    assert footer.locator("#teacher-help-close").count() == 1
+    assert error.inner_text() == ""
+    assert error.is_visible() is False
+
+    measured = dialog.evaluate(
+        """
+        dialog => {
+          const rectFor = element => {
+            const rect = element.getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          };
+          const groups = [
+            dialog.querySelector('.teacher-help-dialog__header'),
+            dialog.querySelector('#teacher-help-error'),
+            dialog.querySelector('.teacher-help-dialog__section--unlocked'),
+            dialog.querySelector('.teacher-help-dialog__footer'),
+          ];
+          const style = getComputedStyle(dialog);
+          return {
+            dialog: rectFor(dialog),
+            groups: groups.filter(element => element.getClientRects().length > 0).map(rectFor),
+            overflowY: style.overflowY,
+            clientHeight: dialog.clientHeight,
+            scrollHeight: dialog.scrollHeight,
+            controls: [...dialog.querySelectorAll('button:not([hidden]),input:not([hidden]),textarea:not([hidden])')]
+              .filter(element => element.getClientRects().length > 0)
+              .map(element => ({ id: element.id, ...rectFor(element) })),
+          };
+        }
+        """
+    )
+    dialog_rect = measured["dialog"]
+    assert dialog_rect["x"] >= 0
+    assert dialog_rect["y"] >= 0
+    assert dialog_rect["x"] + dialog_rect["width"] <= viewport["width"] + 1
+    assert dialog_rect["y"] + dialog_rect["height"] <= viewport["height"] + 1
+    assert measured["overflowY"] in {"auto", "scroll"}
+    assert measured["scrollHeight"] >= measured["clientHeight"]
+    for earlier, later in zip(measured["groups"], measured["groups"][1:]):
+        assert earlier["y"] + earlier["height"] <= later["y"]
+    assert measured["controls"]
+    undersized = [
+        control for control in measured["controls"]
+        if control["width"] < 44 or control["height"] < 44
+    ]
+    assert undersized == []
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -209,6 +281,7 @@ def test_teacher_pin_failure_uses_fixed_copy_and_clears_input_without_raw_server
     page.locator("#teacher-pin").fill("4826")
     page.locator("#teacher-unlock-button").click()
     page.get_by_text("PIN 不正确，请重新输入", exact=True).wait_for()
+    assert page.locator("#teacher-help-error").is_visible()
     assert page.locator("#teacher-pin").input_value() == ""
     assert "raw-secret-detail" not in page.locator("body").inner_text()
 

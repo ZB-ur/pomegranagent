@@ -677,6 +677,76 @@ def test_empty_roster_is_honest_and_has_no_cards(child_page, viewport):
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+@pytest.mark.parametrize("roster_mode", ["empty", "two_cards"])
+def test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping(
+    child_page,
+    viewport,
+    roster_mode,
+):
+    roster = [] if roster_mode == "empty" else [
+        {"id": 1, "name": "测试幼儿", "nickname": "小芽", "avatar": "javascript:alert(1)"},
+        {"id": 2, "name": "小林", "nickname": None, "avatar": "https://example.invalid/avatar.png"},
+    ]
+    prepare_child_page(child_page, viewport, roster=roster)
+    page = child_page.page
+    panel = page.locator(".child-roster-panel")
+    orb = page.locator(".child-pet-orb")
+    panel.wait_for()
+    orb.wait_for()
+
+    if roster_mode == "empty":
+        assert panel.locator("#roster-empty").inner_text() == "今天还未排班，请老师帮忙"
+        assert panel.locator(".child-card").count() == 0
+    else:
+        cards = panel.locator(".child-card")
+        assert cards.count() == 2
+        assert cards.nth(0).get_by_text("小芽", exact=True).count() == 1
+        assert cards.nth(1).get_by_text("小林", exact=True).count() == 1
+        assert cards.locator("img").count() == 0
+        assert cards.locator(".child-card__avatar").all_inner_texts() == ["小", "小"]
+        body = page.locator("body").inner_text()
+        assert "javascript:alert(1)" not in body
+        assert "https://example.invalid/avatar.png" not in body
+
+    measured = page.evaluate(
+        """
+        () => {
+          const rectFor = selector => {
+            const rect = document.querySelector(selector).getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          };
+          const scrolling = document.scrollingElement;
+          return {
+            panel: rectFor('.child-roster-panel'),
+            orb: rectFor('.child-pet-orb'),
+            cards: [...document.querySelectorAll('.child-card')].map(element => {
+              const rect = element.getBoundingClientRect();
+              return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+            }),
+            scrollX: window.scrollX,
+            scrollY: window.scrollY,
+            documentWidth: scrolling.scrollWidth,
+            viewportWidth: window.innerWidth,
+          };
+        }
+        """
+    )
+    assert measured["scrollX"] == 0
+    assert measured["scrollY"] == 0
+    assert measured["documentWidth"] <= measured["viewportWidth"]
+    panel_rect = measured["panel"]
+    orb_rect = measured["orb"]
+    assert panel_rect["x"] + panel_rect["width"] <= orb_rect["x"]
+    assert orb_rect["x"] - (panel_rect["x"] + panel_rect["width"]) == pytest.approx(24, abs=1)
+    assert panel_rect["y"] == pytest.approx(orb_rect["y"], abs=1)
+    assert panel_rect["height"] == pytest.approx(orb_rect["height"], abs=1)
+    if roster_mode == "two_cards":
+        first, second = measured["cards"]
+        assert first["x"] + first["width"] <= second["x"]
+        assert first["y"] == pytest.approx(second["y"], abs=1)
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_active_conversation_shell_is_semantic(child_page, viewport):
     prepare_child_page(
         child_page,
@@ -694,6 +764,35 @@ def test_active_conversation_shell_is_semantic(child_page, viewport):
     assert log.get_by_text("鸭鸭日记本", exact=True).count() == 1
     assert page.get_by_role("status").is_visible()
     assert page.get_by_role("button", name="开始说话", exact=True).is_visible()
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_listening_projects_a_loaded_local_poster(child_page, viewport):
+    prepare_child_page(
+        child_page,
+        viewport,
+        roster=[SYNTHETIC_CHILD],
+        active_by_child={1: SYNTHETIC_ACTIVE},
+    )
+    page = child_page.page
+    page.get_by_role("button", name="开始说话", exact=True).click()
+    page.wait_for_function("document.querySelector('.child-view')?.dataset.state === 'listening'")
+    poster = page.locator('.child-pet-orb__poster')
+    assert poster.count() == 1
+    assert poster.get_attribute("src") == "/assets/duck-listening.png"
+    page.wait_for_function(
+        """
+        () => {
+          const poster = document.querySelector('.child-pet-orb__poster');
+          return poster?.complete === true && poster.naturalWidth > 0;
+        }
+        """
+    )
+    loaded = poster.evaluate(
+        "poster => ({ complete: poster.complete, naturalWidth: poster.naturalWidth })"
+    )
+    assert loaded["complete"] is True
+    assert loaded["naturalWidth"] > 0
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -935,14 +1034,15 @@ def test_projection_is_reachable_without_horizontal_or_control_clipping(child_pa
     assert geometry["documentFits"] and geometry["mainFits"] and geometry["viewFits"]
     assert geometry["controls"]
     assert all(item["width"] >= 44 and item["height"] >= 44 for item in geometry["controls"])
+    assert page.evaluate("({ x: window.scrollX, y: window.scrollY })") == {"x": 0, "y": 0}
     for locator in (
         page.get_by_role("heading", level=1),
         page.get_by_role("log", name="对话记录"),
+        page.locator(".child-pet-orb"),
         page.get_by_role("button", name="开始说话", exact=True),
         page.get_by_role("button", name="请老师帮忙", exact=True),
         page.get_by_role("status"),
     ):
-        locator.scroll_into_view_if_needed()
         box = locator.bounding_box()
         assert box is not None
         assert 0 <= box["x"] <= viewport["width"]

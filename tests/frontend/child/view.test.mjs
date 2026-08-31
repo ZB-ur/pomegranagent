@@ -593,20 +593,43 @@ test('uses one click-toggle PetOrb record action without any hold gesture contra
   }
 });
 
-test('renders empty roster without child fallback and preserves ordered visible names', () => {
+test('groups empty roster and renders ordered safe local avatar fallbacks with full labels', () => {
   const fake = createFakeDOM();
   const view = createChildView(fake.root, actions(), fake.dom);
   view.render(snapshotFor('selecting_child', { roster: [] }));
   assert.equal(byId(fake.root, 'child-status').textContent, '今天还未排班，请老师帮忙');
   assert.equal(findAll(fake.root, node => node.getAttribute?.('class') === 'child-card').length, 0);
   assert.equal(fake.root.textContent.includes('全部幼儿'), false);
+  const emptyPanel = find(
+    fake.root,
+    node => node.getAttribute?.('class') === 'child-roster-panel child-roster-panel--empty',
+  );
+  assert.ok(emptyPanel);
+  assert.equal(emptyPanel.contains(byId(fake.root, 'roster-empty')), true);
 
-  const second = { id: 8, name: '乐乐', nickname: null, avatar: null };
-  view.render(snapshotFor('selecting_child', { roster: [child, second] }));
+  const hostile = { id: 7, name: '小雨', nickname: null, avatar: 'javascript:alert(1)' };
+  const second = { id: 8, name: '乐乐', nickname: '👩🏽‍🔬小科学家', avatar: 'https://example.invalid/avatar.png' };
+  view.render(snapshotFor('selecting_child', { roster: [hostile, second] }));
+  const rosterPanel = find(fake.root, node => node.getAttribute?.('class') === 'child-roster-panel');
+  assert.ok(rosterPanel);
   const cards = findAll(fake.root, node => node.getAttribute?.('class') === 'child-card');
   assert.equal(cards.length, 2);
-  assert.deepEqual(cards.map(card => card.textContent), ['雨点', '乐乐']);
   assert.deepEqual(cards.map(card => card.getAttribute('data-child-id')), ['7', '8']);
+  assert.deepEqual(
+    cards.map(card => find(card, node => node.getAttribute?.('class') === 'child-card__label')?.textContent),
+    ['小雨', '👩🏽‍🔬小科学家'],
+  );
+  assert.deepEqual(
+    cards.map(card => find(card, node => node.getAttribute?.('class') === 'child-card__avatar')?.textContent),
+    ['小', '👩🏽‍🔬'],
+  );
+  for (const card of cards) {
+    const avatar = find(card, node => node.getAttribute?.('class') === 'child-card__avatar');
+    assert.equal(avatar?.getAttribute('aria-hidden'), 'true');
+    assert.equal(findAll(card, node => node.tagName === 'IMG').length, 0);
+  }
+  assert.equal(fake.root.textContent.includes('javascript:alert(1)'), false);
+  assert.equal(fake.root.textContent.includes('https://example.invalid/avatar.png'), false);
 });
 
 test('uses panel log semantics, aligned visible speakers, and an in-panel unconfirmed draft', () => {
@@ -638,6 +661,11 @@ test('uses panel log semantics, aligned visible speakers, and an in-panel unconf
   assert.ok(draftRegion);
   assert.equal(draftRegion.textContent.includes('待发送草稿'), true);
   assert.equal(log.contains(draftRegion), true);
+  assert.equal(draftRegion.parentNode, log);
+  assert.equal(findAll(fake.root, node => node.getAttribute?.('id') === 'pending-draft').length, 1);
+  assert.equal(findAll(fake.root, node => node.getAttribute?.('id') === 'retry-button').length, 1);
+  assert.equal(panel.contains(byId(fake.root, 'retry-button')), false);
+  assert.equal(fake.root.textContent.includes('untrusted server detail'), false);
   const failure = find(panel, node => node.getAttribute?.('class') === 'child-message child-message--failure');
   assert.ok(failure);
   assert.equal(failure.getAttribute('role'), 'alert');
@@ -813,6 +841,27 @@ test('teacher help remains visible and opens a labelled native dialog without un
   assert.equal(dialog.getAttribute('aria-describedby'), 'teacher-help-description');
   assert.equal(byId(fake.root, 'teacher-help-title').textContent, '老师帮忙');
   assert.equal(byId(fake.root, 'teacher-help-description').textContent, '老师可以帮助继续这次对话。');
+  const dialogHeader = find(
+    dialog,
+    node => node.getAttribute?.('class') === 'teacher-help-dialog__header',
+  );
+  const dialogFooter = find(
+    dialog,
+    node => node.getAttribute?.('class') === 'teacher-help-dialog__footer',
+  );
+  assert.ok(dialogHeader);
+  assert.equal(dialogHeader.contains(byId(fake.root, 'teacher-help-title')), true);
+  assert.equal(dialogHeader.contains(byId(fake.root, 'teacher-help-description')), true);
+  assert.equal(
+    byId(fake.root, 'teacher-unlock-form').getAttribute('class'),
+    'teacher-help-dialog__section teacher-help-dialog__section--locked',
+  );
+  assert.equal(
+    byId(fake.root, 'teacher-actions').getAttribute('class'),
+    'teacher-help-dialog__section teacher-help-dialog__section--unlocked',
+  );
+  assert.ok(dialogFooter);
+  assert.equal(dialogFooter.contains(byId(fake.root, 'teacher-help-close')), true);
   assert.equal(pin.getAttribute('type'), 'password');
   assert.equal(pin.getAttribute('inputmode'), 'numeric');
   assert.equal(pin.getAttribute('pattern'), '[0-9]{4,6}');
@@ -1167,28 +1216,49 @@ test('shell styles preserve roster cards and private teacher dialog presentation
   assert.equal(css.includes('#child-app .child-view button:hover'), false);
 
   const card = ruleBody('#child-app .child-view .child-card {');
+  assert.match(card, /display\s*:\s*grid/);
+  assert.match(card, /grid-template-columns\s*:\s*64px\s+minmax\(0,\s*1fr\)/);
   assert.match(card, /border-color\s*:\s*#7a4700/i);
   assert.match(card, /background\s*:\s*#ffbf24/i);
   assert.doesNotMatch(card, /box-shadow/);
   assert.equal(css.includes('#child-app .child-view .child-card:hover'), false);
 
+  const rosterPanel = ruleBody('#child-app .child-roster-panel {');
+  assert.match(rosterPanel, /grid-column\s*:\s*1/);
+  assert.match(rosterPanel, /grid-row\s*:\s*1/);
+  assert.match(rosterPanel, /overflow\s*:\s*auto/);
+  const rosterGrid = ruleBody('#child-app .child-roster-panel > ul {');
+  assert.match(rosterGrid, /grid-template-columns\s*:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/);
+  const avatar = ruleBody('#child-app .child-card__avatar {');
+  assert.match(avatar, /inline-size\s*:\s*56px/);
+  assert.match(avatar, /block-size\s*:\s*56px/);
+  assert.match(avatar, /border-radius\s*:\s*50%/);
+
   const dialog = ruleBody('#child-app #teacher-help-dialog {');
   assert.match(dialog, /padding\s*:\s*clamp\(18px,\s*3vw,\s*30px\)/);
-  assert.match(dialog, /border\s*:\s*3px\s+solid\s+#1d5fb0/i);
-  assert.match(dialog, /color\s*:\s*#242421/i);
-  assert.match(dialog, /background\s*:\s*#fffdf5/i);
-  assert.match(dialog, /font-family\s*:\s*"PingFang SC",\s*"Microsoft YaHei",\s*sans-serif/);
-  assert.match(dialog, /font-size\s*:\s*clamp\(17px,\s*2vw,\s*22px\)/);
-  assert.match(dialog, /line-height\s*:\s*1\.5/);
+  assert.match(dialog, /border\s*:\s*3px\s+solid\s+var\(--child-action-border\)/);
+  assert.match(dialog, /color\s*:\s*var\(--child-ink\)/);
+  assert.match(dialog, /background\s*:\s*#ffffff/i);
+  assert.match(dialog, /font-family\s*:\s*"Noto Sans SC",\s*"PingFang SC",\s*"Microsoft YaHei",\s*sans-serif/);
+  assert.match(dialog, /font-size\s*:\s*18px/);
+  assert.match(dialog, /line-height\s*:\s*26px/);
 
   const dialogInputs = ruleBody('#child-app #teacher-help-dialog input,\n#child-app #teacher-help-dialog textarea {', 1);
-  assert.match(dialogInputs, /border\s*:\s*2px\s+solid\s+#5f6c78/i);
-  assert.match(dialogInputs, /color\s*:\s*#242421/i);
+  assert.match(dialogInputs, /border\s*:\s*2px\s+solid\s+var\(--child-sage-border\)/);
+  assert.match(dialogInputs, /color\s*:\s*var\(--child-ink\)/);
   const dialogButton = ruleBody('#child-app #teacher-help-dialog button {');
   assert.match(dialogButton, /padding\s*:\s*10px\s+16px/);
-  assert.match(dialogButton, /border\s*:\s*3px\s+solid\s+#1d5fb0/i);
-  assert.match(dialogButton, /background\s*:\s*#1d5fb0/i);
-  assert.doesNotMatch(dialogButton, /font-weight/);
-  assert.match(ruleBody('#child-app #teacher-help-error {'), /min-block-size\s*:\s*1\.5em/);
+  assert.match(dialogButton, /border\s*:\s*3px\s+solid\s+var\(--child-action\)/);
+  assert.match(dialogButton, /background\s*:\s*var\(--child-action\)/);
+  assert.match(dialogButton, /font-weight\s*:\s*800/);
+  assert.match(ruleBody('#child-app #teacher-help-error {'), /min-block-size\s*:\s*44px/);
+  const dialogHeader = ruleBody('#child-app .teacher-help-dialog__header {');
+  assert.match(dialogHeader, /border-block-end\s*:\s*2px\s+solid\s+var\(--child-sage-border\)/);
+  const dialogSection = ruleBody('#child-app .teacher-help-dialog__section {');
+  assert.match(dialogSection, /border\s*:\s*2px\s+solid\s+var\(--child-sage-border\)/);
+  assert.match(dialogSection, /border-radius\s*:\s*16px/);
+  const dialogFooter = ruleBody('#child-app .teacher-help-dialog__footer {');
+  assert.match(dialogFooter, /display\s*:\s*flex/);
+  assert.match(dialogFooter, /justify-content\s*:\s*flex-end/);
   assert.match(css, /inline-size\s*:\s*min\(96vw,\s*680px\)/);
 });

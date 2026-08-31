@@ -159,7 +159,7 @@ def _assert_fault_projection_accessibility(page, *, expected_focus, expected_ale
 
     alert = page.get_by_role("alert")
     assert alert.count() == 1
-    assert alert.inner_text() == expected_alert
+    assert alert.locator(".child-message__text").inner_text() == expected_alert
     assert page.get_by_role("status").count() == 1
     page.locator(expected_focus).wait_for()
     page.wait_for_function(
@@ -473,6 +473,16 @@ def test_chat_retryable_fault_reuses_persisted_request_id_once(
     page.evaluate("window.__childTest.recognition.emitEnd()")
     retry = page.get_by_role("button", name="重新发送", exact=True)
     retry.wait_for()
+    panel = page.locator(".child-conversation-panel")
+    log = panel.get_by_role("log", name="对话记录")
+    preserved = page.locator("#pending-draft")
+    assert panel.count() == 1
+    assert preserved.count() == 1
+    assert log.locator("#pending-draft").count() == 1
+    assert page.locator(".child-stage > #pending-draft").count() == 0
+    assert preserved.get_by_text("我给小鸭添了清水。", exact=True).count() == 1
+    assert retry.count() == 1
+    assert "synthetic retryable failure" not in page.locator("body").inner_text()
 
     stored = json.loads(page.evaluate("sessionStorage.getItem('duck-diary.child-session.v1')"))
     assert stored["draft"]["request_id"] == chat_bodies[0]["request_id"]
@@ -1675,7 +1685,7 @@ def test_fault_recovery_preserves_accessibility_and_projection_constraints(
     page.set_viewport_size(viewport)
     _install_ended_flow(child_page, exact_fixture_url, complete_ok=False)
     _drive_ended_flow(child_page)
-    page.get_by_role("button", name="老师帮忙", exact=True).wait_for()
+    page.get_by_role("button", name="请老师帮忙", exact=True).wait_for()
     _assert_fault_projection_accessibility(
         page,
         expected_focus="#teacher-help-button",

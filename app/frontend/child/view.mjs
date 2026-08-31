@@ -422,25 +422,34 @@ export function createChildView(root, actions, dom) {
   }
 
   function renderRoster(snapshot) {
+    const panel = element('section', { class: 'child-roster-panel' });
     if (snapshot.roster.length === 0) {
+      setAttribute(panel, 'class', 'child-roster-panel child-roster-panel--empty');
       const empty = element('p', { id: 'roster-empty' });
       appendText(empty, '今天还未排班，请老师帮忙');
-      return [empty];
+      append(panel, empty);
+      return [panel];
     }
     const list = element('ul', { 'aria-label': '今日值日小朋友' });
     for (const rosterChild of snapshot.roster) {
       const item = element('li');
       const card = button({
         id: `child-card-${rosterChild.id}`,
-        text: childLabel(rosterChild),
+        text: '',
         token: 'select-child',
         className: 'child-card',
       });
+      const avatar = element('span', { class: 'child-card__avatar', 'aria-hidden': 'true' });
+      appendText(avatar, firstVisibleGrapheme(rosterChild));
+      const label = element('span', { class: 'child-card__label' });
+      appendText(label, childLabel(rosterChild));
+      replaceChildren(card, avatar, label);
       setAttribute(card, 'data-child-id', String(rosterChild.id));
       append(item, card);
       append(list, item);
     }
-    return [list];
+    append(panel, list);
+    return [panel];
   }
 
   function submissionFailureCopy(snapshot, controls) {
@@ -530,8 +539,14 @@ export function createChildView(root, actions, dom) {
     appendText(title, '老师帮忙');
     const description = element('p', { id: 'teacher-help-description' });
     appendText(description, '老师可以帮助继续这次对话。');
+    const dialogHeader = element('header', { class: 'teacher-help-dialog__header' });
+    append(dialogHeader, title, description);
 
-    const unlockForm = element('form', { id: 'teacher-unlock-form', novalidate: '' });
+    const unlockForm = element('form', {
+      id: 'teacher-unlock-form',
+      class: 'teacher-help-dialog__section teacher-help-dialog__section--locked',
+      novalidate: '',
+    });
     const pinLabel = element('label', { for: 'teacher-pin' });
     appendText(pinLabel, '教师 PIN');
     const pin = element('input', {
@@ -553,7 +568,11 @@ export function createChildView(root, actions, dom) {
     appendText(unlockButton, '解锁老师帮助');
     append(unlockForm, pinLabel, pin, unlockButton);
 
-    const actions = element('section', { id: 'teacher-actions', 'aria-label': '老师帮助操作' });
+    const actions = element('section', {
+      id: 'teacher-actions',
+      class: 'teacher-help-dialog__section teacher-help-dialog__section--unlocked',
+      'aria-label': '老师帮助操作',
+    });
     const textLabel = element('label', { for: 'teacher-text' });
     appendText(textLabel, '补录孩子刚才说的话');
     const text = element('textarea', { id: 'teacher-text', maxlength: '2000' });
@@ -566,7 +585,9 @@ export function createChildView(root, actions, dom) {
     const lock = teacherButton('teacher-lock-button', '立即锁定', 'lock');
     append(actions, textLabel, text, actionsNote, submitText, saveDraft, retryRecovery, retryMicrophone, endSession, lock);
     const close = teacherButton('teacher-help-close', '返回孩子页面', 'close');
-    append(dialog, title, description, error, unlockForm, actions, close);
+    const dialogFooter = element('footer', { class: 'teacher-help-dialog__footer' });
+    append(dialogFooter, close);
+    append(dialog, dialogHeader, error, unlockForm, actions, dialogFooter);
     teacherUI = {
       dialog,
       title,
@@ -1119,6 +1140,23 @@ function titleFor(state) {
 
 function childLabel(child) {
   return child?.nickname || child?.name || '小朋友';
+}
+
+function firstVisibleGrapheme(child) {
+  for (const candidate of [child?.nickname, child?.name]) {
+    if (typeof candidate !== 'string') continue;
+    const visible = candidate.trimStart();
+    if (visible.length === 0) continue;
+    try {
+      if (typeof Intl.Segmenter === 'function') {
+        const segments = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }).segment(visible);
+        const first = segments[Symbol.iterator]().next();
+        if (first.done !== true && typeof first.value?.segment === 'string') return first.value.segment;
+      }
+    } catch {}
+    return Array.from(visible)[0] ?? '小';
+  }
+  return '小';
 }
 
 function statusFor(snapshot) {

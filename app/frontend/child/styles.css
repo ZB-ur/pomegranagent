@@ -202,12 +202,69 @@ body {
   list-style: none;
 }
 
+#child-app .child-roster-panel {
+  grid-column: 1;
+  grid-row: 1;
+  inline-size: 100%;
+  block-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 0;
+  padding: 12px;
+  overflow: auto;
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 2px rgb(107 138 91 / 36%);
+}
+
+#child-app .child-roster-panel--empty {
+  display: grid;
+  place-items: center;
+}
+
+#child-app .child-roster-panel > ul {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-auto-rows: minmax(96px, auto);
+  align-content: start;
+  gap: 12px;
+}
+
+#child-app .child-roster-panel > ul > li {
+  min-inline-size: 0;
+}
+
 #child-app .child-view .child-card {
-  min-block-size: 88px;
+  display: grid;
+  grid-template-columns: 64px minmax(0, 1fr);
+  align-items: center;
+  gap: 12px;
+  inline-size: 100%;
+  min-block-size: 96px;
+  padding: 10px 14px;
   color: var(--child-ink);
   border-color: #7a4700;
   background: #ffbf24;
   font-weight: 700;
+  text-align: start;
+}
+
+#child-app .child-card__avatar {
+  display: grid;
+  place-items: center;
+  inline-size: 56px;
+  block-size: 56px;
+  border: 2px solid #7a4700;
+  border-radius: 50%;
+  background: #fff8e8;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 32px;
+}
+
+#child-app .child-card__label {
+  min-inline-size: 0;
+  overflow-wrap: anywhere;
+  font-size: 20px;
+  line-height: 30px;
 }
 
 #child-app .child-conversation-panel {
@@ -381,11 +438,19 @@ body {
 }
 
 #child-app .child-view .child-view__error,
-#child-app .child-view #roster-empty,
 #child-app .child-view #teacher-help-unavailable-note {
   padding: 12px 16px;
   border-inline-start: 6px solid var(--child-danger);
   background: #fff4f2;
+}
+
+#child-app .child-view #roster-empty {
+  max-inline-size: 420px;
+  padding: 20px 24px;
+  border: 2px solid var(--child-sage-border);
+  border-radius: 16px;
+  background: var(--child-story);
+  text-align: center;
 }
 
 #child-app .child-view #teacher-help-button,
@@ -410,24 +475,67 @@ body {
   max-block-size: min(88vh, 680px);
   padding: clamp(18px, 3vw, 30px);
   overflow: auto;
-  border: 3px solid #1d5fb0;
-  border-radius: 18px;
-  color: #242421;
-  background: #fffdf5;
-  font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
-  font-size: clamp(17px, 2vw, 22px);
-  line-height: 1.5;
+  border: 3px solid var(--child-action-border);
+  border-radius: 24px;
+  color: var(--child-ink);
+  background: #ffffff;
+  font-family: "Noto Sans SC", "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 18px;
+  line-height: 26px;
+}
+
+#child-app #teacher-help-dialog[open] {
+  display: grid;
+  align-content: start;
+  gap: 12px;
 }
 
 #child-app #teacher-help-dialog::backdrop {
   background: rgb(20 28 38 / 58%);
 }
 
+#child-app .teacher-help-dialog__header {
+  display: grid;
+  gap: 4px;
+  padding-block-end: 12px;
+  border-block-end: 2px solid var(--child-sage-border);
+}
+
+#child-app .teacher-help-dialog__header h2 {
+  margin: 0;
+  font-size: 24px;
+  font-weight: 800;
+  line-height: 34px;
+}
+
+#child-app .teacher-help-dialog__header p {
+  margin: 0;
+  color: var(--child-muted);
+}
+
 #child-app #teacher-help-dialog form,
 #child-app #teacher-help-dialog #teacher-actions {
   display: grid;
   gap: 12px;
-  margin-block: 18px;
+  margin: 0;
+}
+
+#child-app .teacher-help-dialog__section {
+  min-inline-size: 0;
+  padding: 14px;
+  border: 2px solid var(--child-sage-border);
+  border-radius: 16px;
+  background: var(--child-paper);
+}
+
+#child-app #teacher-actions {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+#child-app #teacher-actions > label,
+#child-app #teacher-actions > textarea,
+#child-app #teacher-actions > #teacher-actions-note {
+  grid-column: 1 / -1;
 }
 
 #child-app #teacher-help-dialog #teacher-unlock-form[hidden],
@@ -446,9 +554,9 @@ body {
 #child-app #teacher-help-dialog input,
 #child-app #teacher-help-dialog textarea {
   padding: 10px 12px;
-  border: 2px solid #5f6c78;
+  border: 2px solid var(--child-sage-border);
   border-radius: 10px;
-  color: #242421;
+  color: var(--child-ink);
   background: #ffffff;
 }
 
@@ -460,10 +568,11 @@ body {
 
 #child-app #teacher-help-dialog button {
   padding: 10px 16px;
-  border: 3px solid #1d5fb0;
+  border: 3px solid var(--child-action);
   border-radius: 12px;
   color: #ffffff;
-  background: #1d5fb0;
+  background: var(--child-action);
+  font-weight: 800;
 }
 
 #child-app #teacher-help-dialog button:disabled {
@@ -478,14 +587,33 @@ body {
 }
 
 #child-app #teacher-help-error {
-  min-block-size: 1.5em;
-  padding: 8px 10px;
+  display: flex;
+  align-items: center;
+  min-block-size: 44px;
+  margin: 0;
+  padding: 8px 12px;
+  border-radius: 12px;
   color: #7b1f16;
   background: #fff0ed;
 }
 
+#child-app #teacher-help-error:empty {
+  display: none;
+}
+
 #child-app #teacher-actions-note {
+  margin: 0;
   color: #5b352f;
+}
+
+#child-app .teacher-help-dialog__footer {
+  display: flex;
+  justify-content: flex-end;
+}
+
+#child-app #teacher-help-dialog #teacher-help-close {
+  color: var(--child-action-border);
+  background: #ffffff;
 }
 
 @media (max-width: 1024px) {
