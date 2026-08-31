@@ -684,8 +684,13 @@ def test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping(
     roster_mode,
 ):
     roster = [] if roster_mode == "empty" else [
-        {"id": 1, "name": "测试幼儿", "nickname": "小芽", "avatar": "javascript:alert(1)"},
-        {"id": 2, "name": "小林", "nickname": None, "avatar": "https://example.invalid/avatar.png"},
+        {"id": 1, "name": "测试幼儿", "nickname": "   ", "avatar": "javascript:alert(1)"},
+        {
+            "id": 2,
+            "name": "\u200b小林\ufeff",
+            "nickname": "\u200b\ufeff",
+            "avatar": "https://example.invalid/avatar.png",
+        },
     ]
     prepare_child_page(child_page, viewport, roster=roster)
     page = child_page.page
@@ -700,10 +705,13 @@ def test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping(
     else:
         cards = panel.locator(".child-card")
         assert cards.count() == 2
-        assert cards.nth(0).get_by_text("小芽", exact=True).count() == 1
-        assert cards.nth(1).get_by_text("小林", exact=True).count() == 1
+        for index, expected_label in enumerate(("测试幼儿", "小林")):
+            card = cards.nth(index)
+            assert card.locator(".child-card__label").inner_text() == expected_label
+            assert card.get_attribute("aria-label") is None
+            assert page.get_by_role("button", name=expected_label, exact=True).count() == 1
         assert cards.locator("img").count() == 0
-        assert cards.locator(".child-card__avatar").all_inner_texts() == ["小", "小"]
+        assert cards.locator(".child-card__avatar").all_inner_texts() == ["测", "小"]
         body = page.locator("body").inner_text()
         assert "javascript:alert(1)" not in body
         assert "https://example.invalid/avatar.png" not in body

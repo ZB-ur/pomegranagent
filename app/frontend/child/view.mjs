@@ -432,6 +432,7 @@ export function createChildView(root, actions, dom) {
     }
     const list = element('ul', { 'aria-label': '今日值日小朋友' });
     for (const rosterChild of snapshot.roster) {
+      const visibleLabel = childLabel(rosterChild);
       const item = element('li');
       const card = button({
         id: `child-card-${rosterChild.id}`,
@@ -440,9 +441,9 @@ export function createChildView(root, actions, dom) {
         className: 'child-card',
       });
       const avatar = element('span', { class: 'child-card__avatar', 'aria-hidden': 'true' });
-      appendText(avatar, firstVisibleGrapheme(rosterChild));
+      appendText(avatar, firstVisibleGrapheme(visibleLabel));
       const label = element('span', { class: 'child-card__label' });
-      appendText(label, childLabel(rosterChild));
+      appendText(label, visibleLabel);
       replaceChildren(card, avatar, label);
       setAttribute(card, 'data-child-id', String(rosterChild.id));
       append(item, card);
@@ -1139,24 +1140,23 @@ function titleFor(state) {
 }
 
 function childLabel(child) {
-  return child?.nickname || child?.name || '小朋友';
-}
-
-function firstVisibleGrapheme(child) {
   for (const candidate of [child?.nickname, child?.name]) {
     if (typeof candidate !== 'string') continue;
-    const visible = candidate.trimStart();
-    if (visible.length === 0) continue;
-    try {
-      if (typeof Intl.Segmenter === 'function') {
-        const segments = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }).segment(visible);
-        const first = segments[Symbol.iterator]().next();
-        if (first.done !== true && typeof first.value?.segment === 'string') return first.value.segment;
-      }
-    } catch {}
-    return Array.from(visible)[0] ?? '小';
+    const visible = candidate.replace(/^[\s\p{Cf}]+|[\s\p{Cf}]+$/gu, '');
+    if (visible.length > 0) return visible;
   }
-  return '小';
+  return '小朋友';
+}
+
+function firstVisibleGrapheme(visibleLabel) {
+  try {
+    if (typeof Intl.Segmenter === 'function') {
+      const segments = new Intl.Segmenter('zh-CN', { granularity: 'grapheme' }).segment(visibleLabel);
+      const first = segments[Symbol.iterator]().next();
+      if (first.done !== true && typeof first.value?.segment === 'string') return first.value.segment;
+    }
+  } catch {}
+  return Array.from(visibleLabel)[0] ?? '小';
 }
 
 function statusFor(snapshot) {

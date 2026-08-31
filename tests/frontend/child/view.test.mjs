@@ -632,6 +632,32 @@ test('groups empty roster and renders ordered safe local avatar fallbacks with f
   assert.equal(fake.root.textContent.includes('https://example.invalid/avatar.png'), false);
 });
 
+test('normalizes one nonblank roster label for native text and avatar fallback', () => {
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions(), fake.dom);
+  const roster = [
+    { id: 7, name: '小雨', nickname: '   ', avatar: 'javascript:alert(1)' },
+    { id: 8, name: '备用', nickname: '\u200b雨点\ufeff', avatar: null },
+    { id: 9, name: '\u200b小林\ufeff', nickname: '\u200b\ufeff', avatar: null },
+    { id: 10, name: '备用', nickname: '\u200b👨‍👩‍👧 小队\ufeff', avatar: null },
+    { id: 11, name: ' \t\ufeff', nickname: '\u200b\ufeff', avatar: null },
+  ];
+
+  view.render(snapshotFor('selecting_child', { roster }));
+
+  const cards = findAll(fake.root, node => node.getAttribute?.('class') === 'child-card');
+  assert.deepEqual(
+    cards.map(card => find(card, node => node.getAttribute?.('class') === 'child-card__label')?.textContent),
+    ['小雨', '雨点', '小林', '👨‍👩‍👧 小队', '小朋友'],
+  );
+  assert.deepEqual(
+    cards.map(card => find(card, node => node.getAttribute?.('class') === 'child-card__avatar')?.textContent),
+    ['小', '雨', '小', '👨‍👩‍👧', '小'],
+  );
+  assert.deepEqual(cards.map(card => card.getAttribute('data-child-id')), ['7', '8', '9', '10', '11']);
+  assert.equal(fake.root.textContent.includes('javascript:alert(1)'), false);
+});
+
 test('uses panel log semantics, aligned visible speakers, and an in-panel unconfirmed draft', () => {
   const fake = createFakeDOM();
   const view = createChildView(fake.root, actions(), fake.dom);
