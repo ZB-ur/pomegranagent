@@ -470,10 +470,15 @@ test('renders all twelve states with unique semantic frame, exact status, and fo
     fake.flush();
     const section = fake.root.children[0];
     assert.equal(section.tagName, 'SECTION');
-    assert.equal(section.getAttribute('class'), 'child-view');
+    assert.equal(section.getAttribute('class'), 'child-view child-shell');
     assert.equal(section.getAttribute('data-state'), state);
     assert.equal(section.getAttribute('aria-labelledby'), 'app-title');
     assert.equal(findAll(fake.root, node => node.getAttribute?.('id') === 'app-title').length, 1);
+    assert.ok(find(fake.root, node => node.getAttribute?.('class') === 'child-shell__header'));
+    assert.ok(find(fake.root, node => node.getAttribute?.('class') === 'child-shell__content'));
+    assert.ok(find(fake.root, node => node.getAttribute?.('class') === 'child-state'));
+    assert.equal(byId(fake.root, 'teacher-help-button').parentNode.getAttribute('class'), 'child-shell__header');
+    assert.equal(byId(fake.root, 'app-title').parentNode.getAttribute('class'), 'child-state__header');
     assert.equal(byId(fake.root, 'child-status').textContent, status);
     assert.equal(byId(fake.root, 'child-status').getAttribute('role'), 'status');
     assert.equal(byId(fake.root, 'child-status').getAttribute('aria-live'), 'polite');
@@ -572,7 +577,10 @@ test('accepts machine-valid null children and keeps hostile dynamic content text
     error: { code: 'MIC_PERMISSION_DENIED', retryable: false, message: hostile },
   }));
   assert.equal(fake.root.textContent.includes(hostile), true);
-  assert.equal(findAll(fake.root, node => node.tagName === 'IMG').length, 0);
+  const images = findAll(fake.root, node => node.tagName === 'IMG');
+  assert.equal(images.length, 1);
+  assert.equal(images[0].getAttribute('src'), '/assets/notebook-mark.svg');
+  assert.equal(images[0].getAttribute('alt'), '');
   assert.equal(fake.root.textContent.includes('MIC_PERMISSION_DENIED'), false);
   assert.equal(byId(fake.root, 'child-status').textContent, '麦克风没有开启，请老师帮忙');
 });
@@ -651,7 +659,10 @@ test('teacher help remains visible and opens a labelled native dialog without un
   const samePin = pin;
   view.showTeacherHelpError('<img src=x onerror=boom>');
   assert.equal(byId(fake.root, 'teacher-help-error').textContent, '<img src=x onerror=boom>');
-  assert.equal(findAll(fake.root, node => node.tagName === 'IMG').length, 0);
+  const images = findAll(fake.root, node => node.tagName === 'IMG');
+  assert.equal(images.length, 1);
+  assert.equal(images[0].getAttribute('src'), '/assets/notebook-mark.svg');
+  assert.equal(images[0].getAttribute('alt'), '');
   view.render(snapshotFor('submission_failed'));
   assert.equal(byId(fake.root, 'teacher-help-dialog'), sameDialog);
   assert.equal(byId(fake.root, 'teacher-pin'), samePin);
@@ -926,6 +937,25 @@ test('teacher dialog traps Tab, restores focus, clears secrets, and leaves globa
 
 test('styles retain the standalone static accessibility and safety contract', () => {
   const css = readFileSync(new URL('../../../app/frontend/child/styles.css', import.meta.url), 'utf8');
+  const tokens = new Map([
+    ['--child-paper', '#fff8e8'],
+    ['--child-ink', '#24352b'],
+    ['--child-action', '#2e6f86'],
+    ['--child-action-border', '#244d5c'],
+    ['--child-sage', '#e4ead8'],
+    ['--child-sage-border', '#6b8a5b'],
+    ['--child-story', '#f7e8be'],
+    ['--child-muted', '#58635d'],
+    ['--child-danger', '#9f2d20'],
+  ]);
+  for (const [name, value] of tokens) {
+    assert.match(css, new RegExp(`${name}\\s*:\\s*${value}`, 'i'));
+  }
+  assert.match(css, /font-family\s*:\s*"Noto Sans SC"\s*,\s*"PingFang SC"\s*,\s*"Microsoft YaHei"\s*,\s*sans-serif/);
+  assert.match(css, /font-size\s*:\s*32px[\s\S]*line-height\s*:\s*42px/);
+  assert.match(css, /font-size\s*:\s*20px[\s\S]*line-height\s*:\s*30px/);
+  assert.match(css, /font-size\s*:\s*18px[\s\S]*line-height\s*:\s*26px/);
+  assert.match(css, /font-size\s*:\s*14px[\s\S]*line-height\s*:\s*21px/);
   assert.match(css, /#child-app\s+\.child-view\s+button[\s\S]*min-width\s*:\s*44px/);
   assert.match(css, /min-height\s*:\s*44px/);
   assert.match(css, /:focus-visible[\s\S]*outline\s*:\s*4px/);

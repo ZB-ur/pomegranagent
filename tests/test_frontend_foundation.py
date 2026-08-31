@@ -3,6 +3,12 @@ import re
 
 
 ROOT = Path(__file__).resolve().parents[1]
+CHILD_SVG_ASSETS = (
+    "assets/notebook-mark.svg",
+    "assets/diary-mark.svg",
+    "assets/decor-sage.svg",
+    "assets/decor-ochre.svg",
+)
 
 
 def test_child_shell_loads_foundation_before_the_single_browser_entry():
@@ -21,6 +27,27 @@ def test_child_shell_has_no_legacy_or_direct_browser_behavior():
                  'speechSynthesis', 'sessionStorage', '<input', '<textarea',
                  'onclick=', 'id="stage"', 'id="root"', 'id="ptt"')
     assert all(token not in html for token in forbidden)
+
+
+def test_child_design_assets_are_local_safe_single_root_svgs():
+    for filename in CHILD_SVG_ASSETS:
+        source = (ROOT / "app" / "frontend" / filename).read_text(encoding="utf-8")
+        assert len(re.findall(r"<svg\b", source, flags=re.IGNORECASE)) == 1
+        assert len(re.findall(r"</svg\s*>", source, flags=re.IGNORECASE)) == 1
+        assert re.search(r"\A\s*(?:<\?xml[^>]*>\s*)?<svg\b", source, flags=re.IGNORECASE)
+        assert re.search(r"</svg\s*>\s*\Z", source, flags=re.IGNORECASE)
+        assert not re.search(r"<script\b", source, flags=re.IGNORECASE)
+        assert not re.search(r"\son[a-z][a-z0-9_-]*\s*=", source, flags=re.IGNORECASE)
+        references = re.sub(
+            r"\sxmlns(?::[a-z][a-z0-9_-]*)?\s*=\s*[\"'][^\"']+[\"']",
+            "",
+            source,
+            flags=re.IGNORECASE,
+        )
+        assert not re.search(r"(?:https?:)?//", references, flags=re.IGNORECASE)
+        assert not re.search(r"(?:href|xlink:href|src)\s*=\s*[\"'](?!#)", references, flags=re.IGNORECASE)
+        assert not re.search(r"url\(\s*[\"']?(?!#)", source, flags=re.IGNORECASE)
+        assert not re.search(r"data:image/", source, flags=re.IGNORECASE)
 
 
 def test_teacher_shell_loads_only_foundation_and_one_module_entry():

@@ -162,17 +162,42 @@ export function createChildView(root, actions, dom) {
     currentFocusTargets = nextFocusTargets;
 
     const section = element('section', {
-      class: 'child-view',
+      class: 'child-view child-shell',
       'data-state': snapshot.value,
       'aria-labelledby': 'app-title',
     });
+    const shellHeader = element('header', { class: 'child-shell__header' });
+    const brand = element('div', { class: 'child-shell__brand' });
+    const brandImage = element('img', {
+      src: '/assets/notebook-mark.svg',
+      alt: '',
+      width: '40',
+      height: '40',
+    });
+    const brandName = element('span');
+    appendText(brandName, '鸭鸭日记本');
+    append(brand, brandImage, brandName);
+
+    const help = button({
+      id: 'teacher-help-button',
+      text: '请老师帮忙',
+      token: 'open-teacher-help',
+      describedBy: 'child-status',
+    });
+    append(shellHeader, brand, help);
+
+    const shellContent = element('div', { class: 'child-shell__content' });
+    const state = element('section', { class: 'child-state' });
+    const stateHeader = element('header', { class: 'child-state__header' });
     const heading = element('h1', { id: 'app-title', tabindex: '-1' });
     appendText(heading, titleFor(snapshot.value));
     nextFocusTargets.set('#app-title', heading);
-    append(section, heading);
+    const lead = element('p', { class: 'child-state__lead' });
+    append(stateHeader, heading, lead);
 
+    const stage = element('div', { class: 'child-stage' });
     const stateContent = renderState(snapshot, controls);
-    for (const node of stateContent) append(section, node);
+    for (const node of stateContent) append(stage, node);
 
     const status = element('p', {
       id: 'child-status',
@@ -183,15 +208,9 @@ export function createChildView(root, actions, dom) {
     });
     appendText(status, statusFor(snapshot));
     nextFocusTargets.set('#child-status', status);
-    append(section, status);
-
-    const help = button({
-      id: 'teacher-help-button',
-      text: '老师帮忙',
-      token: 'open-teacher-help',
-      describedBy: 'child-status',
-    });
-    append(section, help);
+    append(state, stateHeader, stage, status);
+    append(shellContent, state);
+    append(section, shellHeader, shellContent);
 
     if (teacherUI === null) replaceChildren(root, section);
     else replaceChildren(root, section, teacherUI.dialog);
