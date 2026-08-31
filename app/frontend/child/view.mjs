@@ -45,6 +45,48 @@ const ERROR_COPY = new Map([
   ['ROSTER_CARDINALITY_INVALID', '今天的值日名单需要老师确认'],
 ]);
 const RECOVERY_FALLBACK = '这次对话需要老师检查后再继续';
+const PET_POSTER_BY_STATE = Object.freeze({
+  welcome: '/assets/duck-front-512.png',
+  loading_roster: '/assets/duck-front-512.png',
+  selecting_child: '/assets/duck-side-512.png',
+  opening: '/assets/duck-encouraging.png',
+  ready: '/assets/duck-front-512.png',
+  listening: '/assets/duck-listening.png',
+  submitting: '/assets/duck-listening.png',
+  speaking: '/assets/duck-encouraging.png',
+  submission_failed: '/assets/duck-front-512.png',
+  saving_conversation: '/assets/duck-listening.png',
+  completed: '/assets/duck-happy.png',
+  recovery: '/assets/duck-front-512.png',
+});
+const PET_POSTER_ALT_BY_STATE = Object.freeze({
+  welcome: '',
+  loading_roster: '',
+  selecting_child: '',
+  opening: '鸭鸭日记本正在和你打招呼',
+  ready: '',
+  listening: '鸭鸭日记本正在认真听',
+  submitting: '',
+  speaking: '鸭鸭日记本正在回答',
+  submission_failed: '',
+  saving_conversation: '',
+  completed: '鸭鸭日记本开心地完成了记录',
+  recovery: '',
+});
+const STATE_PRESENTATION = Object.freeze({
+  welcome: Object.freeze({ lead: '准备好后，一起记录今天的小鸭故事。', pill: '准备开始' }),
+  loading_roster: Object.freeze({ lead: '正在准备今天的值日名单。', pill: '正在准备' }),
+  selecting_child: Object.freeze({ lead: '请选择今天值日的小朋友。', pill: '选一位小朋友' }),
+  opening: Object.freeze({ lead: '日记本正在准备和你聊天。', pill: '正在打招呼' }),
+  ready: Object.freeze({ lead: '想好以后，点一下开始说话。', pill: '可以说话' }),
+  listening: Object.freeze({ lead: '日记本正在认真听。', pill: '正在听' }),
+  submitting: Object.freeze({ lead: '正在把这句话发给日记本。', pill: '正在发送' }),
+  speaking: Object.freeze({ lead: '日记本正在回答。', pill: '正在回答' }),
+  submission_failed: Object.freeze({ lead: '原话已经保留，可以再试一次。', pill: '发送未完成' }),
+  saving_conversation: Object.freeze({ lead: '正在安全保存今天的话。', pill: '正在保存' }),
+  completed: Object.freeze({ lead: '今天的日记已经记好啦。', pill: '已经完成' }),
+  recovery: Object.freeze({ lead: '请老师检查后再继续。', pill: '需要帮助' }),
+});
 const ACTION_TOKEN_TO_KEY = Object.freeze(Object.assign(Object.create(null), {
   start: 'onStart',
   'select-child': 'onSelectChild',
@@ -118,34 +160,136 @@ export function createChildView(root, actions, dom) {
     return node;
   }
 
-  function messageLog(snapshot) {
+  function messageRow(snapshot, message) {
+    const item = element('article', { class: `child-message child-message--${message.role}` });
+    const speaker = element('p', { class: 'child-message__speaker' });
+    if (message.role === 'diary') {
+      const diaryMark = element('img', {
+        src: '/assets/diary-mark.svg',
+        alt: '',
+        width: '28',
+        height: '28',
+      });
+      append(speaker, diaryMark);
+      appendText(speaker, '鸭鸭日记本');
+    } else {
+      appendText(speaker, childLabel(snapshot.child));
+    }
+    const content = element('p', { class: 'child-message__text' });
+    appendText(content, message.text);
+    append(item, speaker, content);
+    return item;
+  }
+
+  function pendingDraftRow(snapshot) {
+    if (snapshot.draft === null) return null;
+    const item = element('article', {
+      id: 'pending-draft',
+      class: 'child-message child-message--child child-message--pending',
+      'aria-label': '待发送草稿',
+    });
+    const speaker = element('p', { class: 'child-message__speaker' });
+    appendText(speaker, `${childLabel(snapshot.child)} · 待发送草稿`);
+    const content = element('p', { class: 'child-message__text' });
+    appendText(content, snapshot.draft.text);
+    append(item, speaker, content);
+    return item;
+  }
+
+  function failureRow(copy) {
+    const item = element('article', {
+      role: 'alert',
+      class: 'child-message child-message--failure',
+    });
+    const label = element('p', { class: 'child-message__speaker' });
+    appendText(label, '发送状态');
+    const content = element('p', { class: 'child-message__text' });
+    appendText(content, copy);
+    append(item, label, content);
+    return item;
+  }
+
+  function conversationPanel(snapshot, transcriptState) {
+    const panel = element('section', {
+      class: 'child-conversation-panel',
+      'aria-labelledby': 'conversation-panel-title',
+    });
+    const header = element('header', { class: 'child-conversation-panel__header' });
+    const title = element('h2', { id: 'conversation-panel-title' });
+    appendText(title, '对话记录');
+    const statePill = element('span', {
+      class: 'child-conversation-panel__state',
+      'aria-label': '当前状态',
+    });
+    appendText(statePill, STATE_PRESENTATION[snapshot.value].pill);
+    append(header, title, statePill);
+
     const log = element('div', {
+      class: 'child-conversation-panel__messages',
       role: 'log',
       'aria-live': 'polite',
       'aria-relevant': 'additions text',
       'aria-label': '对话记录',
     });
-    for (const message of snapshot.messages) {
-      const item = element('article', { class: `child-message child-message--${message.role}` });
-      const speaker = element('p', { class: 'child-message__speaker' });
-      appendText(speaker, message.role === 'child' ? childLabel(snapshot.child) : '鸭鸭日记本');
-      const content = element('p', { class: 'child-message__text' });
-      appendText(content, message.text);
-      append(item, speaker, content);
-      append(log, item);
+    for (const message of snapshot.messages) append(log, messageRow(snapshot, message));
+    if (transcriptState.includeDraft) {
+      const draft = pendingDraftRow(snapshot);
+      if (draft !== null) append(log, draft);
     }
-    return log;
+    if (transcriptState.failureCopy !== null) append(log, failureRow(transcriptState.failureCopy));
+    append(panel, header, log);
+    return panel;
   }
 
-  function draftRegion(snapshot) {
-    if (snapshot.draft === null) return null;
-    const region = element('section', { id: 'pending-draft', 'aria-label': '待发送草稿' });
-    const heading = element('h2');
-    appendText(heading, '待发送草稿');
-    const text = element('p');
-    appendText(text, snapshot.draft.text);
-    append(region, heading, text);
-    return region;
+  function submissionRetryAvailable(snapshot, controls) {
+    return snapshot.draft !== null && snapshot.child !== null && !controls.retryDisabled;
+  }
+
+  function petOrb(snapshot, controls) {
+    const orb = element('section', {
+      class: 'child-pet-orb',
+      'data-state': snapshot.value,
+      'aria-label': '鸭鸭日记本伙伴',
+    });
+    const visual = element('div', { class: 'child-pet-orb__visual' });
+    const poster = element('img', {
+      class: 'child-pet-orb__poster',
+      src: PET_POSTER_BY_STATE[snapshot.value],
+      alt: PET_POSTER_ALT_BY_STATE[snapshot.value],
+    });
+    append(visual, poster);
+    const stateCopy = element('p', { class: 'child-pet-orb__status' });
+    appendText(stateCopy, STATE_PRESENTATION[snapshot.value].pill);
+    append(orb, visual, stateCopy);
+
+    let action = null;
+    switch (snapshot.value) {
+      case 'welcome':
+        action = button({ id: 'start-button', text: '开始', token: 'start', className: 'child-pet-orb__action' });
+        break;
+      case 'ready':
+      case 'listening':
+        action = button({
+          id: 'record-button',
+          text: snapshot.value === 'ready' ? '开始说话' : '结束说话',
+          token: 'record-toggle',
+          disabled: controls.recordDisabled,
+          className: 'child-pet-orb__action',
+        });
+        break;
+      case 'submission_failed':
+        if (submissionRetryAvailable(snapshot, controls)) {
+          action = button({ id: 'retry-button', text: '重新发送', token: 'retry', className: 'child-pet-orb__action' });
+        }
+        break;
+      case 'completed':
+        action = button({ id: 'reset-button', text: '换下一位小朋友', token: 'reset', className: 'child-pet-orb__action' });
+        break;
+      default:
+        break;
+    }
+    if (action !== null) append(orb, action);
+    return orb;
   }
 
   function render(snapshot) {
@@ -193,11 +337,13 @@ export function createChildView(root, actions, dom) {
     appendText(heading, titleFor(snapshot.value));
     nextFocusTargets.set('#app-title', heading);
     const lead = element('p', { class: 'child-state__lead' });
+    appendText(lead, STATE_PRESENTATION[snapshot.value].lead);
     append(stateHeader, heading, lead);
 
     const stage = element('div', { class: 'child-stage' });
     const stateContent = renderState(snapshot, controls);
     for (const node of stateContent) append(stage, node);
+    append(stage, petOrb(snapshot, controls));
 
     const status = element('p', {
       id: 'child-status',
@@ -234,7 +380,7 @@ export function createChildView(root, actions, dom) {
       case 'welcome': {
         const intro = element('p', { class: 'child-view__intro' });
         appendText(intro, '和值日小朋友一起，记录小鸭的成长故事～');
-        return [intro, button({ id: 'start-button', text: '开始', token: 'start' })];
+        return [intro];
       }
       case 'loading_roster': {
         const busy = element('div', { 'aria-busy': 'true' });
@@ -251,36 +397,27 @@ export function createChildView(root, actions, dom) {
         return [identity];
       }
       case 'ready':
-      case 'listening': {
-        const record = button({
-          id: 'record-button',
-          text: snapshot.value === 'ready' ? '开始说话' : '结束说话',
-          token: 'record-toggle',
-          disabled: controls.recordDisabled,
-        });
-        return [messageLog(snapshot), record];
-      }
-      case 'submitting': {
-        const nodes = [messageLog(snapshot)];
-        const draftNode = draftRegion(snapshot);
-        if (draftNode !== null) nodes.push(draftNode);
-        return nodes;
-      }
+      case 'listening':
+        return [conversationPanel(snapshot, { includeDraft: false, failureCopy: null })];
+      case 'submitting':
+        return [conversationPanel(snapshot, { includeDraft: true, failureCopy: null })];
       case 'speaking':
       case 'saving_conversation':
-        return [messageLog(snapshot)];
+        return [conversationPanel(snapshot, { includeDraft: false, failureCopy: null })];
       case 'submission_failed':
-        return renderSubmissionFailure(snapshot, controls);
+        return [conversationPanel(snapshot, {
+          includeDraft: true,
+          failureCopy: submissionFailureCopy(snapshot, controls),
+        })];
       case 'completed':
-        return [
-          messageLog(snapshot),
-          button({ id: 'reset-button', text: '换下一位小朋友', token: 'reset' }),
-        ];
+        return [conversationPanel(snapshot, { includeDraft: false, failureCopy: null })];
       case 'recovery': {
         const alert = element('p', { role: 'alert', class: 'child-view__error' });
         appendText(alert, errorCopy(snapshot.error));
         const nodes = [alert];
-        if (snapshot.messages.length > 0) nodes.push(messageLog(snapshot));
+        if (snapshot.messages.length > 0) {
+          nodes.push(conversationPanel(snapshot, { includeDraft: false, failureCopy: null }));
+        }
         return nodes;
       }
       default:
@@ -310,20 +447,10 @@ export function createChildView(root, actions, dom) {
     return [list];
   }
 
-  function renderSubmissionFailure(snapshot, controls) {
-    const completeRetryContext = snapshot.draft !== null && snapshot.child !== null && !controls.retryDisabled;
-    const nodes = [messageLog(snapshot)];
-    const draftNode = draftRegion(snapshot);
-    if (draftNode !== null) nodes.push(draftNode);
-    const alert = element('p', { role: 'alert', class: 'child-view__error' });
-    appendText(alert, completeRetryContext
+  function submissionFailureCopy(snapshot, controls) {
+    return submissionRetryAvailable(snapshot, controls)
       ? '这句话还没有送达，原话已经保留'
-      : '不存在可重发的草稿，请老师帮忙');
-    nodes.push(alert);
-    if (completeRetryContext) {
-      nodes.push(button({ id: 'retry-button', text: '重新发送', token: 'retry' }));
-    }
-    return nodes;
+      : '不存在可重发的草稿，请老师帮忙';
   }
 
   function announce(text) {
@@ -1003,11 +1130,11 @@ function statusFor(snapshot) {
     case 'welcome': return '准备好后，请按开始';
     case 'loading_roster': return '正在加载今天的值日小朋友';
     case 'selecting_child': return snapshot.roster.length === 0 ? '今天还未排班，请老师帮忙' : '请选择今天值日的小朋友';
-    case 'opening': return '鸭鸭正在和你打招呼';
+    case 'opening': return '鸭鸭日记本正在和你打招呼';
     case 'ready': return '点一下开始说话，也可以按空格键';
     case 'listening': return '正在听，停顿后会自动发送';
-    case 'submitting': return '这句话正在送给鸭鸭';
-    case 'speaking': return '鸭鸭正在回答';
+    case 'submitting': return '这句话正在发给鸭鸭日记本';
+    case 'speaking': return '鸭鸭日记本正在回答';
     case 'submission_failed': return snapshot.draft === null || snapshot.child === null
       ? '这句话没有可重发的草稿，请老师帮忙'
       : '这句话还没有送达，原话已经保留';

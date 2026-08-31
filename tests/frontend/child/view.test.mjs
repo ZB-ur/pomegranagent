@@ -193,6 +193,30 @@ const messages = Object.freeze([
   Object.freeze({ id: 10, role: 'child', text: '我给小鸭换了水' }),
   Object.freeze({ id: 11, role: 'diary', text: '你做得真认真。' }),
 ]);
+const conversationStates = new Set([
+  'ready',
+  'listening',
+  'submitting',
+  'speaking',
+  'submission_failed',
+  'saving_conversation',
+  'completed',
+  'recovery',
+]);
+const posterByState = new Map([
+  ['welcome', '/assets/duck-front-512.png'],
+  ['loading_roster', '/assets/duck-front-512.png'],
+  ['selecting_child', '/assets/duck-side-512.png'],
+  ['opening', '/assets/duck-encouraging.png'],
+  ['ready', '/assets/duck-front-512.png'],
+  ['listening', '/assets/duck-listening.png'],
+  ['submitting', '/assets/duck-listening.png'],
+  ['speaking', '/assets/duck-encouraging.png'],
+  ['submission_failed', '/assets/duck-front-512.png'],
+  ['saving_conversation', '/assets/duck-listening.png'],
+  ['completed', '/assets/duck-happy.png'],
+  ['recovery', '/assets/duck-front-512.png'],
+]);
 
 function snapshotFor(value, overrides = {}) {
   const common = {
@@ -453,11 +477,11 @@ test('renders all twelve states with unique semantic frame, exact status, and fo
     ['welcome', '准备好后，请按开始', 'start-button'],
     ['loading_roster', '正在加载今天的值日小朋友', 'child-status'],
     ['selecting_child', '请选择今天值日的小朋友', 'app-title'],
-    ['opening', '鸭鸭正在和你打招呼', 'child-status'],
+    ['opening', '鸭鸭日记本正在和你打招呼', 'child-status'],
     ['ready', '点一下开始说话，也可以按空格键', 'record-button'],
     ['listening', '正在听，停顿后会自动发送', 'record-button'],
-    ['submitting', '这句话正在送给鸭鸭', 'child-status'],
-    ['speaking', '鸭鸭正在回答', 'child-status'],
+    ['submitting', '这句话正在发给鸭鸭日记本', 'child-status'],
+    ['speaking', '鸭鸭日记本正在回答', 'child-status'],
     ['submission_failed', '这句话还没有送达，原话已经保留', 'retry-button'],
     ['saving_conversation', '正在安全保存今天的话', 'child-status'],
     ['completed', '今天的话已经安全记下来啦', 'reset-button'],
@@ -487,6 +511,88 @@ test('renders all twelve states with unique semantic frame, exact status, and fo
   }
 });
 
+test('projects one local PetOrb in every state and one ConversationPanel in conversation states', () => {
+  const orbActionByState = new Map([
+    ['welcome', 'start-button'],
+    ['ready', 'record-button'],
+    ['listening', 'record-button'],
+    ['submission_failed', 'retry-button'],
+    ['completed', 'reset-button'],
+  ]);
+  for (const [state, poster] of posterByState) {
+    const fake = createFakeDOM();
+    const view = createChildView(fake.root, actions(), fake.dom);
+    view.render(snapshotFor(state));
+    const orbs = findAll(fake.root, node => node.getAttribute?.('class') === 'child-pet-orb');
+    assert.equal(orbs.length, 1, `${state} must render exactly one PetOrb`);
+    const panels = findAll(fake.root, node => node.getAttribute?.('class') === 'child-conversation-panel');
+    assert.equal(panels.length, conversationStates.has(state) ? 1 : 0, `${state} ConversationPanel count`);
+    const leads = findAll(fake.root, node => node.getAttribute?.('class') === 'child-state__lead');
+    assert.equal(leads.length, 1);
+    assert.notEqual(leads[0].textContent.trim(), '', `${state} must have local visible lead copy`);
+    assert.equal(leads[0].textContent.includes('untrusted server detail'), false);
+
+    const posters = findAll(orbs[0], node => node.tagName === 'IMG');
+    assert.equal(posters.length, 1, `${state} PetOrb poster count`);
+    assert.equal(posters[0].getAttribute('src'), poster);
+    assert.equal(/^\/assets\//.test(posters[0].getAttribute('src')), true);
+
+    const orbActions = findAll(
+      orbs[0],
+      node => node instanceof FakeElement && node.getAttribute('data-child-action') !== null,
+    );
+    const expectedAction = orbActionByState.get(state) ?? null;
+    assert.equal(orbActions.length, expectedAction === null ? 0 : 1, `${state} PetOrb action count`);
+    assert.equal(orbActions[0]?.getAttribute('id') ?? null, expectedAction);
+  }
+});
+
+test('uses exact diary partner copy without the legacy bare-duck phrases', () => {
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions(), fake.dom);
+
+  view.render(snapshotFor('submitting'));
+  assert.equal(byId(fake.root, 'child-status').textContent, '这句话正在发给鸭鸭日记本');
+  assert.equal(fake.root.textContent.includes('送给鸭鸭'), false);
+  assert.equal(/发给鸭鸭(?!日记本)/u.test(fake.root.textContent), false);
+
+  view.render(snapshotFor('speaking'));
+  assert.equal(byId(fake.root, 'child-status').textContent, '鸭鸭日记本正在回答');
+  assert.equal(fake.root.textContent.includes('鸭鸭正在回答'), false);
+});
+
+test('uses one click-toggle PetOrb record action without any hold gesture contract', () => {
+  const calls = [];
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions({ onRecordToggle: () => calls.push('toggle') }), fake.dom);
+
+  view.render(snapshotFor('ready'));
+  const readyOrb = find(fake.root, node => node.getAttribute?.('class') === 'child-pet-orb');
+  const readyRecord = byId(fake.root, 'record-button');
+  assert.ok(readyOrb.contains(readyRecord));
+  assert.equal(readyRecord.textContent, '开始说话');
+  assert.equal(readyRecord.getAttribute('data-child-action'), 'record-toggle');
+  assert.equal(findAll(readyOrb, node => node.getAttribute?.('data-child-action') === 'record-toggle').length, 1);
+  dispatchClick(fake.root, readyRecord);
+  assert.deepEqual(calls, ['toggle']);
+
+  view.render(snapshotFor('listening'));
+  const listeningOrb = find(fake.root, node => node.getAttribute?.('class') === 'child-pet-orb');
+  const listeningRecord = byId(fake.root, 'record-button');
+  assert.ok(listeningOrb.contains(listeningRecord));
+  assert.equal(listeningRecord.getAttribute('id'), readyRecord.getAttribute('id'));
+  assert.equal(listeningRecord.getAttribute('data-child-action'), readyRecord.getAttribute('data-child-action'));
+  assert.equal(listeningRecord.textContent, '结束说话');
+  assert.equal(findAll(listeningOrb, node => node.getAttribute?.('data-child-action') === 'record-toggle').length, 1);
+  dispatchClick(fake.root, listeningRecord);
+  assert.deepEqual(calls, ['toggle', 'toggle']);
+
+  for (const type of ['mousedown', 'pointerdown', 'pointerup', 'touchstart', 'touchend']) {
+    assert.equal((fake.root.listeners.get(type) ?? new Set()).size, 0, `${type} must not be registered`);
+    assert.equal((listeningRecord.listeners.get(type) ?? new Set()).size, 0, `${type} must not be registered on action`);
+  }
+});
+
 test('renders empty roster without child fallback and preserves ordered visible names', () => {
   const fake = createFakeDOM();
   const view = createChildView(fake.root, actions(), fake.dom);
@@ -503,22 +609,38 @@ test('renders empty roster without child fallback and preserves ordered visible 
   assert.deepEqual(cards.map(card => card.getAttribute('data-child-id')), ['7', '8']);
 });
 
-test('uses log semantics, visible speakers, and a separate unconfirmed draft without analysis-success copy', () => {
+test('uses panel log semantics, aligned visible speakers, and an in-panel unconfirmed draft', () => {
   const fake = createFakeDOM();
   const view = createChildView(fake.root, actions(), fake.dom);
   view.render(snapshotFor('submission_failed'));
+  const panel = find(fake.root, node => node.getAttribute?.('class') === 'child-conversation-panel');
+  assert.ok(panel);
+  assert.equal(panel.textContent.includes('对话记录'), true);
+  assert.ok(find(panel, node => node.getAttribute?.('class') === 'child-conversation-panel__state'));
   const log = find(fake.root, node => node.getAttribute?.('role') === 'log');
   assert.ok(log);
+  assert.equal(panel.contains(log), true);
   assert.equal(log.getAttribute('aria-live'), 'polite');
   assert.equal(log.getAttribute('aria-relevant'), 'additions text');
   assert.equal(log.getAttribute('aria-label'), '对话记录');
   assert.equal(log.textContent.includes('雨点'), true);
   assert.equal(log.textContent.includes('鸭鸭日记本'), true);
   assert.equal(log.textContent.includes(draft.text), true);
+  const messageRows = findAll(log, node => node.getAttribute?.('class')?.startsWith('child-message child-message--'));
+  assert.equal(messageRows[0].getAttribute('class'), 'child-message child-message--child');
+  assert.equal(messageRows[1].getAttribute('class'), 'child-message child-message--diary');
+  assert.equal(findAll(messageRows[0], node => node.tagName === 'IMG').length, 0);
+  const diaryMarks = findAll(messageRows[1], node => node.tagName === 'IMG');
+  assert.equal(diaryMarks.length, 1);
+  assert.equal(diaryMarks[0].getAttribute('src'), '/assets/diary-mark.svg');
+  assert.equal(diaryMarks[0].getAttribute('alt'), '');
   const draftRegion = byId(fake.root, 'pending-draft');
   assert.ok(draftRegion);
   assert.equal(draftRegion.textContent.includes('待发送草稿'), true);
-  assert.equal(log.contains(draftRegion), false);
+  assert.equal(log.contains(draftRegion), true);
+  const failure = find(panel, node => node.getAttribute?.('class') === 'child-message child-message--failure');
+  assert.ok(failure);
+  assert.equal(failure.getAttribute('role'), 'alert');
 
   view.render(snapshotFor('completed'));
   assert.equal(fake.root.textContent.includes('分析完成'), false);
@@ -578,9 +700,11 @@ test('accepts machine-valid null children and keeps hostile dynamic content text
   }));
   assert.equal(fake.root.textContent.includes(hostile), true);
   const images = findAll(fake.root, node => node.tagName === 'IMG');
-  assert.equal(images.length, 1);
-  assert.equal(images[0].getAttribute('src'), '/assets/notebook-mark.svg');
-  assert.equal(images[0].getAttribute('alt'), '');
+  assert.deepEqual(images.map(image => image.getAttribute('src')), [
+    '/assets/notebook-mark.svg',
+    '/assets/duck-front-512.png',
+  ]);
+  assert.equal(images.every(image => image.getAttribute('alt') === ''), true);
   assert.equal(fake.root.textContent.includes('MIC_PERMISSION_DENIED'), false);
   assert.equal(byId(fake.root, 'child-status').textContent, '麦克风没有开启，请老师帮忙');
 });
@@ -660,9 +784,12 @@ test('teacher help remains visible and opens a labelled native dialog without un
   view.showTeacherHelpError('<img src=x onerror=boom>');
   assert.equal(byId(fake.root, 'teacher-help-error').textContent, '<img src=x onerror=boom>');
   const images = findAll(fake.root, node => node.tagName === 'IMG');
-  assert.equal(images.length, 1);
-  assert.equal(images[0].getAttribute('src'), '/assets/notebook-mark.svg');
-  assert.equal(images[0].getAttribute('alt'), '');
+  assert.deepEqual(images.map(image => image.getAttribute('src')), [
+    '/assets/notebook-mark.svg',
+    '/assets/diary-mark.svg',
+    '/assets/duck-front-512.png',
+  ]);
+  assert.equal(images.every(image => image.getAttribute('alt') === ''), true);
   view.render(snapshotFor('submission_failed'));
   assert.equal(byId(fake.root, 'teacher-help-dialog'), sameDialog);
   assert.equal(byId(fake.root, 'teacher-pin'), samePin);
@@ -971,7 +1098,7 @@ test('styles retain the standalone static accessibility and safety contract', ()
   assert.doesNotMatch(css, /@import|url\s*\(/i);
 });
 
-test('shell styles preserve pre-shell child components and private teacher dialog presentation', () => {
+test('shell styles preserve roster cards and private teacher dialog presentation', () => {
   const css = readFileSync(new URL('../../../app/frontend/child/styles.css', import.meta.url), 'utf8');
   const ruleBody = (selector, occurrence = 0) => {
     let selectorStart = -1;
@@ -996,22 +1123,6 @@ test('shell styles preserve pre-shell child components and private teacher dialo
   assert.doesNotMatch(card, /box-shadow/);
   assert.equal(css.includes('#child-app .child-view .child-card:hover'), false);
 
-  const record = ruleBody('#child-app .child-view #record-button {');
-  assert.match(record, /inline-size\s*:\s*clamp\(160px,\s*26vw,\s*200px\)/);
-  assert.match(record, /block-size\s*:\s*clamp\(160px,\s*26vw,\s*200px\)/);
-  assert.match(record, /border\s*:\s*8px\s+solid\s+#7a4700/i);
-  assert.match(record, /color\s*:\s*var\(--child-ink\)/);
-  assert.match(record, /background\s*:\s*#ffbf24/i);
-  assert.match(record, /font-weight\s*:\s*700/);
-
-  assert.match(ruleBody('#child-app .child-view [role="log"] {'), /max-block-size\s*:\s*min\(32vh,\s*300px\)/);
-  assert.match(ruleBody('#child-app .child-view .child-message {'), /border\s*:\s*2px\s+solid\s+#ffbf24/i);
-  assert.match(ruleBody('#child-app .child-view .child-message--child {'), /border-color\s*:\s*var\(--child-action\)/);
-  const speaker = ruleBody('#child-app .child-view .child-message__speaker {');
-  assert.match(speaker, /font-size\s*:\s*0\.8em/);
-  assert.doesNotMatch(speaker, /margin/);
-  assert.equal(css.includes('#child-app .child-view .child-message__text'), false);
-
   const dialog = ruleBody('#child-app #teacher-help-dialog {');
   assert.match(dialog, /padding\s*:\s*clamp\(18px,\s*3vw,\s*30px\)/);
   assert.match(dialog, /border\s*:\s*3px\s+solid\s+#1d5fb0/i);
@@ -1030,6 +1141,5 @@ test('shell styles preserve pre-shell child components and private teacher dialo
   assert.match(dialogButton, /background\s*:\s*#1d5fb0/i);
   assert.doesNotMatch(dialogButton, /font-weight/);
   assert.match(ruleBody('#child-app #teacher-help-error {'), /min-block-size\s*:\s*1\.5em/);
-  assert.match(css, /max-block-size\s*:\s*26vh/);
   assert.match(css, /inline-size\s*:\s*min\(96vw,\s*680px\)/);
 });

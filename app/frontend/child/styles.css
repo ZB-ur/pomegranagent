@@ -91,10 +91,8 @@ body {
 }
 
 #child-app .child-state {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-  align-content: stretch;
-  gap: 12px;
+  position: relative;
+  display: block;
   inline-size: 100%;
   block-size: 100%;
   min-inline-size: 0;
@@ -103,9 +101,14 @@ body {
 }
 
 #child-app .child-state__header {
+  position: absolute;
+  inset-block-start: 0;
+  inset-inline-start: 0;
   display: grid;
   align-content: start;
   gap: 0;
+  inline-size: 100%;
+  block-size: 72px;
   min-inline-size: 0;
 }
 
@@ -126,9 +129,15 @@ body {
 }
 
 #child-app .child-stage {
+  position: absolute;
+  inset-block-start: 96px;
+  inset-inline-start: 0;
   display: grid;
-  align-content: start;
-  gap: 16px;
+  grid-template-columns: minmax(0, 608px) minmax(0, 232px);
+  grid-template-rows: minmax(0, 1fr);
+  gap: 24px;
+  inline-size: 864px;
+  block-size: 308px;
   min-inline-size: 0;
   min-block-size: 0;
 }
@@ -139,6 +148,10 @@ body {
 }
 
 #child-app #child-status {
+  position: absolute;
+  inset-block-start: 72px;
+  inset-inline-start: 0;
+  inline-size: 100%;
   min-block-size: 21px;
   margin: 0;
   color: var(--child-muted);
@@ -197,46 +210,176 @@ body {
   font-weight: 700;
 }
 
-#child-app .child-view #record-button {
-  inline-size: clamp(160px, 26vw, 200px);
-  block-size: clamp(160px, 26vw, 200px);
-  justify-self: center;
-  border: 8px solid #7a4700;
-  border-radius: 50%;
-  color: var(--child-ink);
-  background: #ffbf24;
-  font-weight: 700;
+#child-app .child-conversation-panel {
+  grid-column: 1;
+  grid-row: 1;
+  display: grid;
+  grid-template-rows: 40px minmax(0, 1fr);
+  gap: 8px;
+  inline-size: 100%;
+  block-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 0;
+  padding: 12px;
+  border-radius: 20px;
+  background: #ffffff;
+  box-shadow: inset 0 0 0 2px rgb(107 138 91 / 36%);
 }
 
-#child-app .child-view [role="log"] {
-  display: grid;
+#child-app .child-conversation-panel__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
   gap: 12px;
-  max-block-size: min(32vh, 300px);
-  padding: 4px;
+  min-inline-size: 0;
+}
+
+#child-app .child-conversation-panel__header h2 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 26px;
+}
+
+#child-app .child-conversation-panel__state {
+  flex: 0 0 auto;
+  padding: 4px 12px;
+  border: 2px solid var(--child-sage-border);
+  border-radius: 999px;
+  color: var(--child-ink);
+  background: var(--child-sage);
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 21px;
+}
+
+#child-app .child-conversation-panel__messages {
+  display: grid;
+  grid-auto-rows: 116px;
+  align-content: start;
+  gap: 4px;
+  min-inline-size: 0;
+  min-block-size: 0;
+  padding: 0;
   overflow: auto;
 }
 
 #child-app .child-view .child-message {
-  max-inline-size: 78%;
+  display: grid;
+  align-content: center;
+  gap: 4px;
+  inline-size: 100%;
+  block-size: 116px;
+  min-inline-size: 0;
   padding: 12px 16px;
-  border: 2px solid #ffbf24;
+  border: 2px solid var(--child-sage-border);
   border-radius: 16px;
   background: #ffffff;
 }
 
+#child-app .child-view .child-message--diary {
+  justify-items: start;
+  text-align: start;
+  background: var(--child-story);
+}
+
 #child-app .child-view .child-message--child {
-  justify-self: end;
+  justify-items: end;
   border-color: var(--child-action);
-  color: #ffffff;
-  background: var(--child-action);
+  text-align: end;
+  background: #e7f2f5;
+}
+
+#child-app .child-view .child-message--pending {
+  border-style: dashed;
+}
+
+#child-app .child-view .child-message--failure {
+  justify-items: start;
+  border-color: var(--child-danger);
+  color: var(--child-danger);
+  text-align: start;
+  background: #fff4f2;
 }
 
 #child-app .child-view .child-message__speaker {
-  font-size: 0.8em;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  max-inline-size: 100%;
+  font-size: 14px;
   font-weight: 700;
+  line-height: 21px;
 }
 
-#child-app .child-view #pending-draft,
+#child-app .child-view .child-message--child .child-message__speaker {
+  justify-content: flex-end;
+}
+
+#child-app .child-view .child-message__speaker img {
+  flex: 0 0 28px;
+  inline-size: 28px;
+  block-size: 28px;
+}
+
+#child-app .child-view .child-message__text {
+  max-inline-size: 90%;
+  overflow-wrap: anywhere;
+  font-size: 18px;
+  line-height: 26px;
+}
+
+#child-app .child-pet-orb {
+  grid-column: 2;
+  grid-row: 1;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  inline-size: 100%;
+  block-size: 100%;
+  min-inline-size: 0;
+  min-block-size: 0;
+  padding: 12px;
+  border-radius: 24px;
+  background: var(--child-story);
+  box-shadow: inset 0 0 0 2px rgb(107 138 91 / 42%);
+}
+
+#child-app .child-pet-orb__visual {
+  display: grid;
+  place-items: center;
+  min-inline-size: 0;
+  min-block-size: 0;
+}
+
+#child-app .child-pet-orb__poster {
+  display: block;
+  inline-size: min(100%, 180px);
+  block-size: auto;
+  max-block-size: 180px;
+  object-fit: contain;
+}
+
+#child-app .child-pet-orb__status {
+  justify-self: stretch;
+  color: var(--child-ink);
+  text-align: center;
+  font-size: 18px;
+  font-weight: 800;
+  line-height: 26px;
+}
+
+#child-app .child-view .child-pet-orb__action {
+  justify-self: stretch;
+  inline-size: 100%;
+  min-block-size: 48px;
+  padding: 7px 12px;
+  font-size: 16px;
+  font-weight: 800;
+  line-height: 24px;
+}
+
 #child-app .child-view .child-view__error,
 #child-app .child-view #roster-empty,
 #child-app .child-view #teacher-help-unavailable-note {
@@ -350,10 +493,6 @@ body {
     padding: 32px 40px 24px;
   }
 
-  #child-app .child-view [role="log"] {
-    max-block-size: 26vh;
-  }
-
   #child-app #teacher-help-dialog {
     inline-size: min(96vw, 680px);
     max-block-size: 92vh;
@@ -363,6 +502,32 @@ body {
 @media (min-width: 1280px) {
   #child-app .child-shell__content {
     padding: 32px 40px;
+  }
+
+  #child-app .child-stage {
+    inset-block-start: 112px;
+    inset-inline-start: 36px;
+    grid-template-columns: minmax(0, 760px) minmax(0, 264px);
+    inline-size: 1048px;
+    block-size: 396px;
+  }
+
+  #child-app .child-conversation-panel {
+    grid-template-rows: 44px minmax(0, 1fr);
+    padding: 16px;
+  }
+
+  #child-app .child-conversation-panel__messages {
+    gap: 8px;
+  }
+
+  #child-app .child-pet-orb {
+    padding: 16px;
+  }
+
+  #child-app .child-pet-orb__poster {
+    inline-size: min(100%, 216px);
+    max-block-size: 216px;
   }
 }
 

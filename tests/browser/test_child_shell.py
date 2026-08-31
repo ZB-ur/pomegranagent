@@ -16,6 +16,22 @@ BROWSER_ENTRY = ROOT / "app/frontend/child/browser.mjs"
 CHILD_SERVER = ROOT / "tests/browser/child_server.py"
 VIEWPORTS = [{"width": 1024, "height": 576}, {"width": 1280, "height": 720}]
 VIEWPORT_IDS = ["1024x576", "1280x720"]
+READY_GEOMETRY = {
+    (1024, 576): {
+        "header": {"x": 40, "y": 20, "width": 944, "height": 64},
+        "content": {"x": 40, "y": 96, "width": 944, "height": 460},
+        "state": {"x": 80, "y": 128, "width": 864, "height": 404},
+        "panel": {"x": 80, "y": 224, "width": 608, "height": 308},
+        "orb": {"x": 712, "y": 224, "width": 232, "height": 308},
+    },
+    (1280, 720): {
+        "header": {"x": 40, "y": 20, "width": 1200, "height": 64},
+        "content": {"x": 40, "y": 96, "width": 1200, "height": 604},
+        "state": {"x": 80, "y": 128, "width": 1120, "height": 540},
+        "panel": {"x": 116, "y": 240, "width": 760, "height": 396},
+        "orb": {"x": 900, "y": 240, "width": 264, "height": 396},
+    },
+}
 
 
 def browser_source() -> str:
@@ -645,7 +661,7 @@ def test_empty_roster_is_honest_and_has_no_cards(child_page, viewport):
     requested = prepare_child_page(child_page, viewport, roster=[])
     page = child_page.page
     page.get_by_text("今天还未排班，请老师帮忙", exact=True).first.wait_for()
-    help_button = page.get_by_role("button", name="老师帮忙", exact=True)
+    help_button = page.get_by_role("button", name="请老师帮忙", exact=True)
     assert help_button.is_visible()
     assert help_button.is_enabled()
     help_button.focus()
@@ -742,6 +758,67 @@ def test_keyboard_focus_visible_uses_start_to_ready_flow(child_page, viewport):
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_ready_stage_matches_exact_panel_and_pet_orb_geometry_without_scroll(child_page, viewport):
+    prepare_child_page(
+        child_page,
+        viewport,
+        roster=[SYNTHETIC_CHILD],
+        active_by_child={1: SYNTHETIC_ACTIVE},
+    )
+    page = child_page.page
+    wait_for_active_ready(page)
+    measured = page.evaluate(
+        """
+        () => {
+          const rectFor = selector => {
+            const element = document.querySelector(selector);
+            if (element === null) return null;
+            const rect = element.getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          };
+          const scrolling = document.scrollingElement;
+          return {
+            rects: {
+              header: rectFor('.child-shell__header'),
+              content: rectFor('.child-shell__content'),
+              state: rectFor('.child-state'),
+              panel: rectFor('.child-conversation-panel'),
+              orb: rectFor('.child-pet-orb'),
+            },
+            scrollX: window.scrollX,
+            scrollY: window.scrollY,
+            documentWidth: scrolling.scrollWidth,
+            documentHeight: scrolling.scrollHeight,
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+          };
+        }
+        """
+    )
+    expected = READY_GEOMETRY[(viewport["width"], viewport["height"])]
+    assert measured["scrollX"] == 0
+    assert measured["scrollY"] == 0
+    assert measured["documentWidth"] <= measured["viewportWidth"]
+    assert measured["documentHeight"] <= measured["viewportHeight"]
+    for name, expected_rect in expected.items():
+        actual = measured["rects"][name]
+        assert actual is not None, name
+        for field, expected_value in expected_rect.items():
+            assert actual[field] == pytest.approx(expected_value, abs=1), (name, field, actual)
+        assert actual["x"] >= 0
+        assert actual["y"] >= 0
+        assert actual["x"] + actual["width"] <= viewport["width"] + 1
+        assert actual["y"] + actual["height"] <= viewport["height"] + 1
+
+    panel = measured["rects"]["panel"]
+    orb = measured["rects"]["orb"]
+    assert panel["x"] + panel["width"] <= orb["x"]
+    assert orb["x"] - (panel["x"] + panel["width"]) == pytest.approx(24, abs=1)
+    assert panel["y"] == pytest.approx(orb["y"], abs=1)
+    assert panel["height"] == pytest.approx(orb["height"], abs=1)
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_projection_is_reachable_without_horizontal_or_control_clipping(child_page, viewport):
     prepare_child_page(
         child_page,
@@ -779,7 +856,7 @@ def test_projection_is_reachable_without_horizontal_or_control_clipping(child_pa
         page.get_by_role("heading", level=1),
         page.get_by_role("log", name="对话记录"),
         page.get_by_role("button", name="开始说话", exact=True),
-        page.get_by_role("button", name="老师帮忙", exact=True),
+        page.get_by_role("button", name="请老师帮忙", exact=True),
         page.get_by_role("status"),
     ):
         locator.scroll_into_view_if_needed()
