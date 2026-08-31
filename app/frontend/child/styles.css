@@ -322,8 +322,9 @@ body {
 }
 
 #child-app .child-view .child-message {
-  display: grid;
-  align-content: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
   gap: 4px;
   inline-size: 100%;
   block-size: 116px;
@@ -335,13 +336,13 @@ body {
 }
 
 #child-app .child-view .child-message--diary {
-  justify-items: start;
+  align-items: flex-start;
   text-align: start;
   background: var(--child-story);
 }
 
 #child-app .child-view .child-message--child {
-  justify-items: end;
+  align-items: flex-end;
   border-color: var(--child-action);
   text-align: end;
   background: #e7f2f5;
@@ -352,7 +353,7 @@ body {
 }
 
 #child-app .child-view .child-message--failure {
-  justify-items: start;
+  align-items: flex-start;
   border-color: var(--child-danger);
   color: var(--child-danger);
   text-align: start;
@@ -360,6 +361,7 @@ body {
 }
 
 #child-app .child-view .child-message__speaker {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   gap: 8px;
@@ -380,7 +382,10 @@ body {
 }
 
 #child-app .child-view .child-message__text {
+  flex: 0 1 auto;
+  min-block-size: 0;
   max-inline-size: 90%;
+  overflow-y: auto;
   overflow-wrap: anywhere;
   font-size: 18px;
   line-height: 26px;

@@ -88,6 +88,7 @@ SYNTHETIC_ACTIVE = {
         ],
     }
 }
+NEAR_LIMIT_CHILD_TEXT = "起" + ("鸭" * 1988) + "终"
 
 
 def prepare_child_page(harness, viewport, *, roster, active_by_child=None):
@@ -923,6 +924,137 @@ def test_ready_stage_matches_exact_panel_and_pet_orb_geometry_without_scroll(chi
     assert orb["x"] - (panel["x"] + panel["width"]) == pytest.approx(24, abs=1)
     assert panel["y"] == pytest.approx(orb["y"], abs=1)
     assert panel["height"] == pytest.approx(orb["height"], abs=1)
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_near_limit_transcript_scrolls_inside_its_fixed_row_without_overlap(
+    child_page,
+    viewport,
+):
+    active = {
+        "conversation": {
+            **SYNTHETIC_ACTIVE["conversation"],
+            "messages": [
+                {"id": 101, "role": "child", "text": NEAR_LIMIT_CHILD_TEXT},
+                {"id": 102, "role": "diary", "text": "相邻的短消息仍然清楚可见。"},
+            ],
+        }
+    }
+    prepare_child_page(
+        child_page,
+        viewport,
+        roster=[SYNTHETIC_CHILD],
+        active_by_child={1: active},
+    )
+    page = child_page.page
+    record = wait_for_active_ready(page)
+    log = page.get_by_role("log", name="对话记录")
+    rows = log.locator(".child-message")
+    long_body = rows.nth(0).locator(".child-message__text")
+    short_body = rows.nth(1).locator(".child-message__text")
+
+    assert log.count() == 1
+    assert rows.count() == 2
+    assert long_body.text_content() == NEAR_LIMIT_CHILD_TEXT
+    assert short_body.text_content() == "相邻的短消息仍然清楚可见。"
+
+    measured = page.evaluate(
+        """
+        () => {
+          const box = element => {
+            const rect = element.getBoundingClientRect();
+            return {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+              left: rect.left,
+            };
+          };
+          const rectFor = selector => box(document.querySelector(selector));
+          const rows = document.querySelectorAll(
+            '.child-conversation-panel__messages .child-message'
+          );
+          const longRow = rows[0];
+          const adjacentRow = rows[1];
+          const longBody = longRow.querySelector('.child-message__text');
+          const shortBody = adjacentRow.querySelector('.child-message__text');
+          const speaker = longRow.querySelector('.child-message__speaker');
+          const textNode = longBody.firstChild;
+          longBody.scrollTop = longBody.scrollHeight;
+          const lastCharacter = document.createRange();
+          lastCharacter.setStart(textNode, textNode.length - 1);
+          lastCharacter.setEnd(textNode, textNode.length);
+          const scrolling = document.scrollingElement;
+          return {
+            row: box(longRow),
+            adjacentRow: box(adjacentRow),
+            body: box(longBody),
+            speaker: box(speaker),
+            lastCharacter: box(lastCharacter),
+            bodyClientHeight: longBody.clientHeight,
+            bodyScrollHeight: longBody.scrollHeight,
+            bodyScrollTop: longBody.scrollTop,
+            bodyOverflowY: getComputedStyle(longBody).overflowY,
+            bodyText: longBody.textContent,
+            shortClientHeight: shortBody.clientHeight,
+            shortScrollHeight: shortBody.scrollHeight,
+            outer: {
+              header: rectFor('.child-shell__header'),
+              content: rectFor('.child-shell__content'),
+              state: rectFor('.child-state'),
+              panel: rectFor('.child-conversation-panel'),
+              orb: rectFor('.child-pet-orb'),
+            },
+            scrollX: window.scrollX,
+            scrollY: window.scrollY,
+            documentWidth: scrolling.scrollWidth,
+            documentHeight: scrolling.scrollHeight,
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+          };
+        }
+        """
+    )
+    assert measured["bodyText"] == NEAR_LIMIT_CHILD_TEXT
+    assert measured["row"]["height"] == pytest.approx(116, abs=0.5)
+    assert measured["adjacentRow"]["height"] == pytest.approx(116, abs=0.5)
+    assert measured["row"]["bottom"] <= measured["adjacentRow"]["top"]
+    assert measured["speaker"]["top"] >= measured["row"]["top"]
+    assert measured["speaker"]["bottom"] <= measured["body"]["top"]
+    assert measured["body"]["top"] >= measured["row"]["top"]
+    assert measured["body"]["bottom"] <= measured["row"]["bottom"]
+    assert measured["bodyOverflowY"] == "auto"
+    assert measured["bodyScrollHeight"] > measured["bodyClientHeight"]
+    assert measured["bodyScrollTop"] == pytest.approx(
+        measured["bodyScrollHeight"] - measured["bodyClientHeight"],
+        abs=1,
+    )
+    assert measured["lastCharacter"]["top"] >= measured["body"]["top"] - 1
+    assert measured["lastCharacter"]["bottom"] <= measured["body"]["bottom"] + 1
+    assert measured["shortScrollHeight"] <= measured["shortClientHeight"]
+    assert measured["scrollX"] == 0
+    assert measured["scrollY"] == 0
+    assert measured["documentWidth"] <= measured["viewportWidth"]
+    assert measured["documentHeight"] <= measured["viewportHeight"]
+
+    expected = READY_GEOMETRY[(viewport["width"], viewport["height"])]
+    for name, expected_rect in expected.items():
+        actual = measured["outer"][name]
+        for field, expected_value in expected_rect.items():
+            assert actual[field] == pytest.approx(expected_value, abs=1), (
+                name,
+                field,
+                actual,
+            )
+
+    record.focus()
+    page.keyboard.press("Shift+Tab")
+    assert long_body.evaluate("node => document.activeElement === node") is True
+    assert page.evaluate("window.scrollX === 0 && window.scrollY === 0") is True
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)

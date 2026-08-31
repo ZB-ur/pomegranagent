@@ -7,6 +7,16 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[2]
 VIEWPORTS = [{"width": 1024, "height": 576}, {"width": 1280, "height": 720}]
+STAGE_GEOMETRY = {
+    (1024, 576): {
+        "panel": {"x": 80, "y": 224, "width": 608, "height": 308},
+        "orb": {"x": 712, "y": 224, "width": 232, "height": 308},
+    },
+    (1280, 720): {
+        "panel": {"x": 116, "y": 240, "width": 760, "height": 396},
+        "orb": {"x": 900, "y": 240, "width": 264, "height": 396},
+    },
+}
 SYNTHETIC_CHILD = {"id": 1, "name": "测试幼儿", "nickname": "小芽", "avatar": None}
 SYNTHETIC_ACTIVE = {
     "conversation": {
@@ -22,6 +32,7 @@ SYNTHETIC_ACTIVE = {
         ],
     }
 }
+NEAR_LIMIT_CHILD_TEXT = "起" + ("鸭" * 1988) + "终"
 
 
 def _keyboard_focus(page, target, *, limit=80):
@@ -499,6 +510,155 @@ def test_chat_retryable_fault_reuses_persisted_request_id_once(
     assert page.get_by_role("log", name="对话记录").get_by_text(
         "我给小鸭添了清水。", exact=True
     ).count() == 1
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
+def test_near_limit_preserved_draft_scrolls_inside_its_fixed_row_without_overlap(
+    child_page,
+    exact_fixture_url,
+    viewport,
+):
+    page = child_page.page
+    page.set_viewport_size(viewport)
+    port = child_page.server.port
+    chat_bodies = []
+
+    child_page.fulfill_json("**/api/roster/today", [SYNTHETIC_CHILD])
+    child_page.fulfill_json("**/api/children/1/active-conversation", SYNTHETIC_ACTIVE)
+
+    def chat(route):
+        assert exact_fixture_url(route.request.url, port)
+        body = route.request.post_data_json
+        chat_bodies.append(body)
+        route.fulfill(
+            status=503,
+            content_type="application/json",
+            body=json.dumps({
+                "error": {
+                    "code": "UPSTREAM_UNAVAILABLE",
+                    "message": "raw near-limit draft secret",
+                    "retryable": True,
+                }
+            }),
+        )
+
+    page.route("**/api/chat", chat)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="开始", exact=True).click()
+    page.get_by_role("button", name="开始说话", exact=True).click()
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+    page.evaluate(
+        "text => window.__childTest.recognition.emitResult(0, text, true)",
+        NEAR_LIMIT_CHILD_TEXT,
+    )
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+
+    retry = page.get_by_role("button", name="重新发送", exact=True)
+    retry.wait_for()
+    log = page.get_by_role("log", name="对话记录")
+    preserved = log.locator("#pending-draft")
+    draft_body = preserved.locator(".child-message__text")
+    assert page.locator(".child-view").get_attribute("data-state") == "submission_failed"
+    assert log.count() == 1
+    assert preserved.count() == 1
+    assert draft_body.text_content() == NEAR_LIMIT_CHILD_TEXT
+    assert len(chat_bodies) == 1
+    assert chat_bodies[0]["text"] == NEAR_LIMIT_CHILD_TEXT
+    assert "raw near-limit draft secret" not in page.locator("body").inner_text()
+
+    retry.focus()
+    page.keyboard.press("Shift+Tab")
+    assert draft_body.evaluate("node => document.activeElement === node") is True
+
+    measured = page.evaluate(
+        """
+        () => {
+          const box = element => {
+            const rect = element.getBoundingClientRect();
+            return {
+              x: rect.x,
+              y: rect.y,
+              width: rect.width,
+              height: rect.height,
+              top: rect.top,
+              right: rect.right,
+              bottom: rect.bottom,
+              left: rect.left,
+            };
+          };
+          const draft = document.querySelector('#pending-draft');
+          const previousRow = draft.previousElementSibling;
+          const nextRow = draft.nextElementSibling;
+          const body = draft.querySelector('.child-message__text');
+          const speaker = draft.querySelector('.child-message__speaker');
+          const previousBody = previousRow.querySelector('.child-message__text');
+          const nextBody = nextRow.querySelector('.child-message__text');
+          const textNode = body.firstChild;
+          body.scrollTop = body.scrollHeight;
+          const lastCharacter = document.createRange();
+          lastCharacter.setStart(textNode, textNode.length - 1);
+          lastCharacter.setEnd(textNode, textNode.length);
+          const scrolling = document.scrollingElement;
+          return {
+            previousRow: box(previousRow),
+            row: box(draft),
+            nextRow: box(nextRow),
+            body: box(body),
+            speaker: box(speaker),
+            lastCharacter: box(lastCharacter),
+            bodyClientHeight: body.clientHeight,
+            bodyScrollHeight: body.scrollHeight,
+            bodyScrollTop: body.scrollTop,
+            bodyOverflowY: getComputedStyle(body).overflowY,
+            bodyText: body.textContent,
+            previousClientHeight: previousBody.clientHeight,
+            previousScrollHeight: previousBody.scrollHeight,
+            nextClientHeight: nextBody.clientHeight,
+            nextScrollHeight: nextBody.scrollHeight,
+            panel: box(document.querySelector('.child-conversation-panel')),
+            orb: box(document.querySelector('.child-pet-orb')),
+            scrollX: window.scrollX,
+            scrollY: window.scrollY,
+            documentWidth: scrolling.scrollWidth,
+            documentHeight: scrolling.scrollHeight,
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+          };
+        }
+        """
+    )
+    assert measured["bodyText"] == NEAR_LIMIT_CHILD_TEXT
+    for name in ("previousRow", "row", "nextRow"):
+        assert measured[name]["height"] == pytest.approx(116, abs=0.5)
+    assert measured["previousRow"]["bottom"] <= measured["row"]["top"]
+    assert measured["row"]["bottom"] <= measured["nextRow"]["top"]
+    assert measured["speaker"]["top"] >= measured["row"]["top"]
+    assert measured["speaker"]["bottom"] <= measured["body"]["top"]
+    assert measured["body"]["top"] >= measured["row"]["top"]
+    assert measured["body"]["bottom"] <= measured["row"]["bottom"]
+    assert measured["bodyOverflowY"] == "auto"
+    assert measured["bodyScrollHeight"] > measured["bodyClientHeight"]
+    assert measured["bodyScrollTop"] == pytest.approx(
+        measured["bodyScrollHeight"] - measured["bodyClientHeight"],
+        abs=1,
+    )
+    assert measured["lastCharacter"]["top"] >= measured["body"]["top"] - 1
+    assert measured["lastCharacter"]["bottom"] <= measured["body"]["bottom"] + 1
+    assert measured["previousScrollHeight"] <= measured["previousClientHeight"]
+    assert measured["nextScrollHeight"] <= measured["nextClientHeight"]
+    assert measured["scrollX"] == 0
+    assert measured["scrollY"] == 0
+    assert measured["documentWidth"] <= measured["viewportWidth"]
+    assert measured["documentHeight"] <= measured["viewportHeight"]
+
+    expected = STAGE_GEOMETRY[(viewport["width"], viewport["height"])]
+    for name in ("panel", "orb"):
+        for field, expected_value in expected[name].items():
+            assert measured[name][field] == pytest.approx(expected_value, abs=1), (
+                name,
+                field,
+                measured[name],
+            )
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
