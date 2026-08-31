@@ -411,15 +411,11 @@ export function createChildView(root, actions, dom) {
         })];
       case 'completed':
         return [conversationPanel(snapshot, { includeDraft: false, failureCopy: null })];
-      case 'recovery': {
-        const alert = element('p', { role: 'alert', class: 'child-view__error' });
-        appendText(alert, errorCopy(snapshot.error));
-        const nodes = [alert];
-        if (snapshot.messages.length > 0) {
-          nodes.push(conversationPanel(snapshot, { includeDraft: false, failureCopy: null }));
-        }
-        return nodes;
-      }
+      case 'recovery':
+        return [conversationPanel(snapshot, {
+          includeDraft: false,
+          failureCopy: errorCopy(snapshot.error),
+        })];
       default:
         throw new TypeError('Unknown child view state');
     }

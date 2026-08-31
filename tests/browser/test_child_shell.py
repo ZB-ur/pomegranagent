@@ -819,6 +819,89 @@ def test_ready_stage_matches_exact_panel_and_pet_orb_geometry_without_scroll(chi
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+@pytest.mark.parametrize("transcript_mode", ["empty", "populated"])
+def test_recovery_stage_keeps_exact_panel_and_pet_orb_geometry_without_scroll(
+    child_page,
+    viewport,
+    transcript_mode,
+):
+    prepare_child_page(
+        child_page,
+        viewport,
+        roster=[SYNTHETIC_CHILD],
+        active_by_child={1: SYNTHETIC_ACTIVE} if transcript_mode == "populated" else None,
+    )
+    page = child_page.page
+    if transcript_mode == "empty":
+        page.get_by_role("button", name="小芽", exact=True).click()
+    record = wait_for_active_ready(page)
+    record.click()
+    page.wait_for_function("window.__childTest.recognition.instances.length > 0")
+    page.evaluate("window.__childTest.recognition.emitError('not-allowed')")
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.wait_for_function(
+        "document.querySelector('.child-view')?.dataset.state === 'recovery'"
+    )
+
+    panel = page.locator(".child-conversation-panel")
+    log = page.get_by_role("log", name="对话记录")
+    alert = page.get_by_role("alert")
+    assert panel.count() == 1
+    assert log.count() == 1
+    assert alert.count() == 1
+    assert panel.locator('[role="log"]').count() == 1
+    assert log.locator('[role="alert"]').count() == 1
+    assert page.locator(".child-stage > [role=alert]").count() == 0
+    assert page.locator(".child-stage > *").count() == 2
+    assert page.locator(".child-view__error").count() == 0
+    assert alert.locator(".child-message__text").inner_text() == "麦克风没有开启，请老师帮忙"
+    transcript_rows = log.locator(".child-message--child, .child-message--diary")
+    assert transcript_rows.count() == (0 if transcript_mode == "empty" else 2)
+
+    measured = page.evaluate(
+        """
+        () => {
+          const rectFor = selector => {
+            const rect = document.querySelector(selector).getBoundingClientRect();
+            return { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+          };
+          const scrolling = document.scrollingElement;
+          return {
+            panel: rectFor('.child-conversation-panel'),
+            orb: rectFor('.child-pet-orb'),
+            scrollX: window.scrollX,
+            scrollY: window.scrollY,
+            documentWidth: scrolling.scrollWidth,
+            documentHeight: scrolling.scrollHeight,
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+          };
+        }
+        """
+    )
+    expected = READY_GEOMETRY[(viewport["width"], viewport["height"])]
+    assert measured["scrollX"] == 0
+    assert measured["scrollY"] == 0
+    assert measured["documentWidth"] <= measured["viewportWidth"]
+    assert measured["documentHeight"] <= measured["viewportHeight"]
+    for name in ("panel", "orb"):
+        for field, expected_value in expected[name].items():
+            assert measured[name][field] == pytest.approx(expected_value, abs=1), (
+                transcript_mode,
+                name,
+                field,
+                measured[name],
+            )
+
+    panel_rect = measured["panel"]
+    orb_rect = measured["orb"]
+    assert panel_rect["x"] + panel_rect["width"] <= orb_rect["x"]
+    assert orb_rect["x"] - (panel_rect["x"] + panel_rect["width"]) == pytest.approx(24, abs=1)
+    assert panel_rect["y"] == pytest.approx(orb_rect["y"], abs=1)
+    assert panel_rect["height"] == pytest.approx(orb_rect["height"], abs=1)
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_projection_is_reachable_without_horizontal_or_control_clipping(child_page, viewport):
     prepare_child_page(
         child_page,

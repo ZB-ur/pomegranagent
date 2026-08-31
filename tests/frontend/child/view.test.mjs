@@ -648,6 +648,54 @@ test('uses panel log semantics, aligned visible speakers, and an in-panel unconf
   assert.equal(fake.root.textContent.includes('分析完成'), false);
 });
 
+test('keeps empty and populated recovery errors inside one ConversationPanel log', async t => {
+  const recoveryCases = [
+    ['empty transcript', {
+      child: null,
+      messages: [],
+      conversationId: null,
+      revision: null,
+      lastMessageId: null,
+    }],
+    ['populated transcript', {}],
+  ];
+
+  for (const [label, overrides] of recoveryCases) {
+    await t.test(label, () => {
+      const fake = createFakeDOM();
+      const view = createChildView(fake.root, actions(), fake.dom);
+      view.render(snapshotFor('recovery', {
+        ...overrides,
+        error: {
+          code: 'MIC_PERMISSION_DENIED',
+          retryable: false,
+          message: `raw recovery detail: ${label}`,
+        },
+      }));
+
+      const stage = find(fake.root, node => node.getAttribute?.('class') === 'child-stage');
+      const panels = findAll(stage, node => node.getAttribute?.('class') === 'child-conversation-panel');
+      const logs = findAll(stage, node => node.getAttribute?.('role') === 'log');
+      const alerts = findAll(stage, node => node.getAttribute?.('role') === 'alert');
+
+      assert.equal(panels.length, 1, `${label} panel count`);
+      assert.equal(logs.length, 1, `${label} log count`);
+      assert.equal(alerts.length, 1, `${label} alert count`);
+      assert.equal(panels[0].contains(logs[0]), true, `${label} log must be inside panel`);
+      assert.equal(logs[0].contains(alerts[0]), true, `${label} error must be inside log`);
+      assert.equal(alerts[0].parentNode, logs[0], `${label} error must be a log row`);
+      assert.equal(alerts[0].getAttribute('class'), 'child-message child-message--failure');
+      assert.equal(alerts[0].textContent, '发送状态麦克风没有开启，请老师帮忙');
+      assert.equal(stage.children.filter(node => node.getAttribute?.('role') === 'alert').length, 0);
+      assert.deepEqual(
+        stage.children.map(node => node.getAttribute?.('class')),
+        ['child-conversation-panel', 'child-pet-orb'],
+      );
+      assert.equal(fake.root.textContent.includes(`raw recovery detail: ${label}`), false);
+    });
+  }
+});
+
 test('uses machine retry authorization and routes incomplete retry state to enabled teacher help', () => {
   const fake = createFakeDOM();
   const realHelp = createChildView(fake.root, actions(), fake.dom);
@@ -729,7 +777,8 @@ test('maps every approved error code to fixed local copy without rendering raw e
     const fake = createFakeDOM();
     const view = createChildView(fake.root, actions(), fake.dom);
     view.render(snapshotFor('recovery', { error: { code, retryable: false, message: `secret:${code}` } }));
-    assert.equal(find(fake.root, node => node.getAttribute?.('role') === 'alert').textContent, copy);
+    const alert = find(fake.root, node => node.getAttribute?.('role') === 'alert');
+    assert.equal(find(alert, node => node.getAttribute?.('class') === 'child-message__text').textContent, copy);
     assert.equal(fake.root.textContent.includes(`secret:${code}`), false);
   }
 });
