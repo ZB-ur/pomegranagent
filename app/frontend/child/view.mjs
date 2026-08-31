@@ -199,7 +199,10 @@ export function createChildView(root, actions, dom) {
     currentState = snapshot.value;
     currentSnapshot = snapshot;
     currentControls = controls;
-    if (teacherUI !== null) updateTeacherDialogFromSnapshot();
+    if (teacherUI !== null) {
+      hydrateTeacherTextFromSnapshot();
+      syncTeacherDialogControls();
+    }
     if (previousState !== snapshot.value) {
       const selector = focusTargetFor(snapshot, controls);
       scheduleFocus(epoch, snapshot.value, selector);
@@ -348,7 +351,7 @@ export function createChildView(root, actions, dom) {
     if (typeof copy !== 'string') throw new TypeError('teacher help copy must be a string');
     ensureTeacherDialog();
     teacherLockPending = false;
-    updateTeacherDialogFromSnapshot();
+    syncTeacherDialogControls();
     replaceChildren(teacherUI.error, createText(copy));
     return undefined;
   }
@@ -450,7 +453,8 @@ export function createChildView(root, actions, dom) {
       throw asTypeError(error);
     }
     append(root, dialog);
-    updateTeacherDialogFromSnapshot();
+    hydrateTeacherTextFromSnapshot();
+    syncTeacherDialogControls();
     return teacherUI;
   }
 
@@ -464,10 +468,22 @@ export function createChildView(root, actions, dom) {
     teacherMode = mode;
     setHidden(teacherUI.unlockForm, mode !== 'locked');
     setHidden(teacherUI.actions, mode !== 'unlocked');
-    updateTeacherDialogFromSnapshot();
+    syncTeacherDialogControls();
   }
 
-  function updateTeacherDialogFromSnapshot() {
+  function hydrateTeacherTextFromSnapshot() {
+    if (teacherUI === null || currentSnapshot === null) return;
+    if ((currentSnapshot.value === 'submitting' || currentSnapshot.value === 'submission_failed')
+      && currentSnapshot.draft !== null) {
+      try {
+        teacherUI.text.value = currentSnapshot.draft.text;
+      } catch (error) {
+        throw asTypeError(error);
+      }
+    }
+  }
+
+  function syncTeacherDialogControls() {
     if (teacherUI === null) return;
     setHidden(teacherUI.unlockForm, teacherMode !== 'locked');
     setHidden(teacherUI.actions, teacherMode !== 'unlocked');
@@ -481,14 +497,6 @@ export function createChildView(root, actions, dom) {
       && currentSnapshot.draft !== null
       && currentSnapshot.error?.retryable === true
       && currentControls.retryDisabled === false;
-    if ((currentSnapshot.value === 'submitting' || currentSnapshot.value === 'submission_failed')
-      && currentSnapshot.draft !== null) {
-      try {
-        teacherUI.text.value = currentSnapshot.draft.text;
-      } catch (error) {
-        throw asTypeError(error);
-      }
-    }
     replaceChildren(teacherUI.submitText, createText(retryDraft ? '重新发送这句话' : '发送补录'));
     setAttribute(teacherUI.submitText, 'data-teacher-action', retryDraft ? 'retry' : 'submit-text');
     setDisabled(teacherUI.submitText, teacherLockPending || (retryDraft
@@ -546,18 +554,18 @@ export function createChildView(root, actions, dom) {
     }
     teacherOpener = null;
     teacherLockPending = false;
-    updateTeacherDialogFromSnapshot();
+    syncTeacherDialogControls();
   }
 
   function requestTeacherLock(callback) {
     if (teacherLockPending || teacherUI === null) return;
     teacherLockPending = true;
-    updateTeacherDialogFromSnapshot();
+    syncTeacherDialogControls();
     try {
       callback();
     } catch {
       teacherLockPending = false;
-      updateTeacherDialogFromSnapshot();
+      syncTeacherDialogControls();
     }
   }
 

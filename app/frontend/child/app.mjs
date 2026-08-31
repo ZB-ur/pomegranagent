@@ -1223,6 +1223,22 @@ export function createChildApp(deps) {
         } catch {}
         return undefined;
       };
+      const settleConfirmedLock = (continuation, handoffSucceeded) => {
+        let locked = { ok: false };
+        try {
+          locked = commit({ type: 'TEACHER_LOCKED' }, { persist: false });
+        } catch {}
+        try {
+          callExternal(configured.view.values.closeTeacherHelp, configured.view.owner, [{
+            clearText: true,
+            restoreFocus,
+          }]);
+        } catch {
+          return rejectLock();
+        }
+        if (handoffSucceeded !== true || locked.ok !== true) return undefined;
+        return typeof continuation === 'function' ? continuation() : undefined;
+      };
       return startPassiveEffect(
         'teacher-lock',
         () => configured.api.values.teacherLock.call(configured.api.owner),
@@ -1230,23 +1246,14 @@ export function createChildApp(deps) {
           const status = readAuthStatus(value);
           if (status === null || status.authenticated !== false) return rejectLock();
           let continuation;
+          let handoffSucceeded = true;
           try {
             continuation = afterLock();
           } catch {
-            return rejectLock();
+            handoffSucceeded = false;
           }
-          if (continuation === null) return undefined;
-          const locked = commit({ type: 'TEACHER_LOCKED' }, { persist: false });
-          if (!locked.ok) return undefined;
-          try {
-            callExternal(configured.view.values.closeTeacherHelp, configured.view.owner, [{
-              clearText: true,
-              restoreFocus,
-            }]);
-          } catch {
-            return undefined;
-          }
-          return typeof continuation === 'function' ? continuation() : undefined;
+          if (continuation === null) handoffSucceeded = false;
+          return settleConfirmedLock(continuation, handoffSucceeded);
         },
         rejectLock,
         clearInput,

@@ -716,6 +716,36 @@ test('unlocked teacher close and cancel request one relock and wait for confirme
   view.closeTeacherHelp({ clearText: true, restoreFocus: true });
 });
 
+test('failed relock preserves an edited submission draft through pending and error updates', () => {
+  const calls = [];
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions({
+    onLockTeacherHelp: () => calls.push('lock'),
+  }), fake.dom);
+  view.render(snapshotFor('submission_failed', {
+    teacherUnlocked: true,
+    draft,
+    error: { code: 'NETWORK_ERROR', retryable: true, message: 'raw' },
+  }));
+  view.openTeacherHelp({ unlocked: true });
+  const dialog = byId(fake.root, 'teacher-help-dialog');
+  const text = byId(fake.root, 'teacher-text');
+  const edited = '老师修改后还没有保存的补录';
+  assert.equal(text.value, draft.text);
+  text.value = edited;
+
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-help-close') });
+  assert.deepEqual(calls, ['lock']);
+  assert.equal(dialog.open, true);
+  assert.equal(text.disabled, true);
+  assert.equal(text.value, edited);
+
+  view.showTeacherHelpError('老师帮助暂时不可用，请稍后重试');
+  assert.equal(dialog.open, true);
+  assert.equal(text.disabled, false);
+  assert.equal(text.value, edited);
+});
+
 test('locked teacher close and cancel stay local without requesting a relock', () => {
   const calls = [];
   const fake = createFakeDOM();

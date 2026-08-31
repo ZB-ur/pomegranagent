@@ -945,6 +945,100 @@ test('failed teacher relock keeps the handoff unlocked and allows a later retry'
   assert.equal(fixture.calls.view.filter(([kind]) => kind === 'closeTeacherHelp').length, 1);
 });
 
+test('confirmed relock closes without starting speech when handoff persistence fails', async () => {
+  const fixture = createFixture();
+  let failHandoffSave = false;
+  const save = fixture.deps.store.save;
+  fixture.deps.store.save = snapshot => {
+    if (failHandoffSave && snapshot.value === 'listening') throw new Error('private handoff save failure');
+    return save(snapshot);
+  };
+  fixture.deps.api.teacherLock = () => {
+    fixture.calls.api.push('teacherLock');
+    return Promise.resolve({ configured: true, authenticated: false });
+  };
+  const app = await enterAuthorizedRecovery(fixture);
+  failHandoffSave = true;
+  fixture.calls.api.length = 0;
+  fixture.calls.view.length = 0;
+  fixture.calls.store.length = 0;
+  fixture.calls.speechStart = 0;
+
+  assert.equal(await app.retryMicrophone(), undefined);
+  assert.deepEqual(fixture.calls.api, ['teacherLock']);
+  assert.equal(fixture.calls.speechStart, 0);
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.equal(app.getSnapshot().error.code, 'LOCAL_STORAGE_FAILED');
+  assert.equal(app.getSnapshot().teacherUnlocked, false);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind === 'closeTeacherHelp'), [
+    ['closeTeacherHelp', { clearText: true, restoreFocus: false }],
+  ]);
+  assert.equal(JSON.stringify(fixture.calls.view).includes('private handoff save failure'), false);
+});
+
+test('confirmed relock still closes without work when the locked render fails', async () => {
+  const fixture = createFixture();
+  let failLockedRender = false;
+  const render = fixture.deps.view.render;
+  fixture.deps.view.render = snapshot => {
+    const result = render(snapshot);
+    if (failLockedRender && snapshot.value === 'listening' && snapshot.teacherUnlocked === false) {
+      throw new Error('private locked render failure');
+    }
+    return result;
+  };
+  fixture.deps.api.teacherLock = () => {
+    fixture.calls.api.push('teacherLock');
+    return Promise.resolve({ configured: true, authenticated: false });
+  };
+  const app = await enterAuthorizedRecovery(fixture);
+  failLockedRender = true;
+  fixture.calls.api.length = 0;
+  fixture.calls.view.length = 0;
+  fixture.calls.speechStart = 0;
+
+  assert.equal(await app.retryMicrophone(), undefined);
+  assert.deepEqual(fixture.calls.api, ['teacherLock']);
+  assert.equal(fixture.calls.speechStart, 0);
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.equal(app.getSnapshot().error.code, 'VIEW_RENDER_FAILED');
+  assert.equal(app.getSnapshot().teacherUnlocked, false);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind === 'closeTeacherHelp'), [
+    ['closeTeacherHelp', { clearText: true, restoreFocus: false }],
+  ]);
+  assert.equal(JSON.stringify(fixture.calls.view).includes('private locked render failure'), false);
+});
+
+test('confirmed relock reports fixed error and starts no work when dialog close fails', async () => {
+  const fixture = createFixture();
+  let failClose = false;
+  const closeTeacherHelp = fixture.deps.view.closeTeacherHelp;
+  fixture.deps.view.closeTeacherHelp = options => {
+    const result = closeTeacherHelp(options);
+    if (failClose) throw new Error('private close failure');
+    return result;
+  };
+  fixture.deps.api.teacherLock = () => {
+    fixture.calls.api.push('teacherLock');
+    return Promise.resolve({ configured: true, authenticated: false });
+  };
+  const app = await enterAuthorizedRecovery(fixture);
+  failClose = true;
+  fixture.calls.api.length = 0;
+  fixture.calls.view.length = 0;
+  fixture.calls.speechStart = 0;
+
+  assert.equal(await app.retryMicrophone(), undefined);
+  assert.deepEqual(fixture.calls.api, ['teacherLock']);
+  assert.equal(fixture.calls.speechStart, 0);
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().teacherUnlocked, false);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind === 'showTeacherHelpError'), [
+    ['showTeacherHelpError', '老师帮助暂时不可用，请稍后重试'],
+  ]);
+  assert.equal(JSON.stringify(fixture.calls.view).includes('private close failure'), false);
+});
+
 test('teacher auth effects share epoch cancellation and cannot leak raw values or unhandled rejections', async () => {
   for (const action of ['status', 'auth', 'lock']) {
     const fixture = createFixture();
