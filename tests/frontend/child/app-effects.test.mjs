@@ -773,6 +773,178 @@ test('teacher lock is adapter-only, clears dialog state, restores focus, and lea
   assert.equal(stale.calls.view.filter(([kind]) => kind === 'destroy').length, 1);
 });
 
+test('microphone handoff waits for confirmed teacher relock before closing or starting speech', async () => {
+  const fixture = createFixture();
+  const pendingLock = deferred();
+  const order = [];
+  fixture.deps.api.teacherLock = () => {
+    fixture.calls.api.push('teacherLock');
+    order.push('teacherLock');
+    return pendingLock.promise;
+  };
+  const createSpeech = fixture.deps.createSpeech;
+  fixture.deps.createSpeech = options => {
+    const speech = createSpeech(options);
+    const start = speech.start;
+    speech.start = () => {
+      order.push('speech:start');
+      return start.call(speech);
+    };
+    return speech;
+  };
+  const render = fixture.deps.view.render;
+  fixture.deps.view.render = snapshot => {
+    order.push(`render:${snapshot.value}:${snapshot.teacherUnlocked}`);
+    return render(snapshot);
+  };
+  const closeTeacherHelp = fixture.deps.view.closeTeacherHelp;
+  fixture.deps.view.closeTeacherHelp = options => {
+    order.push('closeTeacherHelp');
+    return closeTeacherHelp(options);
+  };
+
+  const app = await enterAuthorizedRecovery(fixture);
+  fixture.calls.api.length = 0;
+  fixture.calls.view.length = 0;
+  fixture.calls.speechStart = 0;
+  order.length = 0;
+
+  const work = app.retryMicrophone();
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.api, ['teacherLock']);
+  assert.equal(fixture.calls.speechStart, 0);
+  assert.equal(fixture.calls.view.some(([kind]) => kind === 'closeTeacherHelp'), false);
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.equal(app.getSnapshot().teacherUnlocked, true);
+  assert.deepEqual(order, ['teacherLock']);
+
+  pendingLock.resolve({ configured: true, authenticated: false });
+  await work;
+  assert.equal(fixture.calls.speechStart, 1);
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().teacherUnlocked, false);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind === 'closeTeacherHelp'), [
+    ['closeTeacherHelp', { clearText: true, restoreFocus: false }],
+  ]);
+  assert.deepEqual(order, [
+    'teacherLock',
+    'render:listening:true',
+    'render:listening:false',
+    'closeTeacherHelp',
+    'speech:start',
+  ]);
+});
+
+test('completion handoff waits for confirmed teacher relock before closing or completing', async () => {
+  const fixture = createFixture();
+  const pendingLock = deferred();
+  const order = [];
+  let completeAttempt = 0;
+  fixture.deps.store.load = () => {
+    fixture.calls.store.push('load');
+    return pendingCompletionRecord();
+  };
+  fixture.deps.api.getActiveConversation = childId => {
+    fixture.calls.api.push(['active', childId]);
+    return Promise.resolve({ conversation: activeConversation() });
+  };
+  fixture.deps.api.complete = (conversationId, lastMessageId, signal) => {
+    fixture.calls.api.push(['complete', conversationId, lastMessageId, signal]);
+    completeAttempt += 1;
+    if (completeAttempt === 1) return Promise.reject({ code: 'NETWORK_ERROR', retryable: true });
+    order.push('complete');
+    return Promise.resolve(completeResult());
+  };
+  fixture.deps.api.teacherStatus = () => {
+    fixture.calls.api.push('teacherStatus');
+    return Promise.resolve({ configured: true, authenticated: true });
+  };
+  fixture.deps.api.teacherLock = () => {
+    fixture.calls.api.push('teacherLock');
+    order.push('teacherLock');
+    return pendingLock.promise;
+  };
+  const render = fixture.deps.view.render;
+  fixture.deps.view.render = snapshot => {
+    order.push(`render:${snapshot.value}:${snapshot.teacherUnlocked}`);
+    return render(snapshot);
+  };
+  const closeTeacherHelp = fixture.deps.view.closeTeacherHelp;
+  fixture.deps.view.closeTeacherHelp = options => {
+    order.push('closeTeacherHelp');
+    return closeTeacherHelp(options);
+  };
+
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  assert.equal(app.getSnapshot().value, 'recovery');
+  await app.openTeacherHelp();
+  fixture.calls.api.length = 0;
+  fixture.calls.view.length = 0;
+  fixture.calls.store.length = 0;
+  order.length = 0;
+
+  const work = app.endWithTeacher();
+  await flushMicrotasks();
+  assert.deepEqual(fixture.calls.api, ['teacherLock']);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'complete'), false);
+  assert.equal(fixture.calls.view.some(([kind]) => kind === 'closeTeacherHelp'), false);
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.equal(app.getSnapshot().teacherUnlocked, true);
+  assert.deepEqual(order, ['teacherLock']);
+
+  pendingLock.resolve({ configured: true, authenticated: false });
+  await work;
+  assert.equal(app.getSnapshot().value, 'completed');
+  assert.equal(app.getSnapshot().teacherUnlocked, false);
+  assert.equal(fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'complete').length, 1);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind === 'closeTeacherHelp'), [
+    ['closeTeacherHelp', { clearText: true, restoreFocus: false }],
+  ]);
+  assert.deepEqual(order, [
+    'teacherLock',
+    'render:saving_conversation:true',
+    'render:saving_conversation:false',
+    'closeTeacherHelp',
+    'complete',
+    'render:completed:false',
+  ]);
+});
+
+test('failed teacher relock keeps the handoff unlocked and allows a later retry', async () => {
+  const fixture = createFixture();
+  let lockWork = () => Promise.reject({ code: 'NETWORK_ERROR', message: 'private lock detail' });
+  fixture.deps.api.teacherLock = () => {
+    fixture.calls.api.push('teacherLock');
+    return lockWork();
+  };
+  const app = await enterAuthorizedRecovery(fixture);
+  fixture.calls.api.length = 0;
+  fixture.calls.view.length = 0;
+  fixture.calls.speechStart = 0;
+
+  assert.equal(await app.retryMicrophone(), undefined);
+  assert.equal(fixture.calls.speechStart, 0);
+  assert.equal(app.getSnapshot().value, 'recovery');
+  assert.equal(app.getSnapshot().teacherUnlocked, true);
+  assert.deepEqual(fixture.calls.api, ['teacherLock']);
+  assert.equal(fixture.calls.view.some(([kind]) => kind === 'closeTeacherHelp'), false);
+  assert.deepEqual(fixture.calls.view.filter(([kind]) => kind === 'showTeacherHelpError'), [
+    ['showTeacherHelpError', '老师帮助暂时不可用，请稍后重试'],
+  ]);
+  assert.equal(JSON.stringify(fixture.calls.view).includes('private lock detail'), false);
+
+  lockWork = () => Promise.resolve({ configured: true, authenticated: false });
+  fixture.calls.api.length = 0;
+  fixture.calls.view.length = 0;
+  assert.equal(await app.retryMicrophone(), undefined);
+  assert.equal(fixture.calls.speechStart, 1);
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().teacherUnlocked, false);
+  assert.deepEqual(fixture.calls.api, ['teacherLock']);
+  assert.equal(fixture.calls.view.filter(([kind]) => kind === 'closeTeacherHelp').length, 1);
+});
+
 test('teacher auth effects share epoch cancellation and cannot leak raw values or unhandled rejections', async () => {
   for (const action of ['status', 'auth', 'lock']) {
     const fixture = createFixture();
@@ -1192,14 +1364,22 @@ test('authorized recovery retry, microphone retry, and manual completion use onl
     };
     return speech;
   };
+  microphone.deps.api.teacherLock = () => {
+    microphone.calls.api.push('teacherLock');
+    return Promise.resolve({ configured: true, authenticated: false });
+  };
   const microphoneApp = await enterAuthorizedRecovery(microphone);
+  microphone.calls.api.length = 0;
   microphone.calls.view.length = 0;
   microphoneOrder.length = 0;
   assert.equal(await microphoneApp.retryMicrophone(), undefined);
   assert.equal(microphoneApp.getSnapshot().value, 'listening');
+  assert.equal(microphoneApp.getSnapshot().teacherUnlocked, false);
+  assert.deepEqual(microphone.calls.api, ['teacherLock']);
   assert.deepEqual(microphoneOrder, ['save:listening', 'speech:start']);
   assert.deepEqual(microphone.calls.view.filter(([kind]) => kind !== 'render'), [
     ['closeTeacherHelp', { clearText: true, restoreFocus: false }],
+    ['clearTeacherPin'],
   ]);
 
   const unsafeEnd = createFixture();
@@ -1230,6 +1410,10 @@ test('authorized recovery retry, microphone retry, and manual completion use onl
     completion.calls.api.push('teacherStatus');
     return Promise.resolve({ configured: true, authenticated: true });
   };
+  completion.deps.api.teacherLock = () => {
+    completion.calls.api.push('teacherLock');
+    return Promise.resolve({ configured: true, authenticated: false });
+  };
   const completionApp = createChildApp(completion.deps);
   await completionApp.initialize();
   assert.equal(completionApp.getSnapshot().value, 'recovery');
@@ -1239,6 +1423,8 @@ test('authorized recovery retry, microphone retry, and manual completion use onl
   completion.calls.view.length = 0;
   assert.equal(await completionApp.endWithTeacher(), undefined);
   assert.equal(completionApp.getSnapshot().value, 'completed');
+  assert.equal(completionApp.getSnapshot().teacherUnlocked, false);
+  assert.equal(completion.calls.api[0], 'teacherLock');
   const completeCalls = completion.calls.api.filter(call => Array.isArray(call) && call[0] === 'complete');
   assert.equal(completeCalls.length, 1);
   assert.equal(completeCalls[0][1], 9);
@@ -1246,6 +1432,7 @@ test('authorized recovery retry, microphone retry, and manual completion use onl
   assert.equal(typeof completeCalls[0][3], 'object');
   assert.deepEqual(completion.calls.view.filter(([kind]) => kind !== 'render'), [
     ['closeTeacherHelp', { clearText: true, restoreFocus: false }],
+    ['clearTeacherPin'],
   ]);
 });
 

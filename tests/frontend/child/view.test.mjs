@@ -665,6 +665,82 @@ test('teacher help remains visible and opens a labelled native dialog without un
   assert.equal(fake.focused(), byId(fake.root, 'teacher-text'));
 });
 
+test('unlocked teacher close and cancel request one relock and wait for confirmed close', () => {
+  const calls = [];
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions({
+    onLockTeacherHelp: () => calls.push('lock'),
+  }), fake.dom);
+  view.render(snapshotFor('recovery', {
+    teacherUnlocked: true,
+    error: { code: 'SPEECH_FAILED', retryable: true, message: 'raw' },
+  }));
+  view.openTeacherHelp({ unlocked: true });
+  const dialog = byId(fake.root, 'teacher-help-dialog');
+  const text = byId(fake.root, 'teacher-text');
+  text.value = '机密补录-4826';
+
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-help-close') });
+  assert.deepEqual(calls, ['lock']);
+  assert.equal(dialog.open, true);
+  for (const id of [
+    'teacher-pin',
+    'teacher-unlock-button',
+    'teacher-text',
+    'teacher-submit-text',
+    'teacher-save-draft',
+    'teacher-retry-recovery',
+    'teacher-retry-microphone',
+    'teacher-end-session',
+    'teacher-lock-button',
+    'teacher-help-close',
+  ]) {
+    assert.equal(byId(fake.root, id).disabled, true, `${id} must be disabled while relocking`);
+  }
+
+  dispatch(dialog, 'cancel');
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-lock-button') });
+  assert.deepEqual(calls, ['lock'], 'pending relock must be single-flight');
+  assert.equal(dialog.open, true);
+
+  view.showTeacherHelpError('老师帮助暂时不可用，请稍后重试');
+  assert.equal(dialog.open, true);
+  assert.equal(text.value, '机密补录-4826');
+  assert.equal(byId(fake.root, 'teacher-help-close').disabled, false);
+  assert.equal(text.disabled, false);
+
+  dispatch(dialog, 'cancel');
+  assert.deepEqual(calls, ['lock', 'lock']);
+  assert.equal(dialog.open, true);
+  view.showTeacherHelpError('老师帮助暂时不可用，请稍后重试');
+  view.closeTeacherHelp({ clearText: true, restoreFocus: true });
+});
+
+test('locked teacher close and cancel stay local without requesting a relock', () => {
+  const calls = [];
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions({
+    onLockTeacherHelp: () => calls.push('lock'),
+  }), fake.dom);
+  view.render(snapshotFor('recovery'));
+  const opener = byId(fake.root, 'teacher-help-button');
+
+  view.openTeacherHelp({ unlocked: false });
+  const dialog = byId(fake.root, 'teacher-help-dialog');
+  byId(fake.root, 'teacher-pin').value = '4826';
+  dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-help-close') });
+  assert.deepEqual(calls, []);
+  assert.equal(dialog.open, false);
+  assert.equal(byId(fake.root, 'teacher-pin').value, '');
+  assert.equal(fake.focused(), opener);
+
+  view.openTeacherHelp({ unlocked: false });
+  const cancel = dispatch(dialog, 'cancel');
+  assert.equal(cancel.defaultPrevented, true);
+  assert.deepEqual(calls, []);
+  assert.equal(dialog.open, false);
+});
+
 test('teacher dialog delegates PIN, text, draft, retry, microphone, end, and lock actions without storing input', () => {
   const calls = [];
   const fake = createFakeDOM();
@@ -700,8 +776,11 @@ test('teacher dialog delegates PIN, text, draft, retry, microphone, end, and loc
   dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-save-draft') });
   dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-retry-recovery') });
   dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-retry-microphone') });
+  view.showTeacherHelpError('');
   dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-end-session') });
+  view.showTeacherHelpError('');
   dispatch(dialog, 'click', { target: byId(fake.root, 'teacher-lock-button') });
+  view.showTeacherHelpError('');
   assert.deepEqual(calls, [
     ['text', '机密补录-4826'],
     ['draft', '机密补录-4826'],
@@ -774,6 +853,10 @@ test('teacher dialog traps Tab, restores focus, clears secrets, and leaves globa
   view.showTeacherHelpError('固定错误');
   const cancel = dispatch(dialog, 'cancel');
   assert.equal(cancel.defaultPrevented, true);
+  assert.deepEqual(calls, ['lock']);
+  assert.equal(dialog.open, true);
+  assert.equal(dialog.closeCount, 0);
+  view.closeTeacherHelp({ clearText: true, restoreFocus: true });
   assert.equal(dialog.open, false);
   assert.equal(dialog.closeCount, 1);
   assert.equal(text.value, '');
@@ -789,6 +872,10 @@ test('teacher dialog traps Tab, restores focus, clears secrets, and leaves globa
   }));
   assert.equal(fake.root.contains(staleOpener), false);
   dispatch(dialog, 'click', { target: close });
+  assert.deepEqual(calls, ['lock', 'lock']);
+  assert.equal(dialog.closeCount, 1);
+  assert.equal(dialog.open, true);
+  view.closeTeacherHelp({ clearText: true, restoreFocus: true });
   assert.equal(dialog.closeCount, 2);
   assert.equal(fake.focused(), byId(fake.root, 'teacher-help-button'));
 
@@ -796,7 +883,7 @@ test('teacher dialog traps Tab, restores focus, clears secrets, and leaves globa
   view.closeTeacherHelp({ clearText: true, restoreFocus: true });
   assert.equal(dialog.closeCount, 3);
   assert.equal(dialog.open, false);
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls, ['lock', 'lock']);
 
   view.openTeacherHelp({ unlocked: false });
   const closeCount = dialog.closeCount;
@@ -804,7 +891,7 @@ test('teacher dialog traps Tab, restores focus, clears secrets, and leaves globa
   assert.equal(dialog.closeCount, closeCount + 1);
   dispatch(dialog, 'cancel');
   dispatch(dialog, 'keydown', { key: 'Tab', target: byId(dialog, 'teacher-pin') });
-  assert.deepEqual(calls, []);
+  assert.deepEqual(calls, ['lock', 'lock']);
 });
 
 test('styles retain the standalone static accessibility and safety contract', () => {

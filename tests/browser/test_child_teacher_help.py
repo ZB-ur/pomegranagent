@@ -113,7 +113,7 @@ def route_teacher_auth(harness, exact_fixture_url, state=None):
         path = route.request.url.split("/api/auth/", 1)[1].split("?", 1)[0]
         body = route.request.post_data_json if route.request.post_data else None
         state["calls"].append({"path": path, "body": body})
-        if path in {"setup", "unlock"} and state["failure"] is not None:
+        if path in {"setup", "unlock", "lock"} and state["failure"] is not None:
             code, raw_message = state["failure"]
             route.fulfill(
                 status=401,
@@ -234,6 +234,49 @@ def test_teacher_relock_calls_auth_lock_clears_dialog_fields_and_restores_help_f
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_unlocked_teacher_close_waits_for_auth_lock_before_dismissing(
+    child_page, exact_fixture_url, viewport
+):
+    route_child_api(child_page, exact_fixture_url)
+    auth = route_teacher_auth(child_page, exact_fixture_url, {
+        "configured": True, "authenticated": True, "calls": [], "failure": None,
+    })
+    enter_ready_recovery(child_page, viewport)
+    page = child_page.page
+    open_teacher_dialog(page)
+    page.locator("#teacher-text").fill("机密补录-4826")
+    page.locator("#teacher-help-close").click()
+    page.wait_for_function("!document.querySelector('#teacher-help-dialog')?.open")
+    assert [call["path"] for call in auth["calls"]] == ["status", "lock"]
+    assert page.locator("#teacher-text").input_value() == ""
+    assert page.evaluate("document.activeElement?.id") == "teacher-help-button"
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_failed_teacher_close_relock_keeps_dialog_text_and_retry_controls(
+    child_page, exact_fixture_url, viewport
+):
+    route_child_api(child_page, exact_fixture_url)
+    auth = route_teacher_auth(child_page, exact_fixture_url, {
+        "configured": True, "authenticated": True, "calls": [], "failure": None,
+    })
+    enter_ready_recovery(child_page, viewport)
+    page = child_page.page
+    open_teacher_dialog(page)
+    copy = "机密补录-4826"
+    page.locator("#teacher-text").fill(copy)
+    auth["failure"] = ("LOCK_FAILED", "raw-private-lock-detail-4826")
+    page.locator("#teacher-help-close").click()
+    assert page.locator("#teacher-help-dialog").evaluate("dialog => dialog.open") is True
+    page.get_by_text("老师帮助暂时不可用，请稍后重试", exact=True).wait_for()
+    assert [call["path"] for call in auth["calls"]] == ["status", "lock"]
+    assert page.locator("#teacher-text").input_value() == copy
+    assert page.locator("#teacher-help-close").is_enabled()
+    assert page.locator("#teacher-text").is_enabled()
+    assert "raw-private-lock-detail" not in page.locator("body").inner_text()
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_text_failure_retains_text_and_retry_reuses_one_request_id(
     child_page, exact_fixture_url, viewport
 ):
@@ -264,7 +307,7 @@ def test_teacher_recovery_actions_preserve_boundaries_and_complete_only_when_saf
     child_page, exact_fixture_url, viewport
 ):
     api = route_child_api(child_page, exact_fixture_url)
-    route_teacher_auth(child_page, exact_fixture_url, {
+    auth = route_teacher_auth(child_page, exact_fixture_url, {
         "configured": True, "authenticated": True, "calls": [], "failure": None,
     })
     enter_ready_recovery(child_page, viewport)
@@ -289,9 +332,16 @@ def test_teacher_recovery_actions_preserve_boundaries_and_complete_only_when_saf
     page.evaluate("window.__childTest.recognition.emitError('not-allowed')")
     page.wait_for_function("document.querySelector('.child-view')?.dataset.state === 'recovery'")
     open_teacher_dialog(page)
+    assert page.locator("#teacher-pin").is_visible()
+    page.locator("#teacher-pin").fill("4826")
+    page.locator("#teacher-unlock-button").click()
+    page.locator("#teacher-actions").wait_for(state="visible")
     page.locator("#teacher-end-session").click()
     page.get_by_role("button", name="换下一位小朋友", exact=True).wait_for()
     assert api["complete_bodies"] == [{"expected_last_message_id": 102}]
+    assert [call["path"] for call in auth["calls"]] == [
+        "status", "lock", "status", "status", "unlock", "lock",
+    ]
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -299,7 +349,7 @@ def test_teacher_dialog_traps_focus_blocks_global_space_and_restores_on_escape(
     child_page, exact_fixture_url, viewport
 ):
     route_child_api(child_page, exact_fixture_url)
-    route_teacher_auth(child_page, exact_fixture_url, {
+    auth = route_teacher_auth(child_page, exact_fixture_url, {
         "configured": True, "authenticated": True, "calls": [], "failure": None,
     })
     enter_ready_recovery(child_page, viewport)
@@ -315,4 +365,6 @@ def test_teacher_dialog_traps_focus_blocks_global_space_and_restores_on_escape(
     page.keyboard.press("Space")
     assert page.evaluate("window.__childTest.recognition.starts") == starts
     page.keyboard.press("Escape")
+    page.wait_for_function("!document.querySelector('#teacher-help-dialog')?.open")
+    assert [call["path"] for call in auth["calls"]] == ["status", "lock"]
     assert page.evaluate("document.activeElement?.id") == "teacher-help-button"

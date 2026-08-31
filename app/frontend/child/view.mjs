@@ -77,6 +77,7 @@ export function createChildView(root, actions, dom) {
   let teacherUI = null;
   let teacherMode = 'locked';
   let teacherOpener = null;
+  let teacherLockPending = false;
 
   function createElement(tag) {
     const element = invoke(domAPI.createElement, dom, [tag], 'createElement');
@@ -346,6 +347,8 @@ export function createChildView(root, actions, dom) {
     assertAlive();
     if (typeof copy !== 'string') throw new TypeError('teacher help copy must be a string');
     ensureTeacherDialog();
+    teacherLockPending = false;
+    updateTeacherDialogFromSnapshot();
     replaceChildren(teacherUI.error, createText(copy));
     return undefined;
   }
@@ -403,7 +406,7 @@ export function createChildView(root, actions, dom) {
     });
     const unlockButton = element('button', { id: 'teacher-unlock-button', type: 'submit' });
     appendText(unlockButton, '解锁老师帮助');
-    append(unlockForm, pinLabel, pin, error, unlockButton);
+    append(unlockForm, pinLabel, pin, unlockButton);
 
     const actions = element('section', { id: 'teacher-actions', 'aria-label': '老师帮助操作' });
     const textLabel = element('label', { for: 'teacher-text' });
@@ -418,7 +421,7 @@ export function createChildView(root, actions, dom) {
     const lock = teacherButton('teacher-lock-button', '立即锁定', 'lock');
     append(actions, textLabel, text, actionsNote, submitText, saveDraft, retryRecovery, retryMicrophone, endSession, lock);
     const close = teacherButton('teacher-help-close', '返回孩子页面', 'close');
-    append(dialog, title, description, unlockForm, actions, close);
+    append(dialog, title, description, error, unlockForm, actions, close);
     teacherUI = {
       dialog,
       title,
@@ -468,6 +471,11 @@ export function createChildView(root, actions, dom) {
     if (teacherUI === null) return;
     setHidden(teacherUI.unlockForm, teacherMode !== 'locked');
     setHidden(teacherUI.actions, teacherMode !== 'unlocked');
+    setDisabled(teacherUI.pin, teacherLockPending);
+    setDisabled(teacherUI.unlockButton, teacherLockPending);
+    setDisabled(teacherUI.text, teacherLockPending);
+    setDisabled(teacherUI.lock, teacherLockPending);
+    setDisabled(teacherUI.close, teacherLockPending);
     if (currentSnapshot === null || currentControls === null) return;
     const retryDraft = currentSnapshot.value === 'submission_failed'
       && currentSnapshot.draft !== null
@@ -483,13 +491,13 @@ export function createChildView(root, actions, dom) {
     }
     replaceChildren(teacherUI.submitText, createText(retryDraft ? '重新发送这句话' : '发送补录'));
     setAttribute(teacherUI.submitText, 'data-teacher-action', retryDraft ? 'retry' : 'submit-text');
-    setDisabled(teacherUI.submitText, retryDraft
+    setDisabled(teacherUI.submitText, teacherLockPending || (retryDraft
       ? currentControls.retryDisabled
-      : currentControls.teacherTextDisabled);
-    setDisabled(teacherUI.saveDraft, currentControls.teacherDraftDisabled);
-    setDisabled(teacherUI.retryRecovery, currentControls.teacherRecoveryRetryDisabled);
-    setDisabled(teacherUI.retryMicrophone, currentControls.teacherMicrophoneRetryDisabled);
-    setDisabled(teacherUI.endSession, currentControls.teacherCompleteDisabled);
+      : currentControls.teacherTextDisabled));
+    setDisabled(teacherUI.saveDraft, teacherLockPending || currentControls.teacherDraftDisabled);
+    setDisabled(teacherUI.retryRecovery, teacherLockPending || currentControls.teacherRecoveryRetryDisabled);
+    setDisabled(teacherUI.retryMicrophone, teacherLockPending || currentControls.teacherMicrophoneRetryDisabled);
+    setDisabled(teacherUI.endSession, teacherLockPending || currentControls.teacherCompleteDisabled);
     const safe = currentControls.teacherTextDisabled === false
       || currentControls.teacherRecoveryRetryDisabled === false
       || currentControls.teacherMicrophoneRetryDisabled === false
@@ -537,10 +545,24 @@ export function createChildView(root, actions, dom) {
       }
     }
     teacherOpener = null;
+    teacherLockPending = false;
+    updateTeacherDialogFromSnapshot();
+  }
+
+  function requestTeacherLock(callback) {
+    if (teacherLockPending || teacherUI === null) return;
+    teacherLockPending = true;
+    updateTeacherDialogFromSnapshot();
+    try {
+      callback();
+    } catch {
+      teacherLockPending = false;
+      updateTeacherDialogFromSnapshot();
+    }
   }
 
   function handleTeacherSubmit(event) {
-    if (destroyed || teacherUI === null || teacherMode !== 'locked') return;
+    if (destroyed || teacherUI === null || teacherMode !== 'locked' || teacherLockPending) return;
     try {
       if (event !== null && typeof event === 'object' && hasCallable(event, 'preventDefault')) event.preventDefault();
       actionCallbacks.onSubmitTeacherPin(teacherUI.pin.value);
@@ -562,12 +584,18 @@ export function createChildView(root, actions, dom) {
         return;
       }
       if (token === 'close') {
-        closeTeacherDialog(true, true);
+        if (teacherMode === 'locked') closeTeacherDialog(true, true);
+        else requestTeacherLock(actionCallbacks.onLockTeacherHelp);
         return;
       }
       if (!Object.hasOwn(TEACHER_TOKEN_TO_KEY, token)) return;
       const callback = actionCallbacks[TEACHER_TOKEN_TO_KEY[token]];
-      if (typeof callback === 'function') callback(token === 'save-draft' ? teacherUI.text.value : undefined);
+      if (typeof callback !== 'function') return;
+      if (token === 'retry-microphone' || token === 'end-session' || token === 'lock') {
+        requestTeacherLock(callback);
+        return;
+      }
+      callback(token === 'save-draft' ? teacherUI.text.value : undefined);
     } catch {}
   }
 
@@ -575,7 +603,8 @@ export function createChildView(root, actions, dom) {
     if (destroyed || teacherUI === null) return;
     try {
       if (event !== null && typeof event === 'object' && hasCallable(event, 'preventDefault')) event.preventDefault();
-      closeTeacherDialog(true, true);
+      if (teacherMode === 'locked') closeTeacherDialog(true, true);
+      else requestTeacherLock(actionCallbacks.onLockTeacherHelp);
     } catch {}
   }
 
@@ -659,6 +688,7 @@ export function createChildView(root, actions, dom) {
     currentControls = null;
     currentActionables = new Set();
     currentFocusTargets = new Map();
+    teacherLockPending = false;
     try {
       root.removeEventListener('click', handleClick);
       if (teacherUI !== null) {

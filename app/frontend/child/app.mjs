@@ -1199,56 +1199,66 @@ export function createChildApp(deps) {
           return undefined;
         }
         if (!controlEnabled(controls, control)) return undefined;
-        const committed = commit({ type: eventType });
-        if (!committed.ok) return undefined;
-        try {
-          callExternal(configured.view.values.closeTeacherHelp, configured.view.owner, [{
-            clearText: true,
-            restoreFocus: false,
-          }]);
-        } catch {}
-        return startWork();
+        return performTeacherRelock({
+          restoreFocus: false,
+          afterLock: () => {
+            const committed = commit({ type: eventType });
+            return committed.ok ? startWork : null;
+          },
+        });
       }, () => undefined).then(() => undefined, () => undefined);
     }
 
-    function lockTeacherHelp() {
-      if (publicNoop()) return Promise.resolve(undefined);
-      const invocationEpoch = appEpoch;
+    function performTeacherRelock({ restoreFocus, afterLock }) {
       const clearInput = () => {
         try {
           callExternal(configured.view.values.clearTeacherPin, configured.view.owner);
         } catch {}
       };
-      const rejectLock = error => {
+      const rejectLock = () => {
         try {
           callExternal(configured.view.values.showTeacherHelpError, configured.view.owner, [
-            teacherAuthErrorCopy(error),
+            '老师帮助暂时不可用，请稍后重试',
           ]);
         } catch {}
         return undefined;
       };
+      return startPassiveEffect(
+        'teacher-lock',
+        () => configured.api.values.teacherLock.call(configured.api.owner),
+        value => {
+          const status = readAuthStatus(value);
+          if (status === null || status.authenticated !== false) return rejectLock();
+          let continuation;
+          try {
+            continuation = afterLock();
+          } catch {
+            return rejectLock();
+          }
+          if (continuation === null) return undefined;
+          const locked = commit({ type: 'TEACHER_LOCKED' }, { persist: false });
+          if (!locked.ok) return undefined;
+          try {
+            callExternal(configured.view.values.closeTeacherHelp, configured.view.owner, [{
+              clearText: true,
+              restoreFocus,
+            }]);
+          } catch {
+            return undefined;
+          }
+          return typeof continuation === 'function' ? continuation() : undefined;
+        },
+        rejectLock,
+        clearInput,
+      );
+    }
+
+    function lockTeacherHelp() {
+      if (publicNoop()) return Promise.resolve(undefined);
+      const invocationEpoch = appEpoch;
       return initialize().then(() => {
         if (destroyed || lifecycle !== 'ready' || appEpoch !== invocationEpoch) return undefined;
-        return startPassiveEffect(
-          'teacher-lock',
-          () => configured.api.values.teacherLock.call(configured.api.owner),
-          value => {
-            const status = readAuthStatus(value);
-            if (status === null || status.authenticated !== false) {
-              return rejectLock(Object.freeze({ code: 'AUTH_STATE_CHANGED', retryable: false }));
-            }
-            commit({ type: 'TEACHER_LOCKED' }, { persist: false });
-            try {
-              callExternal(configured.view.values.closeTeacherHelp, configured.view.owner, [{
-                clearText: true,
-                restoreFocus: true,
-              }]);
-            } catch {}
-            return undefined;
-          },
-          rejectLock,
-          clearInput,
-        );
+        return performTeacherRelock({ restoreFocus: true, afterLock: () => undefined });
       }, () => undefined).then(() => undefined, () => undefined);
     }
 
