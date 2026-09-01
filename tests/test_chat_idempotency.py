@@ -135,12 +135,21 @@ def test_new_chat_uses_one_business_clock_sample_for_date_and_utc_timestamps(
     db_session.expire_all()
     conversation = db_session.get(models.Conversation, response.json()["conversation_id"])
     record = db_session.get(models.ChatRequestRecord, response.json()["request_id"])
+    messages = db_session.scalars(
+        select(models.Message)
+        .where(models.Message.conversation_id == response.json()["conversation_id"])
+        .order_by(models.Message.id)
+    ).all()
     assert conversation is not None
     assert record is not None
     assert conversation.date == "2026-09-02"
     assert conversation.started_at == datetime(2026, 9, 1, 16, 0)
     assert record.created_at == datetime(2026, 9, 1, 16, 0)
     assert record.updated_at == datetime(2026, 9, 1, 16, 0)
+    assert [(message.role, message.created_at) for message in messages] == [
+        ("child", datetime(2026, 9, 1, 16, 0)),
+        ("diary", datetime(2026, 9, 1, 16, 0)),
+    ]
     assert Clock.calls == 1
 
 

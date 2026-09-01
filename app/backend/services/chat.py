@@ -512,11 +512,13 @@ def commit_chat_success(
         conversation_id=conversation.id,
         role="child",
         text=payload.text,
+        created_at=now,
     )
     diary_message = models.Message(
         conversation_id=conversation.id,
         role="diary",
         text=reply,
+        created_at=now,
     )
     db.add_all([child_message, diary_message])
     db.flush()
