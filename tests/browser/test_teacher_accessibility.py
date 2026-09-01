@@ -75,8 +75,8 @@ A11Y_ROUTE_CASES = [
     pytest.param(
         {
             "fragment": "review",
-            "navigation": "值日审阅",
-            "heading": "值日审阅",
+            "navigation": "日记审阅",
+            "heading": "日记审阅",
             "settled": "暂无待审阅会话",
             "viewport": {"width": 1024, "height": 768},
         },
@@ -118,7 +118,7 @@ A11Y_ROUTE_CASES = [
             ("children", "幼儿管理", "幼儿管理", "暂无幼儿"),
             ("ducks", "小鸭管理", "小鸭管理", "暂无小鸭"),
             ("roster", "值日排班", "值日排班", "暂无排班"),
-            ("review", "值日审阅", "值日审阅", "暂无待审阅会话"),
+            ("review", "日记审阅", "日记审阅", "暂无待审阅会话"),
             (
                 "growth",
                 "能力成长曲线",
@@ -592,7 +592,7 @@ def test_teacher_complete_review_flow_is_page_keyboard_only(teacher_browser, cas
         assert review_navigation.get_attribute("aria-current") is None
         page.keyboard.press("Enter")
 
-        review_heading = page.locator("main#main h1", has_text="值日审阅")
+        review_heading = page.locator("main#main h1", has_text="日记审阅")
         review_heading.wait_for()
         _assert_active_outline(review_heading)
         assert page.locator('#nav button[aria-current="page"]').count() == 1
@@ -608,26 +608,11 @@ def test_teacher_complete_review_flow_is_page_keyboard_only(teacher_browser, cas
         form.wait_for()
         review_heading.wait_for()
         _assert_active_outline(review_heading)
-        reason = page.get_by_label("表达能力评分理由", exact=True)
-        _walk_keyboard_to(page, reason)
-        page.keyboard.press("ControlOrMeta+A")
-        page.keyboard.type("键盘保留理由")
-        assert reason.input_value() == "键盘保留理由"
-
-        score_four = page.get_by_role("radio", name="表达能力 4 分", exact=True)
-        _walk_keyboard_to(page, score_four, key="Shift+Tab")
-        assert score_four.is_checked()
-        page.keyboard.press("ArrowRight")
-        score_five = page.get_by_role("radio", name="表达能力 5 分", exact=True)
-        assert score_five.is_checked()
-        assert reason.input_value() == "键盘保留理由"
-
-        draft = page.get_by_role("button", name="保存草稿", exact=True)
-        _walk_keyboard_to(page, draft)
         status = page.locator(
             '.review-save-status[role="status"][aria-live="polite"]'
         )
         assert status.count() == 1
+        assert status.inner_text() == "全部修改已保存"
         status.evaluate(
             """node => {
               const records = [];
@@ -654,6 +639,24 @@ def test_teacher_complete_review_flow_is_page_keyboard_only(teacher_browser, cas
             }"""
         )
         observer_installed = True
+        reason = page.get_by_label("表达能力评分理由", exact=True)
+        _walk_keyboard_to(page, reason)
+        page.keyboard.press("ControlOrMeta+A")
+        page.keyboard.type("键盘保留理由")
+        assert reason.input_value() == "键盘保留理由"
+
+        score_four = page.get_by_role("radio", name="表达能力 4 分", exact=True)
+        _walk_keyboard_to(page, score_four, key="Shift+Tab")
+        assert score_four.is_checked()
+        page.keyboard.press("ArrowRight")
+        score_five = page.get_by_role("radio", name="表达能力 5 分", exact=True)
+        assert score_five.is_checked()
+        assert reason.input_value() == "键盘保留理由"
+
+        draft = page.get_by_role("button", name="保存草稿", exact=True)
+        _walk_keyboard_to(page, draft)
+        assert status.count() == 1
+        assert status.inner_text() == "有未保存的修改"
         page.keyboard.press("Enter")
         page.get_by_text("全部修改已保存", exact=True).wait_for()
         status_state = page.evaluate(
@@ -668,10 +671,12 @@ def test_teacher_complete_review_flow_is_page_keyboard_only(teacher_browser, cas
             "same": True,
             "connected": True,
             "records": [
+                {"text": "有未保存的修改", "connected": True},
                 {"text": "正在保存…", "connected": True},
                 {"text": "全部修改已保存", "connected": True},
             ],
             "writes": [
+                {"text": "有未保存的修改", "connected": True},
                 {"text": "正在保存…", "connected": True},
                 {"text": "全部修改已保存", "connected": True},
             ],
@@ -743,7 +748,7 @@ def test_teacher_dirty_review_dialog_is_named_keyboard_operable_and_restores_foc
     _assert_active_outline(unlock)
     page.keyboard.press("Enter")
 
-    review_heading = page.locator("main#main h1", has_text="值日审阅")
+    review_heading = page.locator("main#main h1")
     review_heading.wait_for()
     _assert_active_outline(review_heading)
     form = page.locator("[data-review-form]")
@@ -761,9 +766,29 @@ def test_teacher_dirty_review_dialog_is_named_keyboard_operable_and_restores_foc
     dialog = page.get_by_role("dialog", name="有未保存的修改", exact=True)
     dialog.wait_for()
     assert dialog.count() == 1
+    assert "teacher-dirty-dialog" in (dialog.get_attribute("class") or "").split()
+    description_id = dialog.get_attribute("aria-describedby")
+    assert description_id
+    description = dialog.locator(f"#{description_id}")
+    assert description.count() == 1
+    assert "teacher-dirty-dialog-description" in (
+        description.get_attribute("class") or ""
+    ).split()
+    assert "未保存" in description.inner_text()
+    assert "放弃" in description.inner_text()
+    actions = dialog.locator(".teacher-dirty-dialog-actions")
+    assert actions.count() == 1
     continue_button = dialog.get_by_role(
         "button", name="继续编辑", exact=True
     )
+    discard_button = dialog.get_by_role(
+        "button", name="放弃修改", exact=True
+    )
+    assert actions.locator("button").count() == 2
+    for control in (continue_button, discard_button):
+        box = control.bounding_box()
+        assert box is not None
+        assert box["width"] >= 44 and box["height"] >= 44
     _assert_active_outline(continue_button)
 
     page.keyboard.press("Escape")

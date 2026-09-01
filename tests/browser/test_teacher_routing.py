@@ -83,6 +83,33 @@ def test_teacher_hash_click_back_forward_active_and_focus(teacher_browser, viewp
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_review_navigation_uses_the_journal_review_label_and_focuses_its_heading(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher(teacher_browser, viewport)
+
+    def pending(route):
+        assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
+        route.fulfill(status=200, content_type="application/json", body="[]")
+
+    page.route(
+        f"{teacher_browser.server.base_url}/api/conversations?queue=pending",
+        pending,
+    )
+    setup_teacher(page)
+
+    review_navigation = page.locator('#nav button[data-v="review"]')
+    assert review_navigation.inner_text() == "日记审阅"
+    review_navigation.click()
+    page.get_by_role("heading", name="日记审阅", exact=True).wait_for()
+
+    assert urlsplit(page.url).fragment == "review"
+    assert active_route(page) == "日记审阅"
+    assert_focused_heading(page, "日记审阅")
+    assert "值日审阅" not in page.locator("body").inner_text()
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 @pytest.mark.parametrize("fragment", ["", "#bogus"], ids=["empty", "unknown"])
 def test_teacher_canonicalizes_empty_and_unknown_hash_only_after_authentication(teacher_browser, viewport, fragment):
     _context, page = open_teacher(teacher_browser, viewport, fragment)

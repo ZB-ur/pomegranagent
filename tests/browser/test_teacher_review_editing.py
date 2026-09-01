@@ -62,10 +62,16 @@ def test_teacher_review_editor_saves_the_complete_normalized_draft_and_refreshes
     unlock_review(page)
     form = page.locator("[data-review-form]")
     form.wait_for()
+    status = form.locator(
+        '.review-save-status[role="status"][aria-live="polite"]'
+    )
+    assert status.inner_text() == "全部修改已保存"
+    status.evaluate("node => { window.__p4ReviewSaveStatus = node; }")
     reason_error_id = page.get_by_label("表达能力评分理由", exact=True).get_attribute("aria-describedby")
     assert reason_error_id
     assert page.locator(f"#{reason_error_id}").count() == 1
     action_bar = form.locator(".review-actions")
+    assert action_bar.locator(".review-save-status").count() == 1
     assert action_bar.evaluate("node => getComputedStyle(node).position") == "sticky"
     assert page.get_by_role("button", name="保存草稿", exact=True).bounding_box()["height"] >= 44
     assert page.get_by_role("button", name="保存并确认", exact=True).bounding_box()["height"] >= 44
@@ -77,12 +83,22 @@ def test_teacher_review_editor_saves_the_complete_normalized_draft_and_refreshes
     page.get_by_label("教育洞察", exact=True).fill("  会主动记录小鸭进食。  ")
     page.get_by_role("radio", name="表达能力 5 分", exact=True).check()
     page.get_by_label("表达能力评分理由", exact=True).fill("  ")
+    page.wait_for_function(
+        "() => document.querySelector('.review-save-status')?.textContent === '有未保存的修改'"
+    )
+    assert page.evaluate(
+        "document.querySelector('.review-save-status') === window.__p4ReviewSaveStatus"
+    )
     page.get_by_role("button", name="保存草稿", exact=True).click()
     page.get_by_role("status").get_by_text("全部修改已保存", exact=True).wait_for()
 
     assert len(saves) == 1
     assert queue_calls == 2
-    assert page.get_by_text("revision 3", exact=True).count() == 1
+    assert page.get_by_text("草稿 · 第 3 版", exact=True).count() == 1
+    assert "revision" not in page.locator("[data-review-panel='detail']").inner_text().lower()
+    assert page.evaluate(
+        "document.querySelector('.review-save-status') === window.__p4ReviewSaveStatus"
+    )
     assert page.get_by_label("饲养记录 1 内容", exact=True).input_value() == "观察了小黄吃菜叶"
     assert page.get_by_role("radio", name="表达能力 5 分", exact=True).is_checked()
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
@@ -130,7 +146,8 @@ def test_teacher_review_complete_confirm_uses_confirm_action_and_removes_the_pen
     assert len(saves) == 1
     assert queue_calls == 2
     assert page.get_by_text("暂无待审阅会话", exact=True).count() == 1
-    assert page.get_by_text("revision 3", exact=True).count() == 1
+    assert page.get_by_text("已确认 · 第 3 版", exact=True).count() == 1
+    assert "revision" not in page.locator("[data-review-panel='detail']").inner_text().lower()
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -362,6 +379,9 @@ def test_teacher_review_save_failures_keep_exact_values_dirty_and_never_refresh(
     page.get_by_text(expected_copy, exact=True).wait_for()
 
     assert insight.input_value() == typed
+    status = page.locator(".review-save-status")
+    assert status.inner_text() == "保存失败，修改仍未保存"
+    assert status.get_attribute("data-save-state") == "failure"
     assert page.get_by_role("button", name="保存草稿", exact=True).is_enabled()
     assert page.get_by_role("button", name="保存并确认", exact=True).is_enabled()
     assert queue_calls == 1
@@ -372,7 +392,7 @@ def test_teacher_review_save_failures_keep_exact_values_dirty_and_never_refresh(
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_teacher_review_fulfilled_undefined_is_fixed_failure_dirty_unlocked_and_never_refreshes(
+def test_teacher_review_direct_dom_edit_before_undefined_put_failure_stays_dirty_and_guarded(
     teacher_browser, viewport
 ):
     _context, page = open_teacher(teacher_browser, viewport)
@@ -412,7 +432,8 @@ def test_teacher_review_fulfilled_undefined_is_fixed_failure_dirty_unlocked_and_
     """)
     insight = page.get_by_label("教育洞察", exact=True)
     typed = "  未确认的原样输入  "
-    insight.fill(typed)
+    insight.evaluate("(node, value) => { node.value = value; }", typed)
+    assert page.locator(".review-save-status").inner_text() == "全部修改已保存"
     page.get_by_role("button", name="保存草稿", exact=True).click()
     page.get_by_text("保存失败，请稍后重试。", exact=True).wait_for(timeout=1_000)
 
@@ -420,9 +441,19 @@ def test_teacher_review_fulfilled_undefined_is_fixed_failure_dirty_unlocked_and_
     assert queue_calls == 1
     assert insight.input_value() == typed
     assert form.locator("input, textarea, select, button").evaluate_all("nodes => nodes.every(node => !node.disabled)")
+    status = page.locator(".review-save-status")
+    assert status.inner_text() == "保存失败，修改仍未保存"
+    assert status.get_attribute("data-save-state") == "failure"
     assert page.get_by_text("全部修改已保存", exact=True).count() == 0
     assert page.get_by_text("审阅已确认", exact=True).count() == 0
     assert page.evaluate("() => { const event = new Event('beforeunload', {cancelable: true}); window.dispatchEvent(event); return event.defaultPrevented; }")
+    page.evaluate("location.hash = '#today'")
+    dialog = page.get_by_role("dialog", name="有未保存的修改", exact=True)
+    dialog.wait_for()
+    dialog.get_by_role("button", name="继续编辑", exact=True).click()
+    page.wait_for_timeout(50)
+    assert page.evaluate("location.hash") == "#review?conversation_id=42"
+    assert insight.input_value() == typed
     assert page_errors == []
 
 
@@ -447,10 +478,22 @@ def test_teacher_review_delayed_save_is_single_flight_and_disables_every_editor_
     unlock_review(page)
     form = page.locator("[data-review-form]")
     form.wait_for()
+    status = form.locator(".review-save-status")
+    assert status.inner_text() == "全部修改已保存"
+    status.evaluate("node => { window.__p4DelayedSaveStatus = node; }")
     draft = page.get_by_role("button", name="保存草稿", exact=True)
     confirm = page.get_by_role("button", name="保存并确认", exact=True)
+    page.get_by_label("教育洞察", exact=True).fill("等待保存的修改")
+    page.wait_for_function(
+        "() => document.querySelector('.review-save-status')?.textContent === '有未保存的修改'"
+    )
     draft.click()
-    page.wait_for_timeout(50)
+    page.wait_for_function(
+        "() => document.querySelector('.review-save-status')?.textContent === '正在保存…'"
+    )
+    assert page.evaluate(
+        "document.querySelector('.review-save-status') === window.__p4DelayedSaveStatus"
+    )
     confirm.evaluate("node => node.click()")
     draft.evaluate("node => node.click()")
     assert len(held) == 1
@@ -466,6 +509,9 @@ def test_teacher_review_delayed_save_is_single_flight_and_disables_every_editor_
     }
     fulfill_json(held.pop(), acknowledgement)
     page.get_by_text("全部修改已保存", exact=True).wait_for()
+    assert page.evaluate(
+        "document.querySelector('.review-save-status') === window.__p4DelayedSaveStatus"
+    )
     assert queue_calls == 2
 
 

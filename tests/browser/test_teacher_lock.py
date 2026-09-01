@@ -89,7 +89,7 @@ def test_teacher_locked_bootstrap_makes_only_runtime_and_auth_requests(teacher_b
     assert "/version.json" in paths
     assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert page.get_by_role("heading", name="幼儿管理", exact=True).count() == 0
-    assert page.get_by_role("heading", name="值日审阅", exact=True).count() == 0
+    assert page.get_by_role("heading", name="日记审阅", exact=True).count() == 0
     assert all(button.is_disabled() for button in page.locator("#nav button").all())
 
 
@@ -370,7 +370,7 @@ def test_teacher_auth_status_failure_is_safe_and_makes_zero_business_requests(te
     assert all(button.is_disabled() for button in page.locator("#nav button").all())
     assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert page.get_by_role("heading", name="幼儿管理", exact=True).count() == 0
-    assert page.get_by_role("heading", name="值日审阅", exact=True).count() == 0
+    assert page.get_by_role("heading", name="日记审阅", exact=True).count() == 0
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)

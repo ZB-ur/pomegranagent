@@ -15,7 +15,7 @@ const teacherRouteManifest = [
   { route: 'children', title: '幼儿管理' },
   { route: 'ducks', title: '小鸭管理' },
   { route: 'roster', title: '值日排班' },
-  { route: 'review', title: '值日审阅' },
+  { route: 'review', title: '日记审阅' },
   { route: 'growth', title: '能力成长曲线' },
   { route: 'search', title: '明细检索' },
 ];

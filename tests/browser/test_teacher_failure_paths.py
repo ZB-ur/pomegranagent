@@ -609,7 +609,7 @@ def test_teacher_representative_read_validators_cover_missing_transport_faults(
             f"{teacher_browser.server.base_url}/api/conversations?queue=pending",
             review_queue_handler,
         )
-        _unlock_teacher(page, "值日审阅")
+        _unlock_teacher(page, "日记审阅")
         queue_panel = page.locator('[data-review-panel="queue"]')
         detail_panel = page.locator('[data-review-panel="detail"]')
         queue_panel.get_by_text("加载失败，请重试。", exact=True).wait_for()
@@ -739,7 +739,7 @@ def test_teacher_review_put_timeout_preserves_dirty_values_and_restores_focus(
             f"{teacher_browser.server.base_url}/teacher.html#review?conversation_id=42",
             wait_until="domcontentloaded",
         )
-        _unlock_teacher(page, "值日审阅")
+        _unlock_teacher(page, "日记审阅")
         form = page.locator("[data-review-form]")
         form.wait_for()
         insight = page.get_by_label("教育洞察", exact=True)
@@ -780,6 +780,9 @@ def test_teacher_review_put_timeout_preserves_dirty_values_and_restores_focus(
             "hasExportedRethrow": False,
         }
         assert insight.input_value() == typed
+        status = page.locator(".review-save-status")
+        assert status.inner_text() == "保存失败，修改仍未保存"
+        assert status.get_attribute("data-save-state") == "failure"
         assert form.locator("input, textarea, select, button").evaluate_all(
             "nodes => nodes.every(node => !node.disabled)"
         )

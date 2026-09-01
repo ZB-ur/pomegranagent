@@ -149,6 +149,10 @@ class FakeNode {
   click() {
     for (const listener of [...(this.listeners.get('click') || [])]) listener({ preventDefault() {} });
   }
+
+  dispatch(type, event = {}) {
+    for (const listener of [...(this.listeners.get(type) || [])]) listener({ target: this, ...event });
+  }
 }
 
 function renderDocument() {
@@ -224,11 +228,14 @@ function pendingQueue(id = 42, selectedChild = child) {
   }];
 }
 
-function createDeferredReviewRoute(dirtyGuard = fakeDirtyGuard()) {
+function createDeferredReviewRoute(
+  dirtyGuard = fakeDirtyGuard(),
+  createAbortController = () => new FakeController(),
+) {
   const calls = [];
   const route = createReviewRoute({
     document: renderDocument(),
-    createAbortController: () => new FakeController(),
+    createAbortController,
     dirtyGuard,
     request(path, options) {
       const next = deferred();
@@ -240,18 +247,60 @@ function createDeferredReviewRoute(dirtyGuard = fakeDirtyGuard()) {
 }
 
 function trackedDirtyGuard() {
-  const calls = { activate: 0, update: 0, markClean: 0, release: 0 };
-  return {
-    calls,
-    guard: {
-      activate() { calls.activate += 1; },
-      update() { calls.update += 1; },
-      markClean() { calls.markClean += 1; },
-      isDirty() { return false; },
-      confirmLeave() { return Promise.resolve(true); },
-      release() { calls.release += 1; },
+  const calls = {
+    activate: 0,
+    update: 0,
+    updates: [],
+    markClean: 0,
+    confirmLeave: 0,
+    release: 0,
+  };
+  let active = false;
+  let cleanSnapshot = null;
+  let currentSnapshot = null;
+  const guard = {
+    activate(snapshot) {
+      calls.activate += 1;
+      active = true;
+      currentSnapshot = snapshot;
+    },
+    update(snapshot) {
+      calls.update += 1;
+      calls.updates.push(snapshot);
+      currentSnapshot = snapshot;
+    },
+    markClean(snapshot) {
+      calls.markClean += 1;
+      active = true;
+      cleanSnapshot = snapshot;
+      currentSnapshot = snapshot;
+    },
+    isDirty() { return active && currentSnapshot !== cleanSnapshot; },
+    confirmLeave() {
+      calls.confirmLeave += 1;
+      return Promise.resolve(!guard.isDirty());
+    },
+    release() {
+      calls.release += 1;
+      active = false;
+      cleanSnapshot = null;
+      currentSnapshot = null;
     },
   };
+  return {
+    calls,
+    guard,
+  };
+}
+
+function recordTextWrites(node) {
+  const writes = [];
+  const replaceChildren = node.replaceChildren.bind(node);
+  node.replaceChildren = (...children) => {
+    writes.push(children.map(nodeText).join(''));
+    replaceChildren(...children);
+  };
+  return writes;
 }
 
 function reviewContext(root, conversationId, current = () => true) {
@@ -399,6 +448,139 @@ test('Review maps only known analysis statuses to local presentation copy', () =
   assert.equal(analysisStatusLabel('succeeded'), '分析已完成');
   assert.equal(analysisStatusLabel('failed'), '分析失败');
   assert.throws(() => analysisStatusLabel('unknown'), TypeError);
+});
+
+test('Review renders the localized journal-review queue count, selection, and status tags', async () => {
+  const { route, calls } = createDeferredReviewRoute();
+  const root = new FakeNode('main');
+  route(reviewContext(root, 42));
+  await settle();
+
+  const secondChild = { id: 8, name: '小风', nickname: '风风', avatar: null };
+  const secondRow = pendingQueue(43, secondChild)[0];
+  secondRow.review_status = 'pending';
+  calls.find(call => call.path === '/api/conversations?queue=pending').next.resolve([
+    ...pendingQueue(),
+    secondRow,
+  ]);
+  calls.find(call => call.path === '/api/conversations/42').next.resolve(detail());
+  await settle();
+
+  assert.equal(nodeText(findNode(root, node => node.tagName === 'H1')), '日记审阅');
+  assert.doesNotMatch(nodeText(root), /值日审阅/);
+  const queueHeading = findNode(root, node => node.tagName === 'H2' && /待审阅队列/.test(nodeText(node)));
+  assert.ok(queueHeading);
+  assert.match(nodeText(queueHeading), /2/);
+
+  const selectedLink = findNode(root, node => node.tagName === 'A'
+    && node.getAttribute('href') === '#review?conversation_id=42');
+  assert.ok(selectedLink);
+  assert.equal(selectedLink.getAttribute('aria-current'), 'page');
+  const selectedRow = findNode(root, node => node.tagName === 'ARTICLE'
+    && findNode(node, candidate => candidate === selectedLink));
+  assert.ok(selectedRow);
+  assert.match(nodeText(selectedRow), /当前/);
+  assert.ok(findNode(selectedRow, node => nodeText(node) === '草稿'));
+
+  const pendingRow = findNode(root, node => node.tagName === 'ARTICLE'
+    && findNode(node, candidate => candidate.getAttribute?.('href') === '#review?conversation_id=43'));
+  assert.ok(pendingRow);
+  assert.ok(findNode(pendingRow, node => nodeText(node) === '待审阅'));
+});
+
+test('Review presents a localized revision, read-only overall, and initial clean status', async () => {
+  const { route, calls } = createDeferredReviewRoute();
+  const root = new FakeNode('main');
+  route(reviewContext(root, 42));
+  await settle();
+  calls.find(call => call.path === '/api/conversations?queue=pending').next.resolve(pendingQueue());
+  calls.find(call => call.path === '/api/conversations/42').next.resolve(detail());
+  await settle();
+
+  const rendered = nodeText(root);
+  assert.match(rendered, /草稿 · 第 2 版/);
+  assert.doesNotMatch(rendered, /\brevision\b/i);
+  assert.match(rendered, /综合评分\s*[：:]?\s*4(?:\.0)?/);
+  assert.ok(findNode(root, node => node.getAttribute?.('class')?.split(/\s+/).includes('review-save-status')
+    && nodeText(node) === '全部修改已保存'));
+});
+
+test('Review announces one clean-to-dirty transition across repeated input and change events', async () => {
+  const dirtyGuard = trackedDirtyGuard();
+  const { route, calls } = createDeferredReviewRoute(dirtyGuard.guard);
+  const root = new FakeNode('main');
+  route(reviewContext(root, 42));
+  await settle();
+  calls.find(call => call.path === '/api/conversations?queue=pending').next.resolve(pendingQueue());
+  calls.find(call => call.path === '/api/conversations/42').next.resolve(detail());
+  await settle();
+
+  const form = findNode(root, node => node.getAttribute?.('data-review-form') === '');
+  const status = findNode(form, node => node.getAttribute?.('class')?.split(/\s+/).includes('review-save-status'));
+  const insight = findNode(form, node => node.getAttribute?.('id') === 'review-insight');
+  assert.ok(form && status && insight);
+  const writes = recordTextWrites(status);
+  const updatesBefore = dirtyGuard.calls.update;
+
+  insight.value = '第一次输入';
+  form.dispatch('input', { target: insight });
+  insight.value = '第二次输入';
+  form.dispatch('input', { target: insight });
+  form.dispatch('change', { target: insight });
+
+  assert.deepEqual(writes, ['有未保存的修改']);
+  assert.equal(status.getAttribute('data-save-state'), 'dirty');
+  assert.equal(dirtyGuard.calls.update, updatesBefore + 3);
+  assert.equal(dirtyGuard.guard.isDirty(), true);
+});
+
+test('Review score choices do not repeat the dimension in their visible labels', async () => {
+  const { route, calls } = createDeferredReviewRoute();
+  const root = new FakeNode('main');
+  route(reviewContext(root, 42));
+  await settle();
+  calls.find(call => call.path === '/api/conversations?queue=pending').next.resolve(pendingQueue());
+  calls.find(call => call.path === '/api/conversations/42').next.resolve(detail());
+  await settle();
+
+  const radios = findNode(root, node => node.getAttribute?.('class')?.split(/\s+/).includes('review-score-radios'));
+  assert.ok(radios);
+  assert.doesNotMatch(nodeText(radios), /表达能力/);
+  const labels = findNodes(radios, node => node.tagName === 'LABEL');
+  assert.deepEqual(labels.map(nodeText), [
+    '1 分',
+    '2 分',
+    '3 分',
+    '4 分',
+    '5 分',
+  ]);
+});
+
+test('Review separates the approved insight emotion score feeding and overall card order', async () => {
+  const { route, calls } = createDeferredReviewRoute();
+  const root = new FakeNode('main');
+  route(reviewContext(root, 42));
+  await settle();
+  calls.find(call => call.path === '/api/conversations?queue=pending').next.resolve(pendingQueue());
+  calls.find(call => call.path === '/api/conversations/42').next.resolve(detail());
+  await settle();
+
+  const content = findNode(root, node => node.getAttribute?.('class') === 'review-editor-content');
+  assert.ok(content);
+  const cards = content.children.filter(node => node?.getAttribute?.('class')
+    ?.split(/\s+/).includes('review-section-card'));
+  const cardHeadings = cards.map(card => {
+    const heading = findNode(card, node => ['H2', 'H3'].includes(node.tagName));
+    return nodeText(heading);
+  });
+  assert.deepEqual(cardHeadings, [
+    '教育洞察',
+    '情绪判断',
+    '能力评分',
+    '饲养记录',
+    '综合评分（只读）',
+  ]);
+  assert.equal(findNode(cards[2], node => ['H2', 'H3'].includes(node.tagName)).tagName, 'H3');
 });
 
 test('Review validates the exact succeeded detail union and preserves blank draft reasons', () => {
@@ -582,6 +764,7 @@ test('Review PUT uses the frozen options and a cleanup-late ignored-signal ackno
   assert.deepEqual(Object.keys(mutation.options.body).sort(), ['action', 'emotion', 'feeding_logs', 'insight', 'revision', 'scores']);
   const cleanCallsBeforeLate = dirtyGuard.calls.markClean;
   const queueCallsBeforeLate = calls.filter(call => call.path === '/api/conversations?queue=pending').length;
+  const textBeforeCleanup = nodeText(root);
   instance.cleanup();
   mutation.next.resolve({
     saved: true,
@@ -594,10 +777,10 @@ test('Review PUT uses the frozen options and a cleanup-late ignored-signal ackno
   await settle();
   assert.equal(dirtyGuard.calls.markClean, cleanCallsBeforeLate);
   assert.equal(calls.filter(call => call.path === '/api/conversations?queue=pending').length, queueCallsBeforeLate);
-  assert.doesNotMatch(nodeText(root), /全部修改已保存/);
+  assert.equal(nodeText(root), textBeforeCleanup);
 });
 
-test('Review treats an owning fulfilled undefined PUT as fixed failure and restores the exact dirty form', async () => {
+test('Review snapshots a direct DOM edit before PUT and keeps the guard dirty after owning failure', async () => {
   const dirtyGuard = trackedDirtyGuard();
   const { route, calls } = createDeferredReviewRoute(dirtyGuard.guard);
   const root = new FakeNode('main');
@@ -607,23 +790,107 @@ test('Review treats an owning fulfilled undefined PUT as fixed failure and resto
   calls.find(call => call.path === '/api/conversations/42').next.resolve(detail());
   await settle();
   const insight = findNode(root, candidate => candidate.getAttribute?.('id') === 'review-insight');
+  const status = findNode(root, candidate => candidate.getAttribute?.('class')?.split(/\s+/).includes('review-save-status'));
+  assert.ok(insight && status);
+  const writes = recordTextWrites(status);
   insight.value = '  未确认的原样输入  ';
   const cleanCallsBefore = dirtyGuard.calls.markClean;
+  const updatesBefore = dirtyGuard.calls.update;
   nodeWithText(root, 'BUTTON', '保存草稿').click();
   await settle();
   const mutation = calls.find(call => call.path === '/api/conversations/42/review');
+  assert.ok(mutation);
+  assert.deepEqual(writes, ['有未保存的修改', '正在保存…']);
+  assert.equal(dirtyGuard.calls.update, updatesBefore + 1);
+  assert.equal(JSON.parse(dirtyGuard.calls.updates.at(-1)).insight, '未确认的原样输入');
+  assert.equal(dirtyGuard.guard.isDirty(), true);
   const queueCallsBefore = calls.filter(call => call.path === '/api/conversations?queue=pending').length;
   mutation.next.resolve(undefined);
   await settle();
   assert.match(nodeText(root), /保存失败，请稍后重试。/);
-  assert.doesNotMatch(nodeText(root), /全部修改已保存|审阅已确认/);
+  assert.equal(nodeText(status), '保存失败，修改仍未保存');
+  assert.equal(status.getAttribute('data-save-state'), 'failure');
+  assert.deepEqual(writes, [
+    '有未保存的修改',
+    '正在保存…',
+    '保存失败，修改仍未保存',
+  ]);
+  assert.equal(dirtyGuard.guard.isDirty(), true);
+  assert.equal(await dirtyGuard.guard.confirmLeave(), false);
+  assert.doesNotMatch(nodeText(root), /审阅已确认/);
   assert.equal(insight.value, '  未确认的原样输入  ');
   const form = findNode(root, candidate => candidate.getAttribute?.('data-review-form') === '');
   const controls = findNodes(form, candidate => ['INPUT', 'TEXTAREA', 'SELECT', 'BUTTON'].includes(candidate.tagName));
   assert.ok(controls.length > 0);
   assert.equal(controls.every(control => control.disabled === false), true);
   assert.equal(dirtyGuard.calls.markClean, cleanCallsBefore);
+  assert.equal(dirtyGuard.calls.update, updatesBefore + 1);
   assert.equal(calls.filter(call => call.path === '/api/conversations?queue=pending').length, queueCallsBefore);
+});
+
+test('Review reports owning draft and confirm failures without corrupting clean guard truth', async () => {
+  const cases = [
+    ['保存草稿', '保存失败，请稍后重试'],
+    ['保存并确认', '确认失败，请稍后重试'],
+  ];
+  for (const [buttonCopy, expectedStatus] of cases) {
+    const dirtyGuard = trackedDirtyGuard();
+    const { route, calls } = createDeferredReviewRoute(dirtyGuard.guard);
+    const root = new FakeNode('main');
+    route(reviewContext(root, 42));
+    await settle();
+    calls.find(call => call.path === '/api/conversations?queue=pending').next.resolve(pendingQueue());
+    calls.find(call => call.path === '/api/conversations/42').next.resolve(detail());
+    await settle();
+
+    const updatesBefore = dirtyGuard.calls.update;
+    nodeWithText(root, 'BUTTON', buttonCopy).click();
+    await settle();
+    const mutation = calls.find(call => call.path === '/api/conversations/42/review');
+    assert.ok(mutation, buttonCopy);
+    assert.equal(dirtyGuard.calls.update, updatesBefore + 1, buttonCopy);
+    assert.equal(dirtyGuard.guard.isDirty(), false, buttonCopy);
+    mutation.next.reject(new Error('fixed owning failure'));
+    await settle();
+
+    const status = findNode(root, node => node.getAttribute?.('class')?.split(/\s+/).includes('review-save-status'));
+    assert.ok(status, buttonCopy);
+    assert.equal(status.getAttribute('data-save-state'), 'failure', buttonCopy);
+    assert.equal(nodeText(status), expectedStatus, buttonCopy);
+    assert.equal(dirtyGuard.guard.isDirty(), false, buttonCopy);
+    assert.equal(await dirtyGuard.guard.confirmLeave(), true, buttonCopy);
+  }
+});
+
+test('Review reports controller-construction failure while preserving a direct edit as dirty', async () => {
+  const dirtyGuard = trackedDirtyGuard();
+  let controllerCalls = 0;
+  const createAbortController = () => {
+    controllerCalls += 1;
+    if (controllerCalls === 4) throw new Error('mutation controller unavailable');
+    return new FakeController();
+  };
+  const { route, calls } = createDeferredReviewRoute(dirtyGuard.guard, createAbortController);
+  const root = new FakeNode('main');
+  route(reviewContext(root, 42));
+  await settle();
+  calls.find(call => call.path === '/api/conversations?queue=pending').next.resolve(pendingQueue());
+  calls.find(call => call.path === '/api/conversations/42').next.resolve(detail());
+  await settle();
+
+  const insight = findNode(root, node => node.getAttribute?.('id') === 'review-insight');
+  insight.value = '无事件的 controller 失败修改';
+  nodeWithText(root, 'BUTTON', '保存草稿').click();
+  await settle();
+
+  const status = findNode(root, node => node.getAttribute?.('class')?.split(/\s+/).includes('review-save-status'));
+  assert.ok(status);
+  assert.equal(controllerCalls, 4);
+  assert.equal(calls.filter(call => call.path === '/api/conversations/42/review').length, 0);
+  assert.equal(status.getAttribute('data-save-state'), 'failure');
+  assert.equal(nodeText(status), '保存失败，修改仍未保存');
+  assert.equal(dirtyGuard.guard.isDirty(), true);
+  assert.equal(await dirtyGuard.guard.confirmLeave(), false);
 });
 
 async function startDeferredMutation({ dirtyGuard = fakeDirtyGuard(), conversationId = 42 } = {}) {
@@ -680,7 +947,7 @@ test('Review detail reload owns the workspace before an ignored-signal old PUT r
     await settle();
     assert.equal(nodeText(root), newOwnerText, outcome);
     assert.equal(controlValue(root, 'review-insight'), `新 owner ${outcome}`, outcome);
-    assert.doesNotMatch(nodeText(root), /过期保存|保存失败|全部修改已保存/, outcome);
+    assert.doesNotMatch(nodeText(root), /过期保存|保存失败/, outcome);
     assert.equal(calls.filter(call => call.path === '/api/conversations?queue=pending').length, queueCount, outcome);
   }
 });
@@ -712,7 +979,7 @@ test('Review route A to B gives the new owner immunity from ignored-signal old P
     await settle();
     assert.equal(nodeText(root), newOwnerText, outcome);
     assert.equal(controlValue(root, 'review-insight'), `B owner ${outcome}`, outcome);
-    assert.doesNotMatch(nodeText(root), /过期 A 保存|保存失败|全部修改已保存/, outcome);
+    assert.doesNotMatch(nodeText(root), /过期 A 保存|保存失败/, outcome);
     assert.equal(calls.filter(call => call.path === '/api/conversations?queue=pending').length, queueCount, outcome);
   }
 });

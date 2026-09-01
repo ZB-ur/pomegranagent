@@ -108,7 +108,7 @@ function textOf(node) {
 
 function findNode(root, tagName, text) {
   if (!root || typeof root === 'string') return null;
-  if (root.tagName === tagName && textOf(root) === text) return root;
+  if (root.tagName === tagName && (text === null || textOf(root) === text)) return root;
   for (const child of root.children || []) {
     const found = findNode(child, tagName, text);
     if (found) return found;
@@ -181,10 +181,24 @@ test('Dirty guard shares one dialog promise and handles continue discard Escape 
   const dialog = document.body.children[0];
   assert.equal(dialog.tagName, 'DIALOG');
   assert.equal(dialog.open, true);
+  assert.match(dialog.getAttribute('class') || '', /(^|\s)teacher-dirty-dialog(\s|$)/);
+  const descriptionId = dialog.getAttribute('aria-describedby');
+  assert.ok(descriptionId);
+  const description = findNode(dialog, 'P', null);
+  assert.ok(description);
+  assert.equal(description.getAttribute('id'), descriptionId);
+  assert.match(description.getAttribute('class') || '', /(^|\s)teacher-dirty-dialog-description(\s|$)/);
+  assert.match(textOf(description), /未保存/);
+  assert.match(textOf(description), /放弃/);
+  const actions = dialog.children.find(child => child?.getAttribute?.('class')
+    ?.split(/\s+/).includes('teacher-dirty-dialog-actions'));
+  assert.ok(actions);
   assert.match(textOf(dialog), /有未保存的修改/);
   const continueButton = findNode(dialog, 'BUTTON', '继续编辑');
   const discardButton = findNode(dialog, 'BUTTON', '放弃修改');
   assert.ok(continueButton && discardButton);
+  assert.ok(actions.children.includes(continueButton));
+  assert.ok(actions.children.includes(discardButton));
   continueButton.click();
   assert.equal(await first, false);
   assert.equal(guard.isDirty(), true);

@@ -300,19 +300,49 @@ function formatCompletedTime(value) {
   }).format(new Date(value));
 }
 
+function reviewStatusLabel(status) {
+  return {
+    pending: '待审阅',
+    draft: '草稿',
+    confirmed: '已确认',
+    unavailable: '暂不可用',
+  }[status];
+}
+
+function reviewRevisionLabel(detail) {
+  return `${reviewStatusLabel(detail.review_status)} · 第 ${detail.revision} 版`;
+}
+
+function formatOverallScore(value) {
+  return String(value);
+}
+
 function queueRow(state, row) {
   const name = displayName(row.child);
+  const selected = row.id === state.selectedId;
   const link = createElement(state.document, 'a', {
     class: 'review-queue-link', href: `#review?conversation_id=${row.id}`,
     'aria-label': `审阅${name}的会话 #${row.id}`,
   }, name);
+  if (selected) link.setAttribute('aria-current', 'page');
+  const badges = createElement(state.document, 'div', { class: 'review-row-badges' });
+  if (selected) {
+    badges.append(createElement(state.document, 'span', { class: 'review-row-current' }, '当前'));
+  }
+  badges.append(createElement(state.document, 'span', {
+    class: `review-row-status review-row-status-${row.review_status}`,
+  }, reviewStatusLabel(row.review_status)));
+  const heading = createElement(state.document, 'div', { class: 'review-row-heading' }, link, badges);
   const metadata = createElement(state.document, 'p', { class: 'review-row-metadata muted' },
-    `完成于 ${formatCompletedTime(row.completed_at)} · 会话 #${row.id} · ${row.round} 轮 · ${row.review_status === 'draft' ? '草稿' : '待审阅'}`);
-  return createElement(state.document, 'article', { class: 'review-queue-row' }, link, metadata);
+    `完成于 ${formatCompletedTime(row.completed_at)} · 会话 #${row.id} · ${row.round} 轮`);
+  return createElement(state.document, 'article', {
+    class: `review-queue-row${selected ? ' is-current' : ''}`,
+  }, heading, metadata);
 }
 
 function renderQueueLoading(state) {
   state.queuePanel.setAttribute('aria-busy', 'true');
+  state.queueHeading.replaceChildren('待审阅队列');
   state.queueStatus.replaceChildren('正在加载待审阅队列…');
   state.queueBody.replaceChildren(queueReloadButton(state));
 }
@@ -333,6 +363,7 @@ function renderQueueError(state) {
 
 function renderQueueRows(state, rows) {
   state.queuePanel.removeAttribute('aria-busy');
+  state.queueHeading.replaceChildren(`待审阅队列（${rows.length}）`);
   if (!rows.length) {
     state.queueStatus.replaceChildren('暂无待审阅会话');
     state.queueBody.replaceChildren(createElement(state.document, 'a', {
@@ -379,7 +410,7 @@ function renderDetailError(state, selectedId) {
 }
 
 function transcriptView(state, messages) {
-  const transcript = createElement(state.document, 'section', { class: 'review-transcript' },
+  const transcript = createElement(state.document, 'section', { class: 'review-transcript review-section-card' },
     createElement(state.document, 'h2', null, '原始对话'));
   const log = createElement(state.document, 'div', { class: 'review-message-log', role: 'log' });
   for (const message of messages) {
@@ -411,7 +442,7 @@ function resultsView(state, review) {
 }
 
 function unavailableResultsView(state, analysisStatus) {
-  const results = createElement(state.document, 'section', { class: 'review-results' },
+  const results = createElement(state.document, 'section', { class: 'review-results review-section-card' },
     createElement(state.document, 'h2', null, '结构化结果'),
     createElement(state.document, 'p', { class: 'muted' }, '结构化结果暂不可用'));
   if (analysisStatus === 'failed') {
@@ -431,6 +462,16 @@ function scoreView(state, review) {
       createElement(state.document, 'p', { class: 'muted' }, score.reason)));
   }
   return scores;
+}
+
+function overallCardView(state, overall) {
+  const score = createElement(state.document, 'div', { class: 'review-overall-score' },
+    createElement(state.document, 'p', { class: 'review-overall-value' },
+      `综合评分：${formatOverallScore(overall)}`),
+    createElement(state.document, 'span', { class: 'review-overall-scale', 'aria-hidden': 'true' }, '/ 5'));
+  return createElement(state.document, 'section', {
+    class: 'review-overall-card review-section-card',
+  }, createElement(state.document, 'h3', null, '综合评分（只读）'), score);
 }
 
 function makeControl(document, tag, attrs, value) {
@@ -483,6 +524,40 @@ function editableReviewDocument(formState) {
 
 function canonicalEditableSnapshot(formState) {
   return JSON.stringify(editableReviewDocument(formState));
+}
+
+function setSaveStatus(formState, saveState, copy) {
+  if (formState.saveState === saveState && formState.saveCopy === copy) return false;
+  formState.saveState = saveState;
+  formState.saveCopy = copy;
+  formState.status.setAttribute('data-save-state', saveState);
+  formState.status.replaceChildren(copy);
+  return true;
+}
+
+function syncSaveStatus(formState, snapshot = canonicalEditableSnapshot(formState)) {
+  const dirty = snapshot !== formState.cleanSnapshot;
+  setSaveStatus(
+    formState,
+    dirty ? 'dirty' : 'clean',
+    dirty ? '有未保存的修改' : '全部修改已保存',
+  );
+  return dirty;
+}
+
+function synchronizeEditableSnapshot(state, formState) {
+  const snapshot = canonicalEditableSnapshot(formState);
+  try { state.dirtyGuard.update(snapshot); } catch (_error) {}
+  return { snapshot, dirty: syncSaveStatus(formState, snapshot) };
+}
+
+function saveFailureStatusCopy(action, dirty) {
+  if (dirty) return '保存失败，修改仍未保存';
+  return action === 'confirm' ? '确认失败，请稍后重试' : '保存失败，请稍后重试';
+}
+
+function setSaveFailureStatus(formState, action, dirty) {
+  setSaveStatus(formState, 'failure', saveFailureStatusCopy(action, dirty));
 }
 
 function clearFormErrors(formState) {
@@ -641,6 +716,7 @@ function releaseEditor(state) {
 
 function editorView(state, detail) {
   const form = createElement(state.document, 'form', { class: 'review-editor', 'data-review-form': '' });
+  const content = createElement(state.document, 'div', { class: 'review-editor-content' });
   const formState = {
     form,
     detail,
@@ -651,11 +727,19 @@ function editorView(state, detail) {
     actions: [],
     errorNodes: new Map(),
     summary: createElement(state.document, 'p', { class: 'review-form-summary', role: 'alert' }),
-    status: createElement(state.document, 'p', { class: 'review-save-status', role: 'status', 'aria-live': 'polite' }),
+    status: createElement(state.document, 'p', {
+      class: 'review-save-status', role: 'status', 'aria-live': 'polite',
+      'aria-atomic': 'true', 'data-save-state': 'clean',
+    }),
+    cleanSnapshot: null,
+    saveState: 'clean',
+    saveCopy: null,
   };
   state.formState = formState;
-  form.append(createElement(state.document, 'h2', null, '结构化结果'), formState.summary, formState.status);
-  const feedingSection = createElement(state.document, 'section', { class: 'review-editor-section' },
+  content.append(createElement(state.document, 'h2', null, '结构化结果'), formState.summary);
+  const feedingSection = createElement(state.document, 'section', {
+    class: 'review-editor-section review-section-card review-feeding-card',
+  },
     createElement(state.document, 'h3', null, '饲养记录'));
   for (const [index, row] of detail.review.feeding_logs.entries()) {
     const category = makeControl(state.document, 'select', null, row.category);
@@ -674,9 +758,12 @@ function editorView(state, detail) {
     );
     feedingSection.append(group);
   }
-  form.append(feedingSection);
-  const emotionSection = createElement(state.document, 'section', { class: 'review-editor-section' },
-    createElement(state.document, 'h3', null, '情绪与洞察'));
+  const emotionSection = createElement(state.document, 'section', {
+    class: 'review-editor-section review-section-card review-emotion-card',
+  }, createElement(state.document, 'h3', null, '情绪判断'));
+  const insightSection = createElement(state.document, 'section', {
+    class: 'review-editor-section review-section-card review-insight-card',
+  }, createElement(state.document, 'h3', null, '教育洞察'));
   formState.emotion.emotion = makeControl(state.document, 'input', { type: 'text' }, detail.review.emotion.emotion);
   formState.emotion.intensity = makeControl(state.document, 'input', { type: 'number', min: '1', max: '5' }, detail.review.emotion.intensity);
   formState.emotion.note = makeControl(state.document, 'textarea', null, detail.review.emotion.note || '');
@@ -685,9 +772,11 @@ function editorView(state, detail) {
     makeField(state, '情绪', formState.emotion.emotion, 'emotion.emotion'),
     makeField(state, '情绪强度', formState.emotion.intensity, 'emotion.intensity'),
     makeField(state, '情绪备注', formState.emotion.note, 'emotion.note'),
-    makeField(state, '教育洞察', formState.insight, 'insight'),
   );
-  form.append(emotionSection, createElement(state.document, 'h2', null, '能力评估'));
+  insightSection.append(makeField(state, '教育洞察', formState.insight, 'insight'));
+  const scoresSection = createElement(state.document, 'section', {
+    class: 'review-editor-section review-section-card review-scores-card',
+  }, createElement(state.document, 'h3', null, '能力评分'));
   for (const [index, score] of detail.review.scores.entries()) {
     const fieldset = createElement(state.document, 'fieldset', { class: 'review-score-editor', 'data-dimension-id': String(score.dimension_id) });
     fieldset.append(createElement(state.document, 'legend', null, score.dimension_name));
@@ -697,37 +786,49 @@ function editorView(state, detail) {
       const radioId = `review-score-${score.dimension_id}-${value}`;
       const radio = makeControl(state.document, 'input', {
         id: radioId, type: 'radio', name: `review-score-${score.dimension_id}`, value: String(value),
+        'aria-label': `${score.dimension_name} ${value} 分`,
       }, value);
       radio.checked = score.score === value;
-      const label = createElement(state.document, 'label', { for: radioId }, `${score.dimension_name} ${value} 分`);
+      const label = createElement(state.document, 'label', { for: radioId }, `${value} 分`);
       radios.append(radio, label);
       row.radios.push(radio);
     }
-    row.reason = makeControl(state.document, 'textarea', null, score.reason);
+    row.reason = makeControl(state.document, 'textarea', {
+      'aria-label': `${score.dimension_name}评分理由`,
+    }, score.reason);
     formState.scores.push(row);
-    fieldset.append(radios, makeField(state, `${score.dimension_name}评分理由`, row.reason, `scores.${index}.reason`));
+    fieldset.append(radios, makeField(state, '评分理由', row.reason, `scores.${index}.reason`));
     const scoreErrorId = `review-scores-${index}-score-error`;
     const scoreError = createElement(state.document, 'p', { id: scoreErrorId, class: 'review-field-error', role: 'alert', 'data-review-error': `scores.${index}.score` });
     for (const radio of row.radios) radio.setAttribute('aria-describedby', scoreErrorId);
     formState.errorNodes.set(`scores.${index}.score`, { control: row.radios[0], error: scoreError });
     fieldset.append(scoreError);
-    form.append(fieldset);
+    scoresSection.append(fieldset);
   }
+  content.append(
+    insightSection,
+    emotionSection,
+    scoresSection,
+    feedingSection,
+    overallCardView(state, detail.review.overall),
+  );
   const actions = createElement(state.document, 'div', { class: 'review-actions' });
   const draft = createElement(state.document, 'button', { class: 'btn review-save-draft', type: 'button' }, '保存草稿');
   const confirm = createElement(state.document, 'button', { class: 'btn green review-save-confirm', type: 'button' }, '保存并确认');
   formState.actions.push(draft, confirm);
   draft.addEventListener('click', () => { void state.submitReview?.(formState, 'save_draft'); });
   confirm.addEventListener('click', () => { void state.submitReview?.(formState, 'confirm'); });
-  actions.append(draft, confirm);
-  form.append(actions);
+  actions.append(formState.status, draft, confirm);
+  form.append(content, actions);
   const updateDirty = () => {
     if (state.formState !== formState) return;
-    try { state.dirtyGuard.update(canonicalEditableSnapshot(formState)); } catch (_error) {}
+    synchronizeEditableSnapshot(state, formState);
   };
   form.addEventListener('input', updateDirty);
   form.addEventListener('change', updateDirty);
   const snapshot = canonicalEditableSnapshot(formState);
+  formState.cleanSnapshot = snapshot;
+  syncSaveStatus(formState);
   try {
     state.dirtyGuard.activate(snapshot);
     state.dirtyGuard.markClean(snapshot);
@@ -739,15 +840,22 @@ function renderDetailLoaded(state, detail, successCopy = null, retainedStatus = 
   releaseEditor(state);
   state.detailPanel.removeAttribute('aria-busy');
   const name = displayName(detail.child);
-  const header = createElement(state.document, 'header', { class: 'review-detail-header' },
+  const titleRow = createElement(state.document, 'div', { class: 'review-detail-title-row' },
     createElement(state.document, 'h2', null, name),
+    createElement(state.document, 'div', { class: 'review-detail-badges' },
+      createElement(state.document, 'span', {
+        class: `review-detail-badge review-status-${detail.review_status}`,
+      }, reviewRevisionLabel(detail)),
+      createElement(state.document, 'span', {
+        class: `review-detail-badge review-analysis-status review-analysis-status-${detail.analysis.status}`,
+      }, analysisStatusLabel(detail.analysis.status))));
+  const header = createElement(state.document, 'header', { class: 'review-detail-header' },
+    titleRow,
     createElement(state.document, 'div', { class: 'review-detail-facts muted' },
       createElement(state.document, 'span', null, `会话 #${detail.id}`),
       createElement(state.document, 'span', null, detail.date),
       createElement(state.document, 'span', null, `完成于 ${formatCompletedTime(detail.completed_at)}`),
-      createElement(state.document, 'span', null, `${detail.round} 轮`),
-      createElement(state.document, 'span', null, analysisStatusLabel(detail.analysis.status)),
-      createElement(state.document, 'span', null, `revision ${detail.revision}`)),
+      createElement(state.document, 'span', null, `${detail.round} 轮`)),
     detailReloadButton(state));
   const workspace = createElement(state.document, 'div', { class: 'review-workspace' },
     transcriptView(state, detail.messages), detail.review === null
@@ -760,7 +868,7 @@ function renderDetailLoaded(state, detail, successCopy = null, retainedStatus = 
     replacementStatus.replaceWith(retainedStatus);
     state.formState.status = retainedStatus;
   }
-  if (successCopy && state.formState) state.formState.status.replaceChildren(successCopy);
+  if (successCopy && state.formState) setSaveStatus(state.formState, 'saved', successCopy);
 }
 
 export function createReviewRoute(dependencies) {
@@ -769,14 +877,15 @@ export function createReviewRoute(dependencies) {
     if (!isCurrent() || signal.aborted) return undefined;
     const selectedId = parseReviewConversationId(params);
     const shell = createElement(validated.document, 'div', { class: 'view active review-view' },
-      createElement(validated.document, 'h1', null, '值日审阅'));
+      createElement(validated.document, 'h1', null, '日记审阅'));
     const queueStatus = createElement(validated.document, 'p', {
       class: 'review-queue-status muted', role: 'status', 'aria-live': 'polite',
     }, '正在加载待审阅队列…');
     const queueBody = createElement(validated.document, 'div', { class: 'review-queue-body' });
+    const queueHeading = createElement(validated.document, 'h2', { class: 'review-queue-heading' }, '待审阅队列');
     const queuePanel = createElement(validated.document, 'section', {
       class: 'card review-panel review-queue-panel', 'data-review-panel': 'queue', 'aria-busy': 'true',
-    }, createElement(validated.document, 'h2', null, '待审阅队列'), queueStatus, queueBody);
+    }, queueHeading, queueStatus, queueBody);
     const detailBody = createElement(validated.document, 'div', { class: 'review-detail-body' });
     const detailPanel = createElement(validated.document, 'section', {
       class: 'card review-panel review-detail-panel', 'data-review-panel': 'detail',
@@ -787,6 +896,7 @@ export function createReviewRoute(dependencies) {
     const state = {
       document: validated.document,
       queuePanel,
+      queueHeading,
       queueStatus,
       queueBody,
       detailPanel,
@@ -910,12 +1020,11 @@ export function createReviewRoute(dependencies) {
     const submitReview = (formState, action) => {
       if (!current() || saveInFlight || state.formState !== formState || !state.loadedDetail
           || selectedId === null || state.loadedDetail.id !== selectedId) return Promise.resolve();
+      const submittedSnapshot = synchronizeEditableSnapshot(state, formState);
       clearFormErrors(formState);
-      formState.status.replaceChildren();
       const validatedForm = validateEditableReview(formState, action);
       if (validatedForm.errors.length) {
         showFormErrors(formState, validatedForm.errors);
-        try { state.dirtyGuard.update(canonicalEditableSnapshot(formState)); } catch (_error) {}
         return Promise.resolve();
       }
       const detailId = state.loadedDetail.id;
@@ -935,11 +1044,12 @@ export function createReviewRoute(dependencies) {
         mutationRecord = record;
       } catch (_error) {
         showFormErrors(formState, [], '保存失败，请稍后重试。');
+        setSaveFailureStatus(formState, action, submittedSnapshot.dirty);
         return Promise.resolve();
       }
       saveInFlight = true;
       setFormDisabled(formState, true);
-      formState.status.replaceChildren('正在保存…');
+      setSaveStatus(formState, 'saving', '正在保存…');
       return Promise.resolve()
         .then(() => {
           if (!ownsMutation(record, sequence, formState, detailId, submittedRevision)) return undefined;
@@ -979,6 +1089,7 @@ export function createReviewRoute(dependencies) {
           setFormDisabled(formState, false);
           const failure = classifySaveError(error, formState);
           showFormErrors(formState, failure.fields, failure.copy);
+          setSaveFailureStatus(formState, action, submittedSnapshot.dirty);
           if (!failure.fields.length) {
             const actionIndex = action === 'confirm' ? 1 : 0;
             formState.actions[actionIndex]?.focus?.();

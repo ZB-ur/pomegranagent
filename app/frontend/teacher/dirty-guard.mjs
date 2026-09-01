@@ -133,15 +133,25 @@ export function createDirtyGuard(dependencies) {
     try {
       confirmationTrigger = documentApi.activeElement;
       const nextDialog = documentApi.createElement('dialog');
+      nextDialog.setAttribute('class', 'management-dialog teacher-dirty-dialog');
       const heading = documentApi.createElement('h2');
       heading.setAttribute('id', 'teacher-dirty-dialog-heading');
       heading.append('有未保存的修改');
       nextDialog.setAttribute('aria-labelledby', 'teacher-dirty-dialog-heading');
+      const description = documentApi.createElement('p');
+      description.setAttribute('id', 'teacher-dirty-dialog-description');
+      description.setAttribute('class', 'teacher-dirty-dialog-description');
+      description.append('当前内容仍有未保存的修改；选择放弃后将无法恢复。');
+      nextDialog.setAttribute('aria-describedby', 'teacher-dirty-dialog-description');
+      const actions = documentApi.createElement('div');
+      actions.setAttribute('class', 'teacher-dirty-dialog-actions');
       const continueButton = documentApi.createElement('button');
       continueButton.setAttribute('type', 'button');
+      continueButton.setAttribute('class', 'btn gray');
       continueButton.append('继续编辑');
       const discardButton = documentApi.createElement('button');
       discardButton.setAttribute('type', 'button');
+      discardButton.setAttribute('class', 'btn');
       discardButton.append('放弃修改');
       continueButton.addEventListener('click', () => finishConfirmation(false, false));
       discardButton.addEventListener('click', () => finishConfirmation(true, true));
@@ -149,7 +159,8 @@ export function createDirtyGuard(dependencies) {
         safeCall(() => event.preventDefault());
         finishConfirmation(false, false);
       });
-      nextDialog.append(heading, continueButton, discardButton);
+      actions.append(continueButton, discardButton);
+      nextDialog.append(heading, description, actions);
       documentApi.body.append(nextDialog);
       dialog = nextDialog;
       if (typeof nextDialog.showModal === 'function') nextDialog.showModal();

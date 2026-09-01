@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from urllib.parse import urlsplit
 
 import pytest
@@ -16,8 +17,8 @@ DETAIL_PATH = "/api/conversations/42"
 CHILD = {"id": 7, "name": "小雨", "nickname": "雨雨", "avatar": "rain.png"}
 
 
-def queue_row() -> dict:
-    return {
+def queue_row(overrides: dict | None = None) -> dict:
+    body = {
         "id": 42,
         "child": CHILD,
         "date": "2026-08-23",
@@ -31,6 +32,7 @@ def queue_row() -> dict:
         "review_status": "draft",
         "revision": 2,
     }
+    return {**body, **(overrides or {})}
 
 
 def review_detail(overrides: dict | None = None) -> dict:
@@ -84,7 +86,7 @@ def unlock_review(page) -> None:
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
     page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
-    page.get_by_role("heading", name="值日审阅", exact=True).wait_for()
+    page.locator("[data-review-shell]").wait_for()
 
 
 def fulfill_json(route, body: object, status: int = 200) -> None:
@@ -130,7 +132,72 @@ def unavailable_detail(status: str) -> dict:
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_teacher_review_queue_and_detail_show_identity_time_id_and_status(
+def test_teacher_review_queue_shows_count_selection_and_distinct_status_tags(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher(teacher_browser, viewport)
+    second_child = {
+        "id": 8,
+        "name": "小风",
+        "nickname": "风风",
+        "avatar": None,
+    }
+    second_row = queue_row({
+        "id": 43,
+        "child": second_child,
+        "review_status": "pending",
+    })
+    install_review_reads(
+        page,
+        teacher_browser,
+        queue_handler=lambda route: fulfill_json(route, [queue_row(), second_row]),
+        detail_handler=lambda route: fulfill_json(route, review_detail()),
+    )
+
+    unlock_review(page)
+
+    queue_panel = page.locator("[data-review-panel='queue']")
+    rows = queue_panel.locator(".review-queue-row")
+    selected_link = queue_panel.get_by_role(
+        "link", name="审阅雨雨的会话 #42", exact=True
+    )
+    selected_link.wait_for()
+    queue_heading = queue_panel.get_by_role(
+        "heading", name=re.compile(r"^待审阅队列.*2.*$")
+    )
+    assert queue_heading.count() == 1
+    assert rows.count() == 2
+    selected_row = queue_panel.locator(".review-queue-row.is-current")
+    pending_row = queue_panel.locator(".review-queue-row:not(.is-current)")
+    assert selected_link.get_attribute("aria-current") == "page"
+    assert selected_row.get_by_role(
+        "link", name="审阅雨雨的会话 #42", exact=True
+    ).count() == 1
+    assert pending_row.get_by_role(
+        "link", name="审阅风风的会话 #43", exact=True
+    ).count() == 1
+    assert selected_row.get_by_text("当前", exact=True).count() == 1
+    assert selected_row.get_by_text("草稿", exact=True).count() == 1
+    assert pending_row.get_by_text("待审阅", exact=True).count() == 1
+    selected_style = selected_row.evaluate(
+        "node => { const style = getComputedStyle(node); "
+        "return [style.backgroundColor, style.borderColor, style.boxShadow]; }"
+    )
+    pending_style = pending_row.evaluate(
+        "node => { const style = getComputedStyle(node); "
+        "return [style.backgroundColor, style.borderColor, style.boxShadow]; }"
+    )
+    assert selected_style != pending_style
+
+    queue_text = queue_panel.inner_text()
+    assert "雨雨" in queue_text
+    assert "完成于 16:59" in queue_text
+    assert "会话 #42" in queue_text
+    assert "草稿" in queue_text
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_review_detail_localizes_revision_and_shows_overall_read_only(
     teacher_browser, viewport
 ):
     _context, page = open_teacher(teacher_browser, viewport)
@@ -140,23 +207,26 @@ def test_teacher_review_queue_and_detail_show_identity_time_id_and_status(
         queue_handler=lambda route: fulfill_json(route, [queue_row()]),
         detail_handler=lambda route: fulfill_json(route, review_detail()),
     )
-
     unlock_review(page)
 
-    queue = page.locator("[data-review-panel='queue'] .review-queue-row")
-    detail = page.locator("[data-review-panel='detail'] .review-detail-header")
-    queue.get_by_role("link", name="审阅雨雨的会话 #42", exact=True).wait_for()
+    detail_panel = page.locator("[data-review-panel='detail']")
+    detail = detail_panel.locator(".review-detail-header")
     detail.get_by_role("heading", name="雨雨", exact=True).wait_for()
-    queue_text = queue.inner_text()
     detail_text = detail.inner_text()
-    assert "雨雨" in queue_text
-    assert "完成于 16:59" in queue_text
-    assert "会话 #42" in queue_text
-    assert "草稿" in queue_text
     assert "雨雨" in detail_text
     assert "完成于 16:59" in detail_text
     assert "会话 #42" in detail_text
     assert "分析已完成" in detail_text
+    assert detail.get_by_text("草稿 · 第 2 版", exact=True).count() == 1
+    assert "revision" not in detail_text.lower()
+    overall = detail_panel.get_by_text(
+        re.compile(r"^综合评分\s*[：:]?\s*4(?:\.0)?$")
+    )
+    assert overall.count() == 1
+    assert overall.evaluate(
+        "node => !node.matches('input, select, textarea, button') "
+        "&& !node.closest('label')"
+    )
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -205,11 +275,17 @@ def test_teacher_review_deep_link_renders_split_read_only_shell_before_parallel_
     assert detail_panel.get_by_text("幼儿", exact=True).count() == 2
     assert detail_panel.get_by_text("日记本", exact=True).count() == 1
     assert detail_panel.get_by_role("heading", name="结构化结果", exact=True).count() == 1
-    assert detail_panel.get_by_role("heading", name="能力评估", exact=True).count() == 1
+    assert detail_panel.get_by_role("heading", name="能力评分", exact=True).count() == 1
     assert detail_panel.get_by_text("表达能力", exact=True).count() == 1
     assert detail_panel.locator("[data-review-form]").count() == 1
     assert detail_panel.get_by_label("饲养记录 1 分类", exact=True).count() == 1
     assert detail_panel.get_by_label("表达能力评分理由", exact=True).count() == 1
+    score_choices = detail_panel.locator(".review-score-radios")
+    assert "表达能力" not in score_choices.inner_text()
+    for score in range(1, 6):
+        assert detail_panel.get_by_role(
+            "radio", name=f"表达能力 {score} 分", exact=True
+        ).count() == 1
     assert detail_panel.get_by_role("button", name="保存草稿", exact=True).count() == 1
     assert detail_panel.get_by_role("button", name="保存并确认", exact=True).count() == 1
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
@@ -302,7 +378,7 @@ def test_teacher_review_unavailable_analysis_keeps_transcript_but_never_renders_
     detail_panel.get_by_role("heading", name="原始对话", exact=True).wait_for()
     detail_panel.get_by_text("我喂了小鸭。", exact=True).wait_for()
     detail_panel.get_by_text("结构化结果暂不可用", exact=True).wait_for()
-    assert detail_panel.get_by_role("heading", name="能力评估", exact=True).count() == 0
+    assert detail_panel.get_by_role("heading", name="能力评分", exact=True).count() == 0
     assert detail_panel.locator("input, textarea, select").count() == 0
     assert "分析服务暂时不可用" not in detail_panel.inner_text()
     if status == "failed":
@@ -366,11 +442,11 @@ def test_teacher_review_lock_aborts_both_held_reads_and_reunlock_starts_one_fres
     page.wait_for_timeout(100)
     assert f"{teacher_browser.server.base_url}{QUEUE_PATH}" in failed
     assert f"{teacher_browser.server.base_url}{DETAIL_PATH}" in failed
-    assert page.get_by_role("heading", name="值日审阅", exact=True).count() == 0
+    assert page.get_by_role("heading", name="日记审阅", exact=True).count() == 0
 
     page.get_by_label("教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="解锁", exact=True).click()
-    page.get_by_role("heading", name="值日审阅", exact=True).wait_for()
+    page.get_by_role("heading", name="日记审阅", exact=True).wait_for()
     page.locator("[data-review-panel='detail']").get_by_role("heading", name="原始对话", exact=True).wait_for()
     assert queue_calls == 2 and detail_calls == 2
     assert errors == []

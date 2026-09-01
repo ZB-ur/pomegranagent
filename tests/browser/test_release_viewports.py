@@ -15,12 +15,80 @@ from tests.browser.test_teacher_accessibility import (
     _fulfill_json,
     _install_static_routes,
 )
+from tests.browser.test_teacher_review_loading import queue_row, review_detail
 
 
 TEACHER_VIEWPORTS = [
     pytest.param({"width": 1024, "height": 768}, id="1024x768"),
     pytest.param({"width": 1440, "height": 900}, id="1440x900"),
 ]
+
+
+REVIEW_WORKSPACE_BREAKPOINTS = [
+    pytest.param({"width": 1025, "height": 900}, False, id="1025-stacked"),
+    pytest.param({"width": 1279, "height": 900}, False, id="1279-stacked"),
+    pytest.param({"width": 1280, "height": 900}, True, id="1280-two-column"),
+]
+
+
+def _rect(locator) -> dict:
+    return locator.evaluate(
+        """node => {
+          const rect = node.getBoundingClientRect();
+          return {
+            left: rect.left,
+            top: rect.top,
+            right: rect.right,
+            bottom: rect.bottom,
+            width: rect.width,
+            height: rect.height,
+          };
+        }"""
+    )
+
+
+def _open_loaded_review(teacher_browser, viewport):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+
+    def queue(route):
+        _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="GET",
+            path="/api/conversations",
+            query={"queue": ["pending"]},
+        )
+        _fulfill_json(route, [queue_row()])
+
+    def detail(route):
+        _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="GET",
+            path="/api/conversations/42",
+        )
+        _fulfill_json(route, review_detail())
+
+    page.route(
+        f"{teacher_browser.server.base_url}/api/conversations?queue=pending",
+        queue,
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/conversations/42",
+        detail,
+    )
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#review?conversation_id=42",
+        wait_until="domcontentloaded",
+    )
+    page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
+    page.get_by_role("button", name="设置并解锁", exact=True).click()
+    page.locator("[data-review-form]").wait_for()
+    return context, page
 
 
 def _rgb(color: str) -> tuple[float, float, float]:
@@ -328,6 +396,133 @@ def test_release_focus_indicator_meets_three_to_one(
             sort_keys=True,
         ),
     )
+
+
+@pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
+def test_release_review_keeps_outer_columns_and_switches_only_the_detail_workspace(
+    teacher_browser, viewport
+):
+    _context, page = _open_loaded_review(teacher_browser, viewport)
+    queue = _rect(page.locator('[data-review-panel="queue"]'))
+    detail = _rect(page.locator('[data-review-panel="detail"]'))
+    transcript = _rect(page.locator(".review-transcript"))
+    editor = _rect(page.locator("[data-review-form]"))
+
+    assert queue["right"] <= detail["left"] - 1, {"queue": queue, "detail": detail}
+    if viewport["width"] == 1024:
+        assert transcript["bottom"] <= editor["top"] - 1, {
+            "transcript": transcript,
+            "editor": editor,
+        }
+    else:
+        assert transcript["right"] <= editor["left"] - 1, {
+            "transcript": transcript,
+            "editor": editor,
+        }
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+@pytest.mark.parametrize(
+    ("viewport", "workspace_is_two_column"),
+    REVIEW_WORKSPACE_BREAKPOINTS,
+)
+def test_release_review_workspace_waits_for_room_before_switching_to_two_columns(
+    teacher_browser, viewport, workspace_is_two_column
+):
+    _context, page = _open_loaded_review(teacher_browser, viewport)
+    queue = _rect(page.locator('[data-review-panel="queue"]'))
+    detail = _rect(page.locator('[data-review-panel="detail"]'))
+    transcript = _rect(page.locator(".review-transcript"))
+    editor = _rect(page.locator("[data-review-form]"))
+
+    assert queue["right"] <= detail["left"] - 1, {"queue": queue, "detail": detail}
+    if workspace_is_two_column:
+        assert transcript["right"] <= editor["left"] - 1, {
+            "transcript": transcript,
+            "editor": editor,
+        }
+    else:
+        assert transcript["bottom"] <= editor["top"] - 1, {
+            "transcript": transcript,
+            "editor": editor,
+        }
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+@pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
+def test_release_review_bubbles_stay_inset_and_nonoverlapping(
+    teacher_browser, viewport
+):
+    _context, page = _open_loaded_review(teacher_browser, viewport)
+    message_log = _rect(page.locator(".review-message-log"))
+    message_nodes = page.locator(".review-message")
+    messages = [_rect(message_nodes.nth(index)) for index in range(message_nodes.count())]
+    assert len(messages) == 3
+    for message in messages:
+        assert message["left"] >= message_log["left"] + 1, {
+            "message": message,
+            "log": message_log,
+        }
+        assert message["right"] <= message_log["right"] - 1, {
+            "message": message,
+            "log": message_log,
+        }
+    for first, second in zip(messages, messages[1:]):
+        assert first["bottom"] <= second["top"] - 1, messages
+
+
+@pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
+def test_release_review_sticky_actions_are_visible_with_44px_targets(
+    teacher_browser, viewport
+):
+    _context, page = _open_loaded_review(teacher_browser, viewport)
+    actions = page.locator(".review-actions")
+    status = actions.locator(
+        '.review-save-status[role="status"][aria-live="polite"]'
+    )
+    assert status.count() == 1
+    assert status.inner_text() == "全部修改已保存"
+    action_box = _rect(actions)
+    assert actions.evaluate("node => getComputedStyle(node).position") == "sticky"
+    assert action_box["top"] >= 0
+    assert action_box["bottom"] <= viewport["height"]
+    for button_name in ("保存草稿", "保存并确认"):
+        button_box = _rect(
+            actions.get_by_role("button", name=button_name, exact=True)
+        )
+        assert button_box["width"] >= 44 and button_box["height"] >= 44
+
+
+@pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
+def test_release_review_first_editor_field_starts_above_the_sticky_actions(
+    teacher_browser, viewport
+):
+    _context, page = _open_loaded_review(teacher_browser, viewport)
+    actions = _rect(page.locator(".review-actions"))
+    insight_heading = _rect(
+        page.get_by_role("heading", name="教育洞察", exact=True)
+    )
+    insight_field = _rect(page.get_by_label("教育洞察", exact=True))
+
+    assert insight_heading["top"] >= 0
+    assert insight_heading["bottom"] <= actions["top"] - 1, {
+        "heading": insight_heading,
+        "actions": actions,
+    }
+    assert insight_field["top"] < actions["top"] - 1, {
+        "field": insight_field,
+        "actions": actions,
+    }
+    visible_field_height = min(insight_field["bottom"], actions["top"]) - insight_field["top"]
+    assert visible_field_height >= 24, {
+        "visible_field_height": visible_field_height,
+        "field": insight_field,
+        "actions": actions,
+    }
 
 
 @pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
