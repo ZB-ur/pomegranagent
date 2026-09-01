@@ -109,6 +109,7 @@ const REPORT_STATUS_COPY = Object.freeze({
 });
 
 export function reportStatusCopy(kind, value) {
+  if (typeof kind !== 'string' || !Object.prototype.hasOwnProperty.call(REPORT_STATUS_COPY, kind)) throw invalid();
   const table = REPORT_STATUS_COPY[kind];
   if (!table || !Object.prototype.hasOwnProperty.call(table, value)) throw invalid();
   return table[value];

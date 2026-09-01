@@ -93,8 +93,14 @@ test('history parser enforces exact page and canonical item union', () => {
 });
 
 
-test('report status copy localizes every canonical history enum', () => {
+test('report status copy accepts only own canonical string kinds and values', () => {
   assert.deepEqual(['pending','processing','succeeded','failed'].map(value => reportStatusCopy('analysis', value)), ['等待分析','分析中','分析完成','分析失败']);
   assert.deepEqual(['pending','draft','confirmed','unavailable'].map(value => reportStatusCopy('review', value)), ['等待审阅','审阅草稿','审阅完成','暂不可审阅']);
   assert.throws(() => reportStatusCopy('analysis', 'unknown'), TypeError);
+  for (const [kind, value] of [
+    ['toString', 'length'],
+    ['constructor', 'name'],
+    ['__proto__', 'toString'],
+    [new String('analysis'), 'pending'],
+  ]) assert.throws(() => reportStatusCopy(kind, value), TypeError);
 });
