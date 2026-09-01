@@ -1,9 +1,9 @@
 """Bounded weekly teacher metrics with global integrity validation."""
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, timedelta
 
-from sqlalchemy import and_, func, literal, not_, or_, select
+from sqlalchemy import and_, false, func, literal, not_, or_, select
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -30,6 +30,10 @@ def _internal_error() -> APIError:
 def _fail(db: Session) -> None:
     db.rollback()
     raise _internal_error()
+
+
+def _invalid_when_false_or_null(valid_expression):
+    return not_(func.coalesce(valid_expression, false()))
 
 
 def _conversation_is_valid():
@@ -77,12 +81,22 @@ def _integrity_statement():
     invalid_conversation_exists = (
         select(literal(1))
         .select_from(models.Conversation)
-        .where(not_(_conversation_is_valid()))
+        .where(_invalid_when_false_or_null(_conversation_is_valid()))
         .exists()
     )
 
     job_conversation = models.Conversation.__table__.alias("job_conversation")
     job_boundary_message = models.Message.__table__.alias("job_boundary_message")
+    job_is_valid = and_(
+        models.AnalysisJob.status.in_(_JOB_STATUSES),
+        job_conversation.c.id.is_not(None),
+        job_conversation.c.status == "ended",
+        job_conversation.c.ended_at.is_not(None),
+        job_conversation.c.frozen_last_message_id.is_not(None),
+        models.AnalysisJob.frozen_last_message_id
+        == job_conversation.c.frozen_last_message_id,
+        job_boundary_message.c.id.is_not(None),
+    )
     invalid_job_exists = (
         select(literal(1))
         .select_from(models.AnalysisJob)
@@ -99,18 +113,7 @@ def _integrity_statement():
                 == models.AnalysisJob.conversation_id,
             ),
         )
-        .where(
-            or_(
-                models.AnalysisJob.status.not_in(_JOB_STATUSES),
-                job_conversation.c.id.is_(None),
-                job_conversation.c.status != "ended",
-                job_conversation.c.ended_at.is_(None),
-                job_conversation.c.frozen_last_message_id.is_(None),
-                models.AnalysisJob.frozen_last_message_id
-                != job_conversation.c.frozen_last_message_id,
-                job_boundary_message.c.id.is_(None),
-            )
-        )
+        .where(_invalid_when_false_or_null(job_is_valid))
         .exists()
     )
 
@@ -118,6 +121,21 @@ def _integrity_statement():
         "assessment_conversation"
     )
     assessment_job = models.AnalysisJob.__table__.alias("assessment_job")
+    assessment_is_valid = and_(
+        models.Assessment.status.in_(_ASSESSMENT_STATUSES),
+        assessment_conversation.c.id.is_not(None),
+        assessment_conversation.c.status == "ended",
+        assessment_conversation.c.ended_at.is_not(None),
+        assessment_conversation.c.frozen_last_message_id.is_not(None),
+        models.Assessment.child_id == assessment_conversation.c.child_id,
+        assessment_job.c.id.is_not(None),
+        assessment_job.c.frozen_last_message_id
+        == assessment_conversation.c.frozen_last_message_id,
+        or_(
+            models.Assessment.status != "confirmed",
+            assessment_job.c.status == "succeeded",
+        ),
+    )
     invalid_assessment_exists = (
         select(literal(1))
         .select_from(models.Assessment)
@@ -130,23 +148,7 @@ def _integrity_statement():
             assessment_job.c.conversation_id
             == models.Assessment.conversation_id,
         )
-        .where(
-            or_(
-                models.Assessment.status.not_in(_ASSESSMENT_STATUSES),
-                assessment_conversation.c.id.is_(None),
-                models.Assessment.child_id
-                != assessment_conversation.c.child_id,
-                and_(
-                    models.Assessment.status == "confirmed",
-                    or_(
-                        assessment_job.c.id.is_(None),
-                        assessment_job.c.status != "succeeded",
-                        assessment_job.c.frozen_last_message_id
-                        != assessment_conversation.c.frozen_last_message_id,
-                    ),
-                ),
-            )
-        )
+        .where(_invalid_when_false_or_null(assessment_is_valid))
         .exists()
     )
 
@@ -167,6 +169,17 @@ def _weekly_base(week_start: date, week_end_exclusive: date):
         models.Conversation.date >= week_start.isoformat(),
         models.Conversation.date < week_end_exclusive.isoformat(),
     )
+
+
+def _window_is_valid(week_start: object, week_end_exclusive: object) -> bool:
+    if type(week_start) is not date or type(week_end_exclusive) is not date:
+        return False
+    if week_start.weekday() != 0:
+        return False
+    try:
+        return week_start + timedelta(days=7) == week_end_exclusive
+    except OverflowError:
+        return False
 
 
 def _aggregate_statement(week_start: date, week_end_exclusive: date):
@@ -246,6 +259,8 @@ def weekly_report(
 ) -> schemas.WeeklyReportResponse:
     """Return one validated week plus the cumulative review backlog in two SQL reads."""
     try:
+        if not _window_is_valid(week_start, week_end_exclusive):
+            _fail(db)
         if db.scalar(_integrity_statement()):
             _fail(db)
         row = db.execute(

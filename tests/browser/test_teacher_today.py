@@ -325,7 +325,15 @@ def test_teacher_today_renders_exact_week_range_and_five_weekly_metrics(
     teacher_browser, viewport
 ):
     _context, page = open_teacher(teacher_browser, viewport)
-    install_panel_routes(page, teacher_browser, empty_handlers())
+    install_panel_routes(
+        page,
+        teacher_browser,
+        empty_handlers(),
+        metrics_handler=lambda route: fulfill_json(
+            route,
+            weekly_response(timezone="Europe/Berlin"),
+        ),
+    )
     setup_teacher(page)
     metrics = page.locator('[data-today-metrics="weekly"]')
     metrics.get_by_text("周指标已更新", exact=True).wait_for()

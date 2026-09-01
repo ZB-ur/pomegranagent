@@ -150,6 +150,12 @@ def test_weekly_service_uses_conversation_calendar_window_and_global_review_back
     )
     _ended(
         db_session,
+        child=historical,
+        conversation_date="2026-08-30",
+        job_status="failed",
+    )
+    _ended(
+        db_session,
         child=third,
         conversation_date="2026-09-07",
         job_status="succeeded",
@@ -201,6 +207,8 @@ def test_weekly_service_returns_the_exact_zero_shape(db_session):
         "conversation_status",
         "conversation_end_reason",
         "conversation_pending_end_reason",
+        "conversation_invalid_date",
+        "ended_without_end_reason",
         "ended_without_timestamp",
         "ended_without_boundary",
         "active_with_ended_boundary",
@@ -240,6 +248,10 @@ def test_weekly_service_fails_the_whole_response_for_global_integrity_corruption
         conversation.end_reason = "mystery"
     elif corruption == "conversation_pending_end_reason":
         conversation.pending_end_reason = "mystery"
+    elif corruption == "conversation_invalid_date":
+        conversation.date = "2026-09-00"
+    elif corruption == "ended_without_end_reason":
+        conversation.end_reason = None
     elif corruption == "ended_without_timestamp":
         conversation.ended_at = None
     elif corruption == "ended_without_boundary":
@@ -289,6 +301,96 @@ def test_weekly_service_fails_the_whole_response_for_global_integrity_corruption
     ) is None
 
 
+@pytest.mark.parametrize(
+    "corruption",
+    ["missing_job", "active_conversation", "frozen_boundary_mismatch"],
+)
+def test_every_assessment_requires_an_ended_conversation_and_matching_frozen_job(
+    db_session,
+    corruption,
+):
+    """Catches pending/draft assessments hidden by the backlog join despite orphaned state."""
+    child = _child(db_session, f"孤儿评估-{corruption}")
+    if corruption == "active_conversation":
+        conversation = models.Conversation(
+            child_id=child.id,
+            date="2026-09-02",
+            started_at=ENDED_AT,
+            status="active",
+        )
+        db_session.add(conversation)
+        db_session.flush()
+        db_session.add(models.Assessment(
+            conversation_id=conversation.id,
+            child_id=child.id,
+            status="pending",
+            overall=4.0,
+        ))
+    else:
+        conversation, job, _assessment = _ended(
+            db_session,
+            child=child,
+            conversation_date="2026-09-02",
+            job_status=None if corruption == "missing_job" else "processing",
+            assessment_status="draft",
+        )
+        if corruption == "frozen_boundary_mismatch":
+            assert job is not None
+            other = models.Message(
+                conversation_id=conversation.id,
+                role="diary",
+                text="另一个冻结边界",
+                created_at=ENDED_AT,
+            )
+            db_session.add(other)
+            db_session.flush()
+            job.frozen_last_message_id = other.id
+    db_session.commit()
+
+    with pytest.raises(APIError) as raised:
+        _service().weekly_report(
+            db_session,
+            week_start=WEEK_START,
+            week_end_exclusive=WEEK_END,
+        )
+
+    assert raised.value.status_code == 500
+    assert raised.value.code == "INTERNAL_ERROR"
+    assert raised.value.retryable is True
+
+
+@pytest.mark.parametrize(
+    "job_status,assessment_status,expected_failed",
+    [("processing", "pending", 0), ("failed", "draft", 1)],
+)
+def test_nonconfirmed_assessment_with_processing_or_failed_job_is_valid_but_not_pending(
+    db_session,
+    job_status,
+    assessment_status,
+    expected_failed,
+):
+    """Catches over-strict integrity or accidental inclusion in the global Review backlog."""
+    child = _child(db_session, f"合法非成功评估-{job_status}")
+    _ended(
+        db_session,
+        child=child,
+        conversation_date="2026-09-02",
+        job_status=job_status,
+        assessment_status=assessment_status,
+    )
+    db_session.commit()
+
+    result = _service().weekly_report(
+        db_session,
+        week_start=WEEK_START,
+        week_end_exclusive=WEEK_END,
+    )
+
+    assert result.completed_conversations == 1
+    assert result.failed_analyses == expected_failed
+    assert result.pending_reviews_total == 0
+
+
 @pytest.mark.parametrize("row_count", [1, 100])
 def test_weekly_service_uses_the_same_two_sql_statements_for_one_or_one_hundred_rows(
     db_session,
@@ -326,6 +428,45 @@ def test_weekly_service_uses_the_same_two_sql_statements_for_one_or_one_hundred_
     assert result.failed_analyses == row_count
 
 
+@pytest.mark.parametrize(
+    "week_start,week_end_exclusive",
+    [
+        (date(2026, 9, 1), date(2026, 9, 8)),
+        (date(2026, 8, 31), date(2026, 9, 6)),
+        (date(2026, 8, 31), date(2026, 8, 31)),
+        (date(2026, 9, 7), date(2026, 8, 31)),
+        (date(9999, 12, 27), date(9999, 12, 31)),
+    ],
+    ids=["tuesday", "six-days", "zero", "backwards", "overflow"],
+)
+def test_weekly_service_rejects_invalid_windows_before_any_sql(
+    db_session,
+    week_start,
+    week_end_exclusive,
+):
+    """Catches direct callers bypassing the route's canonical Monday/seven-day boundary."""
+    statements: list[str] = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(statement)
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with pytest.raises(APIError) as raised:
+            _service().weekly_report(
+                db_session,
+                week_start=week_start,
+                week_end_exclusive=week_end_exclusive,
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert raised.value.status_code == 500
+    assert raised.value.code == "INTERNAL_ERROR"
+    assert raised.value.retryable is True
+    assert statements == []
+
+
 def test_weekly_route_authenticates_before_reading_even_an_invalid_raw_query(client):
     """Catches query validation or report reads before the teacher session boundary."""
     error = _error(
@@ -350,6 +491,7 @@ def test_weekly_route_authenticates_before_reading_even_an_invalid_raw_query(cli
         "week_start=2026-02-30",
         "week_start=2026-8-31",
         "week_start=2026-09-01",
+        "week_start=9999-12-27",
     ],
 )
 def test_weekly_route_rejects_noncanonical_or_non_monday_raw_query_before_any_sql(

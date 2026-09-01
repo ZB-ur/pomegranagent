@@ -235,9 +235,22 @@ test('Today accepts only matching accepted or replayed analysis retry responses'
 
 test('Today strictly validates the exact weekly report contract and seven-day Monday window', () => {
   assert.deepEqual(validateWeeklyReport(weeklyResponse()), weeklyResponse());
+  assert.deepEqual(
+    validateWeeklyReport(weeklyResponse({ timezone: 'UTC' })),
+    weeklyResponse({ timezone: 'UTC' }),
+  );
+  assert.deepEqual(
+    validateWeeklyReport(weeklyResponse({ timezone: 'Europe/Berlin' })),
+    weeklyResponse({ timezone: 'Europe/Berlin' }),
+  );
   for (const malformed of [
     { ...weeklyResponse(), extra: true },
-    { ...weeklyResponse(), timezone: 'UTC' },
+    { ...weeklyResponse(), timezone: '' },
+    { ...weeklyResponse(), timezone: '   ' },
+    { ...weeklyResponse(), timezone: ' Europe/Berlin' },
+    { ...weeklyResponse(), timezone: 'A'.repeat(256) },
+    { ...weeklyResponse(), timezone: 'Mars/Olympus' },
+    { ...weeklyResponse(), timezone: 7 },
     { ...weeklyResponse(), week_start: '2026-09-01' },
     { ...weeklyResponse(), week_start: '2026-8-31' },
     { ...weeklyResponse(), week_start: '2026-02-30', week_end_exclusive: '2026-03-09' },

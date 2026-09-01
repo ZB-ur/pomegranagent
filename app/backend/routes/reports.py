@@ -42,7 +42,10 @@ def _week_window(request: Request) -> tuple[date, date]:
         raise _validation_error() from None
     if anchor.isoformat().encode("ascii") != match.group(1) or anchor.weekday() != 0:
         raise _validation_error()
-    return BUSINESS_CLOCK.week_window(anchor=anchor)
+    try:
+        return BUSINESS_CLOCK.week_window(anchor=anchor)
+    except OverflowError:
+        raise _validation_error() from None
 
 
 @router.get("/api/reports/weekly", response_model=schemas.WeeklyReportResponse)

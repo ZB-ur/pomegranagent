@@ -123,11 +123,22 @@ function canonicalDate(value) {
   return parsed;
 }
 
+function isValidIanaTimezone(value) {
+  if (typeof value !== 'string' || value.length === 0 || value.length > 255
+      || value.trim() !== value) return false;
+  try {
+    new Intl.DateTimeFormat('en-US', { timeZone: value }).format(0);
+    return true;
+  } catch (_error) {
+    return false;
+  }
+}
+
 function validateWeeklyReportRecord(value) {
   const report = readOwnDataRecord(value, WEEKLY_REPORT_KEYS);
   const weekStart = canonicalDate(report.week_start);
   const weekEnd = canonicalDate(report.week_end_exclusive);
-  if (report.timezone !== 'Asia/Shanghai' || weekStart.getUTCDay() !== 1
+  if (!isValidIanaTimezone(report.timezone) || weekStart.getUTCDay() !== 1
       || weekEnd.getTime() - weekStart.getTime() !== 7 * 24 * 60 * 60 * 1000) {
     throw invalidTodayContract();
   }
