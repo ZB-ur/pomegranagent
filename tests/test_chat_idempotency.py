@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -103,6 +104,44 @@ def test_chat_writes_one_pair_after_ai_success(
     assert fake_chat_ai.calls[0]["recent_summary"] == "我喂了小黄"
     assert "小黄：活泼" in fake_chat_ai.calls[0]["ducks_info"]
     assert "小灰" not in fake_chat_ai.calls[0]["ducks_info"]
+
+
+def test_new_chat_uses_one_business_clock_sample_for_date_and_utc_timestamps(
+    client,
+    db_session,
+    child_factory,
+    fake_chat_ai,
+    monkeypatch,
+):
+    """Catches UTC calendar dates or a second clock read within one chat request."""
+    child = child_factory()
+    business_now = datetime(2026, 9, 2, 0, 0, tzinfo=ZoneInfo("Asia/Shanghai"))
+
+    class Clock:
+        calls = 0
+
+        @classmethod
+        def business_now(cls) -> datetime:
+            cls.calls += 1
+            if cls.calls > 1:
+                raise AssertionError("chat request read the business clock twice")
+            return business_now
+
+    monkeypatch.setattr(conversation_routes, "BUSINESS_CLOCK", Clock)
+
+    response = client.post("/api/chat", json=_chat_payload(child_id=child.id))
+
+    assert response.status_code == 200
+    db_session.expire_all()
+    conversation = db_session.get(models.Conversation, response.json()["conversation_id"])
+    record = db_session.get(models.ChatRequestRecord, response.json()["request_id"])
+    assert conversation is not None
+    assert record is not None
+    assert conversation.date == "2026-09-02"
+    assert conversation.started_at == datetime(2026, 9, 1, 16, 0)
+    assert record.created_at == datetime(2026, 9, 1, 16, 0)
+    assert record.updated_at == datetime(2026, 9, 1, 16, 0)
+    assert Clock.calls == 1
 
 
 def _chat_payload(
@@ -311,7 +350,12 @@ def test_stale_attempt_cannot_commit_or_fail_after_its_lease_is_reclaimed(
         _chat_payload(child_id=child.id, conversation_id=conversation.id)
     )
     clock = datetime.utcnow()
-    first_claim = claim_chat_request(db_session, first_payload, now=clock)
+    first_claim = claim_chat_request(
+        db_session,
+        first_payload,
+        now=clock,
+        business_date=clock.date(),
+    )
 
     with SessionLocal() as reclaimer:
         reclaimer.execute(
@@ -324,6 +368,7 @@ def test_stale_attempt_cannot_commit_or_fail_after_its_lease_is_reclaimed(
             reclaimer,
             first_payload,
             now=clock + timedelta(seconds=1),
+            business_date=clock.date(),
         )
 
     with pytest.raises(APIError) as stale_result:
@@ -523,9 +568,19 @@ def test_two_requests_from_the_same_base_allow_only_one_message_pair(
         _chat_payload(child_id=child.id, conversation_id=conversation.id, text="我还换了水")
     )
     clock = datetime.utcnow()
-    first_claim = claim_chat_request(db_session, first_payload, now=clock)
+    first_claim = claim_chat_request(
+        db_session,
+        first_payload,
+        now=clock,
+        business_date=clock.date(),
+    )
     with SessionLocal() as concurrent_session:
-        second_claim = claim_chat_request(concurrent_session, second_payload, now=clock)
+        second_claim = claim_chat_request(
+            concurrent_session,
+            second_payload,
+            now=clock,
+            business_date=clock.date(),
+        )
 
     committed = commit_chat_success(
         db_session,

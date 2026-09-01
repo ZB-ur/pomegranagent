@@ -1,7 +1,7 @@
 """Public daily roster read and teacher-only idempotent roster routes."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import date
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import select
@@ -10,16 +10,18 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..api_errors import APIError
 from ..auth import require_teacher_session
-from ..database import get_db
+from ..business_time import BusinessClock
+from ..database import SETTINGS, get_db
 from ..services.roster import generate_roster, get_today_roster, set_daily_roster
 
 
 router = APIRouter()
+BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
 
 
 @router.get("/api/roster/today", response_model=list[schemas.RosterTodayChild])
 def today_roster(db: Session = Depends(get_db)) -> list[schemas.RosterTodayChild]:
-    return get_today_roster(db, today=date.today())
+    return get_today_roster(db, today=BUSINESS_CLOCK.business_today())
 
 
 @router.get("/api/roster", response_model=list[schemas.RosterListItem])
@@ -61,7 +63,7 @@ def auto_roster(
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> schemas.AutoRosterResponse:
-    return generate_roster(db, payload, now=datetime.now(timezone.utc))
+    return generate_roster(db, payload, now=BUSINESS_CLOCK.utc_now())
 
 
 @router.put("/api/roster/{roster_date}", response_model=schemas.DailyRosterResponse)
@@ -75,5 +77,5 @@ def put_daily_roster(
         db,
         payload,
         roster_date=roster_date,
-        now=datetime.now(timezone.utc),
+        now=BUSINESS_CLOCK.utc_now(),
     )

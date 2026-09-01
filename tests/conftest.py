@@ -17,12 +17,17 @@ ROOT = Path(__file__).resolve().parent.parent
 TEST_RUNTIME_DIR = Path(tempfile.mkdtemp(prefix="duck-diary-pytest-")).resolve()
 TEST_DATABASE_PATH = TEST_RUNTIME_DIR / "pytest.db"
 TEST_APPLICATION_LOG_PATH = (TEST_RUNTIME_DIR / "pytest-app.log").resolve()
+TEST_MEDIA_ROOT = (TEST_RUNTIME_DIR / "media").resolve()
 TEST_TTS_CACHE_PATH = (TEST_RUNTIME_DIR / "tts-cache").resolve()
 REAL_APPLICATION_DATABASE_PATH = (ROOT / "data" / "duck_diary.db").resolve()
 REAL_APPLICATION_LOG_PATH = (ROOT / "logs" / "app.log").resolve()
 REAL_TTS_CACHE_PATH = (ROOT / "data" / "tts_cache").resolve()
 os.environ["APP_DB_MODE"] = "test"
 os.environ["APP_DB_PATH"] = str(TEST_DATABASE_PATH)
+os.environ["APP_BUSINESS_TIMEZONE"] = "Asia/Shanghai"
+os.environ["APP_MEDIA_ROOT"] = str(TEST_MEDIA_ROOT)
+os.environ["APP_LOG_PATH"] = str(TEST_APPLICATION_LOG_PATH)
+os.environ["APP_TTS_CACHE_PATH"] = str(TEST_TTS_CACHE_PATH)
 os.environ["PYTHON_DOTENV_DISABLED"] = "1"
 
 sys.path.insert(0, str(ROOT))
@@ -212,7 +217,6 @@ try:
 
     _seed_dimensions = main_module._seed_dimensions
     app = main_module.app
-    main_module.TTS_CACHE_DIR = TEST_TTS_CACHE_PATH
 finally:
     logging.FileHandler = _original_file_handler
 
@@ -234,6 +238,31 @@ assert _import_resource_violations == (), (
     "pytest application imports changed protected resources: "
     f"{_import_resource_violations!r}"
 )
+
+
+def pytest_collection_finish(session) -> None:
+    """Keep root safety helpers reachable when a nested conftest shares the import name."""
+    del session
+    active_conftest = sys.modules.get("conftest")
+    if active_conftest is None:
+        return
+    for name in (
+        "APPLICATION_FILE_HANDLER_INSTALLED",
+        "APPLICATION_RESOURCE_BASELINE",
+        "BLOCKED_NETWORK_ATTEMPTS",
+        "EXTERNAL_NETWORK_TRIPWIRE_INSTALLED",
+        "REAL_APPLICATION_DATABASE_PATH",
+        "REAL_APPLICATION_LOG_PATH",
+        "REAL_TTS_CACHE_PATH",
+        "TEST_APPLICATION_LOG_PATH",
+        "TEST_RUNTIME_DIR",
+        "TEST_TTS_CACHE_PATH",
+        "TTS_PROVIDER_TRIPWIRE_INSTALLED",
+        "application_resource_violations",
+        "capture_application_resources",
+        "root_file_handler_paths",
+    ):
+        setattr(active_conftest, name, globals()[name])
 
 
 class _NonStartingAnalysisWorker:

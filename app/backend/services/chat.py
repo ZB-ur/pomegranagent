@@ -5,7 +5,7 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from typing import Literal
 
 from sqlalchemy import and_, func, or_, select, update
@@ -189,6 +189,7 @@ def _conversation_for_new_claim(
     payload: schemas.ChatRequest,
     *,
     now: datetime,
+    business_date: date,
 ) -> models.Conversation:
     _active_child_or_error(db, payload.child_id)
     if payload.conversation_id is not None:
@@ -232,8 +233,9 @@ def _conversation_for_new_claim(
         raise _api_error(404, "CHILD_NOT_FOUND")
     conversation = models.Conversation(
         child_id=payload.child_id,
-        date=now.date().isoformat(),
+        date=business_date.isoformat(),
         status="active",
+        started_at=now,
     )
     db.add(conversation)
     db.flush()
@@ -257,6 +259,7 @@ def claim_chat_request(
     payload: schemas.ChatRequest,
     *,
     now: datetime,
+    business_date: date,
     lease_seconds: int = 45,
 ) -> ChatClaim:
     """Claim a request and, for first turns, create its active conversation atomically."""
@@ -273,7 +276,12 @@ def claim_chat_request(
         )
 
     try:
-        conversation = _conversation_for_new_claim(db, payload, now=now)
+        conversation = _conversation_for_new_claim(
+            db,
+            payload,
+            now=now,
+            business_date=business_date,
+        )
         owner = _lease_owner()
         record = models.ChatRequestRecord(
             request_id=request_id,

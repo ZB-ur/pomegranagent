@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import timezone
 from typing import Literal
 
 import httpx
@@ -13,7 +13,8 @@ from sqlalchemy.orm import Session
 from .. import ai_engine, models, schemas
 from ..api_errors import APIError
 from ..auth import require_teacher_session
-from ..database import get_db
+from ..business_time import BusinessClock
+from ..database import SETTINGS, get_db
 from ..services.analysis import retry_analysis
 from ..services.chat import (
     FIXED_MAX_ROUNDS_REPLY,
@@ -29,6 +30,7 @@ from ..services.reviews import get_review_detail, list_review_queue, save_review
 
 logger = logging.getLogger("duck_diary.chat")
 router = APIRouter()
+BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
 
 
 def _active_child_or_error(db: Session, child_id: int) -> models.Child:
@@ -93,7 +95,7 @@ def complete(
     payload: schemas.ConversationCompleteRequest,
     db: Session = Depends(get_db),
 ) -> schemas.ConversationCompleteResponse:
-    now = datetime.now(timezone.utc)
+    now = BUSINESS_CLOCK.utc_now()
     return complete_conversation(
         db,
         conversation_id=conversation_id,
@@ -114,7 +116,7 @@ def retry_conversation_analysis(
     return retry_analysis(
         db,
         conversation_id,
-        now=datetime.now(timezone.utc),
+        now=BUSINESS_CLOCK.utc_now(),
     )
 
 
@@ -210,7 +212,7 @@ def put_review(
         db,
         conversation_id=conversation_id,
         payload=payload,
-        now=datetime.now(timezone.utc),
+        now=BUSINESS_CLOCK.utc_now(),
     )
 
 
@@ -236,8 +238,14 @@ def chat(
     payload: schemas.ChatRequest,
     db: Session = Depends(get_db),
 ) -> schemas.ChatResponse:
-    now = datetime.utcnow()
-    claim = claim_chat_request(db, payload, now=now)
+    business_now = BUSINESS_CLOCK.business_now()
+    now = business_now.astimezone(timezone.utc).replace(tzinfo=None)
+    claim = claim_chat_request(
+        db,
+        payload,
+        now=now,
+        business_date=business_now.date(),
+    )
     if claim.replay is not None:
         return claim.replay.model_copy(update={"replayed": True})
 
@@ -258,7 +266,7 @@ def chat(
                 reply=FIXED_MAX_ROUNDS_REPLY,
                 ended=True,
                 end_reason="max_rounds",
-                now=datetime.utcnow(),
+                now=now,
             )
 
         try:
@@ -281,7 +289,7 @@ def chat(
                 db,
                 claim=claim,
                 code="CHAT_UPSTREAM_FAILED",
-                now=datetime.utcnow(),
+                now=now,
             )
             raise APIError(
                 503,
@@ -297,7 +305,7 @@ def chat(
             reply=reply,
             ended=ended,
             end_reason=end_reason,
-            now=datetime.utcnow(),
+            now=now,
         )
     except APIError:
         raise
@@ -312,7 +320,7 @@ def chat(
             db,
             claim=claim,
             code="CHAT_INTERNAL_FAILED",
-            now=datetime.utcnow(),
+            now=now,
         )
         raise APIError(
             500,

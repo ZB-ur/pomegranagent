@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from app.backend import models, schemas
 from app.backend.api_errors import APIError
 from app.backend.database import SessionLocal, engine
+from app.backend.routes import roster as roster_routes
 from app.backend.routes.roster import router as roster_router
 from app.backend.services import roster as roster_service
 
@@ -129,6 +130,35 @@ def test_today_is_public_and_returns_active_ordered_deduplicated_identities(
         {"id": second.id, "name": "乐乐", "nickname": "乐乐小名", "avatar": None},
         {"id": first.id, "name": "小雨", "nickname": "小雨小名", "avatar": None},
     ]
+
+
+def test_today_roster_uses_one_captured_business_date(client, db_session, monkeypatch):
+    """Catches host-calendar reads or multiple samples around Shanghai midnight."""
+    child = _child(db_session, name="跨午夜值日生")
+    _roster(db_session, roster_date="2026-09-01", child_id=child.id)
+
+    class Clock:
+        calls = 0
+
+        @classmethod
+        def business_today(cls) -> date:
+            cls.calls += 1
+            if cls.calls > 1:
+                raise AssertionError("today roster read the business clock twice")
+            return date(2026, 9, 1)
+
+    monkeypatch.setattr(roster_routes, "BUSINESS_CLOCK", Clock)
+
+    response = client.get("/api/roster/today")
+
+    assert response.status_code == 200
+    assert response.json() == [{
+        "id": child.id,
+        "name": "跨午夜值日生",
+        "nickname": "跨午夜值日生小名",
+        "avatar": None,
+    }]
+    assert Clock.calls == 1
 
 
 def test_today_is_public_empty_and_uses_one_join_query(client, db_session):

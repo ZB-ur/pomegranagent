@@ -7,6 +7,7 @@ import re
 from threading import Event, Thread, current_thread
 from types import SimpleNamespace
 from uuid import uuid4
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import event, func, select
@@ -15,9 +16,15 @@ from sqlalchemy.exc import IntegrityError, OperationalError
 from app.backend import models, schemas
 from app.backend.api_errors import APIError
 from app.backend.database import SessionLocal, engine
+from app.backend.routes import resources as resource_routes
 from app.backend.services.chat import build_chat_context, claim_chat_request
 from app.backend.services.deactivation import set_child_active
 from app.backend.services.reviews import get_review_detail
+
+
+CHILD_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000001"
+DUCK_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000002"
+UPDATED_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000003"
 
 
 def _unlock(client) -> None:
@@ -36,7 +43,7 @@ def _child(db_session, *, name: str = "小雨", active: bool = True) -> models.C
     child = models.Child(
         name=name,
         nickname=f"{name}小名",
-        avatar=f"{name}.png",
+        avatar=CHILD_AVATAR,
         active=active,
     )
     db_session.add(child)
@@ -47,7 +54,7 @@ def _child(db_session, *, name: str = "小雨", active: bool = True) -> models.C
 def _duck(db_session, *, name: str = "小黄", active: bool = True) -> models.Duck:
     duck = models.Duck(
         name=name,
-        avatar=f"{name}.png",
+        avatar=DUCK_AVATAR,
         status="健康",
         note="喜欢菜叶",
         active=active,
@@ -381,7 +388,7 @@ def test_child_deactivation_preserves_history_and_reactivation_restores_today_vi
         "id": child.id,
         "name": "小雨",
         "nickname": "小雨小名",
-        "avatar": "小雨.png",
+        "avatar": CHILD_AVATAR,
         "active": True,
         "deactivated_at": None,
         "future_roster_entries": 2,
@@ -391,7 +398,7 @@ def test_child_deactivation_preserves_history_and_reactivation_restores_today_vi
         "id": child.id,
         "name": "小雨",
         "nickname": "小雨小名",
-        "avatar": "小雨.png",
+        "avatar": CHILD_AVATAR,
     }]
 
     deactivated = client.post(f"/api/children/{child.id}/deactivate")
@@ -431,6 +438,50 @@ def test_child_deactivation_preserves_history_and_reactivation_restores_today_vi
         **reactivated.json(),
         "changed": False,
     }
+
+
+def test_child_deactivation_uses_one_business_clock_sample_for_future_impact(
+    client,
+    db_session,
+    monkeypatch,
+):
+    """Catches a UTC/host date dropping a Shanghai-local roster entry."""
+    child = models.Child(name="跨午夜幼儿", nickname=None, avatar=None, active=True)
+    db_session.add(child)
+    db_session.flush()
+    db_session.add_all([
+        models.DutyRoster(cycle="boundary", date=day, child_id=child.id)
+        for day in ("2026-09-01", "2026-09-02", "2026-09-03")
+    ])
+    db_session.commit()
+    business_now = datetime(
+        2026,
+        9,
+        1,
+        23,
+        59,
+        tzinfo=ZoneInfo("Asia/Shanghai"),
+    )
+
+    class Clock:
+        calls = 0
+
+        @classmethod
+        def business_now(cls) -> datetime:
+            cls.calls += 1
+            if cls.calls > 1:
+                raise AssertionError("deactivation read the business clock twice")
+            return business_now
+
+    monkeypatch.setattr(resource_routes, "BUSINESS_CLOCK", Clock)
+    _unlock(client)
+
+    response = client.post(f"/api/children/{child.id}/deactivate")
+
+    assert response.status_code == 200
+    assert response.json()["affected_future_roster_entries"] == 3
+    assert response.json()["deactivated_at"] == "2026-09-01T15:59:00Z"
+    assert Clock.calls == 1
 
 
 def test_duck_deactivation_filters_default_list_and_retains_feeding_history(client, db_session):
@@ -479,7 +530,7 @@ def test_duck_deactivation_filters_default_list_and_retains_feeding_history(clie
     assert included.json() == [{
         "id": duck.id,
         "name": "小黄",
-        "avatar": "小黄.png",
+        "avatar": DUCK_AVATAR,
         "status": "健康",
         "note": "喜欢菜叶",
         "active": False,
@@ -607,7 +658,12 @@ def test_race_first_conversation_and_deactivation_settle_without_partial_work_or
     def claim_in_own_session() -> None:
         with SessionLocal() as session:
             try:
-                outcomes["chat"] = claim_chat_request(session, payload, now=now)
+                outcomes["chat"] = claim_chat_request(
+                    session,
+                    payload,
+                    now=now,
+                    business_date=date(2026, 8, 23),
+                )
             except BaseException as exc:  # inspected below to reject leaked database errors
                 outcomes["chat"] = exc
 
@@ -855,7 +911,7 @@ def test_resource_crud_forces_creation_active_and_cannot_bypass_state_routes(cli
     created = client.post("/api/children", json={
         "name": "新同学",
         "nickname": "新",
-        "avatar": "new.png",
+        "avatar": CHILD_AVATAR,
         "active": False,
     })
     assert created.status_code == 200
@@ -864,7 +920,7 @@ def test_resource_crud_forces_creation_active_and_cannot_bypass_state_routes(cli
     updated = client.put(f"/api/children/{child['id']}", json={
         "name": "改名",
         "nickname": "改",
-        "avatar": "updated.png",
+        "avatar": UPDATED_AVATAR,
         "active": False,
     })
     assert updated.status_code == 200
@@ -872,7 +928,7 @@ def test_resource_crud_forces_creation_active_and_cannot_bypass_state_routes(cli
         "id": child["id"],
         "name": "改名",
         "nickname": "改",
-        "avatar": "updated.png",
+        "avatar": UPDATED_AVATAR,
         "active": True,
     }
     db_session.expire_all()
@@ -959,7 +1015,12 @@ def test_inactive_duck_is_excluded_from_new_chat_context_but_retained_in_histori
         "max_rounds": 3,
     })
     with SessionLocal() as chat_db:
-        claim = claim_chat_request(chat_db, payload, now=datetime(2026, 8, 23, 9, 0))
+        claim = claim_chat_request(
+            chat_db,
+            payload,
+            now=datetime(2026, 8, 23, 9, 0),
+            business_date=date(2026, 8, 23),
+        )
         context = build_chat_context(chat_db, claim, payload)
         chat_db.rollback()
     assert duck.name not in context.ducks_info

@@ -1,7 +1,7 @@
 """Teacher-only child and duck administration with reversible state routes."""
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
@@ -9,7 +9,8 @@ from sqlalchemy.orm import Session
 from .. import models, schemas
 from ..api_errors import APIError
 from ..auth import require_teacher_session
-from ..database import get_db
+from ..business_time import BusinessClock
+from ..database import SETTINGS, get_db
 from ..services.deactivation import (
     list_teacher_children,
     list_teacher_ducks,
@@ -19,6 +20,7 @@ from ..services.deactivation import (
 
 
 router = APIRouter()
+BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
 
 
 @router.get("/api/children", response_model=list[schemas.TeacherChildOut])
@@ -30,7 +32,7 @@ def list_children(
     return list_teacher_children(
         db,
         include_inactive=include_inactive,
-        today=date.today(),
+        today=BUSINESS_CLOCK.business_today(),
     )
 
 
@@ -80,12 +82,13 @@ def deactivate_child(
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> schemas.DeactivationResponse:
+    business_now = BUSINESS_CLOCK.business_now()
     return set_child_active(
         db,
         child_id=child_id,
         active=False,
-        today=date.today(),
-        now=datetime.now(timezone.utc),
+        today=business_now.date(),
+        now=business_now.astimezone(timezone.utc),
     )
 
 
@@ -98,12 +101,13 @@ def reactivate_child(
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> schemas.DeactivationResponse:
+    business_now = BUSINESS_CLOCK.business_now()
     return set_child_active(
         db,
         child_id=child_id,
         active=True,
-        today=date.today(),
-        now=datetime.now(timezone.utc),
+        today=business_now.date(),
+        now=business_now.astimezone(timezone.utc),
     )
 
 
@@ -170,7 +174,7 @@ def deactivate_duck(
         db,
         duck_id=duck_id,
         active=False,
-        now=datetime.now(timezone.utc),
+        now=BUSINESS_CLOCK.utc_now(),
     )
 
 
@@ -187,7 +191,7 @@ def reactivate_duck(
         db,
         duck_id=duck_id,
         active=True,
-        now=datetime.now(timezone.utc),
+        now=BUSINESS_CLOCK.utc_now(),
     )
 
 

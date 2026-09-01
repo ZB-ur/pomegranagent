@@ -338,12 +338,16 @@ def _install_external_tripwires(main_module) -> None:
 def run_server() -> None:
     browser_log_dir = Path(os.environ["BROWSER_LOG_DIR"]).resolve()
     browser_log_dir.mkdir(parents=True, exist_ok=True)
+    tts_cache = Path(os.environ["BROWSER_TTS_CACHE_DIR"]).resolve()
+    tts_cache.mkdir(parents=True, exist_ok=True)
+    runtime_root = Path(os.environ["APP_DB_PATH"]).resolve().parent
+    os.environ["APP_BUSINESS_TIMEZONE"] = "Asia/Shanghai"
+    os.environ["APP_LOG_PATH"] = str((browser_log_dir / "app.log").resolve())
+    os.environ["APP_MEDIA_ROOT"] = str((runtime_root / "media").resolve())
+    os.environ["APP_TTS_CACHE_PATH"] = str(tts_cache)
     result = fresh_import_main(browser_log_dir=browser_log_dir)
     main_module = result.module
     _install_external_tripwires(main_module)
-    tts_cache = Path(os.environ["BROWSER_TTS_CACHE_DIR"]).resolve()
-    tts_cache.mkdir(parents=True, exist_ok=True)
-    main_module.TTS_CACHE_DIR = tts_cache
     main_module.app.state.analysis_worker_factory = _NonStartingAnalysisWorker
 
     import uvicorn

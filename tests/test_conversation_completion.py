@@ -92,12 +92,11 @@ def test_complete_freezes_messages_and_creates_one_pending_job(
         calls = 0
 
         @classmethod
-        def now(cls, tz):
-            assert tz is timezone.utc
+        def utc_now(cls):
             cls.calls += 1
             return completed_at
 
-    monkeypatch.setattr(conversation_routes, "datetime", Clock)
+    monkeypatch.setattr(conversation_routes, "BUSINESS_CLOCK", Clock)
 
     response = client.post(
         f"/api/conversations/{conversation.id}/complete",
@@ -148,11 +147,10 @@ def test_complete_replays_the_frozen_snapshot_without_a_second_job(
 
     class Clock:
         @classmethod
-        def now(cls, tz):
-            assert tz is timezone.utc
+        def utc_now(cls):
             return completed_at
 
-    monkeypatch.setattr(conversation_routes, "datetime", Clock)
+    monkeypatch.setattr(conversation_routes, "BUSINESS_CLOCK", Clock)
 
     first = client.post(f"/api/conversations/{conversation.id}/complete", json=payload)
     second = client.post(f"/api/conversations/{conversation.id}/complete", json=payload)
@@ -336,7 +334,12 @@ def test_completion_write_lock_serializes_a_final_chat_commit(
         }
     )
     clock = datetime(2026, 8, 23, 8, 38, 10)
-    claim = claim_chat_request(db_session, payload, now=clock)
+    claim = claim_chat_request(
+        db_session,
+        payload,
+        now=clock,
+        business_date=clock.date(),
+    )
 
     completion_lock_acquired = Event()
     chat_attempted_write = Event()

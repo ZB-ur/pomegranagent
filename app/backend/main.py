@@ -4,7 +4,6 @@ import hashlib
 import logging
 import time
 from datetime import date, timedelta
-from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -16,24 +15,29 @@ from . import ai_engine, auth, models, schemas
 from .analysis_worker import AnalysisWorker
 from .api_errors import APIError, install_api_error_handling
 from .auth import require_teacher_session
-from .database import Base, DATABASE_PATH, DB_MODE, SessionLocal, engine, get_db
+from .business_time import BusinessClock
+from .database import Base, DATABASE_PATH, DB_MODE, SETTINGS, SessionLocal, engine, get_db
 from .http_boundary import install_same_origin_boundary
 from .routes.conversations import router as conversations_router
 from .routes.resources import router as resources_router
 from .routes.roster import router as roster_router
+from .routes.runtime import router as runtime_router
 from .schema_migrations import ensure_database_schema
 from .versioning import VERSION_FILE, load_runtime_version
 
 RUNTIME_VERSION = load_runtime_version()
+BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
+MEDIA_ROOT = SETTINGS.media_root
+TTS_CACHE_DIR = SETTINGS.tts_cache_path
 
 # 日志：同时输出到 logs/app.log 与控制台，便于排查
-LOG_DIR = Path(__file__).resolve().parent.parent.parent / "logs"
-LOG_DIR.mkdir(exist_ok=True)
+LOG_DIR = SETTINGS.log_path.parent
+LOG_DIR.mkdir(parents=True, exist_ok=True)
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
     handlers=[
-        logging.FileHandler(LOG_DIR / "app.log", encoding="utf-8"),
+        logging.FileHandler(SETTINGS.log_path, encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
@@ -74,6 +78,7 @@ app.include_router(auth.router)
 app.include_router(conversations_router)
 app.include_router(resources_router)
 app.include_router(roster_router)
+app.include_router(runtime_router)
 
 
 @app.get("/api/health", response_model=schemas.HealthResponse)
@@ -133,7 +138,7 @@ def _seed_demo_data(session_factory=SessionLocal, seed_date: date | None = None)
             db.add(models.Duck(name=name, status=status))
         db.commit()
 
-        today = seed_date or date.today()
+        today = seed_date or BUSINESS_CLOCK.business_today()
         child_ids = [
             child.id
             for child in db.scalars(select(models.Child).order_by(models.Child.id)).all()
@@ -292,9 +297,6 @@ def update_archive(
 
 
 # ---------------- 语音合成（Edge-TTS） ----------------
-TTS_CACHE_DIR = Path(__file__).resolve().parent.parent.parent / "data" / "tts_cache"
-
-
 @app.get("/api/tts")
 async def tts(text: str):
     """Edge-TTS 神经语音合成，返回 mp3 音频流。按文本哈希缓存，失败降级由前端处理。"""
