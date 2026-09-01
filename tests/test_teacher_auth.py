@@ -181,6 +181,7 @@ def test_teacher_route_inventory_has_the_session_dependency():
         ("GET", "/api/roster"),
         ("POST", "/api/roster"),
         ("POST", "/api/roster/auto"),
+        ("POST", "/api/roster/month"),
         ("PUT", "/api/roster/{}"),
         ("GET", "/api/dimensions"),
         ("POST", "/api/dimensions"),
@@ -221,6 +222,7 @@ def test_teacher_route_inventory_has_the_session_dependency():
         "/api/roster/today": {"GET"},
         "/api/roster": {"GET", "POST"},
         "/api/roster/auto": {"POST"},
+        "/api/roster/month": {"POST"},
         "/api/roster/{}": {"PUT"},
         "/api/health": {"GET"},
         "/version.json": {"GET"},
@@ -289,6 +291,11 @@ def test_teacher_routes_require_session_and_child_surface_remains_public(client)
         ("get", "/api/conversations", None),
         ("get", "/api/analysis/overview", None),
         ("post", "/api/roster/auto", {"start_date": "2026-08-24", "days": 1, "cycle": "test"}),
+        (
+            "post",
+            "/api/roster/month",
+            {"month": "invalid", "cycle": "", "entries": []},
+        ),
     ]
     for method, path, body in protected:
         request = getattr(client, method)

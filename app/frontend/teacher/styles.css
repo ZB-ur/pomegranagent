@@ -838,6 +838,43 @@ textarea { min-height: 46px; width: 100%; }
   padding-top: 16px;
 }
 .management-dialog-actions .btn { min-width: 104px; }
+.monthly-roster-dialog {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  max-height: min(720px, calc(100dvh - 32px));
+  max-width: min(900px, calc(100vw - 32px));
+  overflow: hidden;
+}
+.monthly-roster-dialog [hidden] { display: none !important; }
+.monthly-roster-dialog-body {
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.monthly-roster-form, .monthly-roster-rows { display: grid; gap: 14px; min-width: 0; }
+.monthly-roster-settings {
+  display: grid;
+  gap: 12px;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  min-width: 0;
+}
+.monthly-roster-row {
+  align-items: end;
+  background: var(--teacher-surface-soft);
+  border: 1px solid var(--teacher-border-subtle);
+  border-radius: 12px;
+  display: grid;
+  gap: 10px;
+  grid-template-columns: minmax(150px, .9fr) repeat(2, minmax(150px, 1fr)) auto;
+  min-width: 0;
+  padding: 12px;
+}
+.monthly-roster-row input, .monthly-roster-row select, .monthly-roster-remove,
+.monthly-roster-settings input, .monthly-roster-form > .btn { min-height: 44px; }
+.monthly-roster-remove { min-width: 72px; }
+.monthly-roster-dialog .management-dialog-header,
+.monthly-roster-dialog .management-dialog-actions { background: var(--teacher-surface-panel); position: relative; z-index: 1; }
 .teacher-dirty-dialog {
   max-width: min(480px, calc(100vw - 32px));
 }
@@ -1086,6 +1123,10 @@ h1[tabindex="-1"]:focus-visible, h2[tabindex="-1"]:focus-visible {
   .roster-panel-footer { align-items: stretch; grid-template-columns: minmax(0, 1fr); }
   .roster-actions { justify-content: stretch; }
   .roster-actions .btn { flex: 1 1 150px; }
+  .monthly-roster-settings { grid-template-columns: minmax(0, 1fr); }
+  .monthly-roster-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .monthly-roster-row .teacher-field:first-child { grid-column: 1 / -1; }
+  .monthly-roster-remove { grid-column: 1 / -1; width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

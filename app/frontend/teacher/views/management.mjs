@@ -69,6 +69,25 @@ function dateString(value) {
   return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
 }
 
+function monthString(value) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}$/.test(value)) return false;
+  const [year, month] = value.split('-').map(Number);
+  return year >= 1 && month >= 1 && month <= 12;
+}
+
+function firstWeekdays(month, count) {
+  if (!monthString(month) || !Number.isSafeInteger(count) || count < 0) throw invalid();
+  const result = [];
+  const cursor = new Date(`${month}-01T00:00:00Z`);
+  while (cursor.toISOString().slice(0, 7) === month && result.length < count) {
+    if (cursor.getUTCDay() !== 0 && cursor.getUTCDay() !== 6) {
+      result.push(cursor.toISOString().slice(0, 10));
+    }
+    cursor.setUTCDate(cursor.getUTCDate() + 1);
+  }
+  return result;
+}
+
 function timestamp(value) {
   return typeof value === 'string' && value.trim() !== '' && Number.isFinite(Date.parse(value));
 }
@@ -197,6 +216,99 @@ export function validateAutoRosterAck(value, expected) {
   if (!uuid(row.request_id) || row.request_id !== expected.requestId || typeof row.replayed !== 'boolean' ||
       schedule.length !== expected.days || schedule.some((entry, index) => entry.date !== expectedDates[index] ||
         entry.child_ids.some(id => !activeIds.has(id)))) throw invalid();
+  return { ...row, schedule };
+}
+
+export function parseRuntimeContext(value) {
+  const row = record(value, ['timezone', 'business_date', 'week_start', 'week_end_exclusive']);
+  if (typeof row.timezone !== 'string' || !row.timezone.trim() || row.timezone.length > 64 ||
+      !dateString(row.business_date) || !dateString(row.week_start) || !dateString(row.week_end_exclusive)) throw invalid();
+  const businessDate = new Date(`${row.business_date}T00:00:00Z`);
+  const weekStart = new Date(`${row.week_start}T00:00:00Z`);
+  const weekEnd = new Date(`${row.week_end_exclusive}T00:00:00Z`);
+  if (weekStart.getUTCDay() !== 1 || weekEnd.getTime() - weekStart.getTime() !== 7 * 86_400_000 ||
+      businessDate < weekStart || businessDate >= weekEnd) throw invalid();
+  return row;
+}
+
+export function buildMonthlyRosterRows(month, activeChildIds) {
+  if (!monthString(month)) throw invalid();
+  const ids = array(activeChildIds);
+  if (ids.some(id => !positive(id)) || new Set(ids).size !== ids.length) throw invalid();
+  const rowCount = Math.ceil(ids.length / 2);
+  const dates = firstWeekdays(month, rowCount);
+  return Array.from({ length: rowCount }, (_unused, index) => ({
+    date: dates[index] || '',
+    childIds: [ids[index * 2], ids[index * 2 + 1] ?? null],
+  }));
+}
+
+export function regenerateMonthlyRosterDates(month, value) {
+  if (!monthString(month)) throw invalid();
+  const rows = array(value).map(item => {
+    const row = record(item, ['date', 'childIds']);
+    const ids = array(row.childIds);
+    if (ids.length !== 2 || ids.some(id => id !== null && !positive(id))) throw invalid();
+    return { childIds: ids };
+  });
+  const dates = firstWeekdays(month, rows.length);
+  return rows.map((row, index) => ({
+    date: dates[index] || '',
+    childIds: [...row.childIds],
+  }));
+}
+
+export function normalizeMonthlyRosterSubmission(value) {
+  const draft = record(value, ['month', 'cycle', 'rows', 'activeChildIds', 'replaceExisting']);
+  if (!monthString(draft.month) || typeof draft.cycle !== 'string' ||
+      !draft.cycle.trim() || draft.cycle.trim().length > 64 || typeof draft.replaceExisting !== 'boolean') throw invalid();
+  const activeIds = array(draft.activeChildIds);
+  if (activeIds.length < 2 || activeIds.some(id => !positive(id)) ||
+      new Set(activeIds).size !== activeIds.length) throw invalid();
+  const allowed = new Set(activeIds);
+  const rows = array(draft.rows);
+  if (rows.length < 1 || rows.length > 31) throw invalid();
+  const entries = rows.map(item => {
+    const row = record(item, ['date', 'childIds']);
+    const ids = array(row.childIds);
+    if (!dateString(row.date) || row.date.slice(0, 7) !== draft.month || ids.length !== 2 ||
+        ids.some(id => !positive(id) || !allowed.has(id)) || ids[0] === ids[1]) throw invalid();
+    return { date: row.date, childIds: [...ids].sort((left, right) => left - right) };
+  }).sort((left, right) => left.date.localeCompare(right.date));
+  if (new Set(entries.map(entry => entry.date)).size !== entries.length) throw invalid();
+  return {
+    month: draft.month,
+    cycle: draft.cycle.trim(),
+    entries,
+    replaceExisting: draft.replaceExisting,
+  };
+}
+
+export function validateMonthlyRosterAck(value, expectedValue) {
+  const expected = record(expectedValue, ['requestId', 'month', 'cycle', 'entries', 'replaceExisting']);
+  if (!CANONICAL_V4_UUID.test(expected.requestId) || !monthString(expected.month) ||
+      typeof expected.cycle !== 'string' || !expected.cycle || typeof expected.replaceExisting !== 'boolean') throw invalid();
+  const expectedEntries = array(expected.entries).map(item => {
+    const entry = record(item, ['date', 'childIds']);
+    const ids = array(entry.childIds);
+    if (!dateString(entry.date) || entry.date.slice(0, 7) !== expected.month || ids.length !== 2 ||
+        ids.some(id => !positive(id)) || ids[0] >= ids[1]) throw invalid();
+    return { date: entry.date, childIds: ids };
+  });
+  const row = record(value, ['request_id', 'month', 'schedule', 'replayed']);
+  const schedule = array(row.schedule).map(item => {
+    const entry = record(item, ['date', 'cycle', 'child_ids']);
+    const ids = array(entry.child_ids);
+    if (!dateString(entry.date) || entry.date.slice(0, 7) !== expected.month ||
+        entry.cycle !== expected.cycle || ids.length !== 2 || ids.some(id => !positive(id)) || ids[0] >= ids[1]) throw invalid();
+    return { ...entry, child_ids: ids };
+  });
+  if (row.request_id !== expected.requestId || row.month !== expected.month || typeof row.replayed !== 'boolean' ||
+      schedule.length !== expectedEntries.length || schedule.some((entry, index) => {
+        const wanted = expectedEntries[index];
+        return entry.date !== wanted.date || entry.child_ids[0] !== wanted.childIds[0] ||
+          entry.child_ids[1] !== wanted.childIds[1];
+      })) throw invalid();
   return { ...row, schedule };
 }
 
@@ -756,12 +868,18 @@ export function createManagementRoutes(dependencies) {
 
   const roster = context => {
     const scope = scopeFor(context);
+    const monthlyScope = scopeFor(context);
     const view = h('section', { class: 'management-view roster-view' });
     let children = [];
     let rows = [];
     let busy = false;
     let retained = null;
     let disposed = false;
+    let rosterReady = false;
+    let runtimeReady = false;
+    let monthlyReady = false;
+    let monthlyMonth = null;
+    let monthlyAvailability = null;
     const dialogs = new Set();
     const hero = h('header', { class: 'management-hero' });
     const heroCopy = h('div', { class: 'management-copy' },
@@ -778,7 +896,7 @@ export function createManagementRoutes(dependencies) {
     hero.append(heroCopy, h('div', { class: 'management-toolbar' }, monthlyLauncher));
     const capability = h('p', {
       id: 'roster-monthly-capability', class: 'roster-capability',
-      text: '按多日期录入本月名单待批量 API 开放后启用；当前可安排单日或自动生成连续工作日。',
+      text: '正在读取当前业务日期；单日安排和自动生成可继续使用。',
     });
     const status = h('p', { role: 'status', 'aria-live': 'polite', class: 'management-status' });
     const rosterCard = h('section', { class: 'card management-list-card roster-preview' });
@@ -807,6 +925,7 @@ export function createManagementRoutes(dependencies) {
       if (discardRetry) retained = null;
       if (dialog.open) dialog.close();
       forgetDialog(dialog);
+      if (monthlyAvailability?.dialog === dialog) monthlyAvailability = null;
       if (!disposed && launcher?.isConnected) launcher.focus();
     };
     const mountDialog = (dialog, launcher) => {
@@ -819,10 +938,15 @@ export function createManagementRoutes(dependencies) {
       dialog.showModal();
     };
 
+    const syncMonthlyReady = () => {
+      monthlyReady = runtimeReady && rosterReady && monthlyMonth !== null;
+      monthlyLauncher.disabled = busy || !monthlyReady;
+    };
     const setBusy = value => {
       busy = value;
       for (const control of view.querySelectorAll('input, select, textarea, button')) control.disabled = value;
-      if (!value) monthlyLauncher.disabled = true;
+      if (!value) monthlyAvailability?.sync();
+      syncMonthlyReady();
     };
     const render = () => {
       rosterList.replaceChildren();
@@ -859,16 +983,40 @@ export function createManagementRoutes(dependencies) {
         if (!rosterResponse.current || !childResponse.current) return;
         rows = parseRosterRows(rosterResponse.result);
         children = parseChildren(childResponse.result);
+        rosterReady = true;
         render();
+        syncMonthlyReady();
       } catch (_error) {
         if (scope.alive(token)) {
           rows = [];
           children = [];
+          rosterReady = false;
           rosterList.replaceChildren();
           rosterCount.textContent = '0 天';
           status.setAttribute('role', 'alert');
           status.textContent = '排班加载失败，请重试。';
+          syncMonthlyReady();
         }
+      }
+    };
+
+    const loadMonthlyContext = async () => {
+      const token = monthlyScope.next();
+      try {
+        const response = await monthlyScope.run('/api/runtime/context', {}, token);
+        if (!response.current) return;
+        const runtime = parseRuntimeContext(response.result);
+        monthlyMonth = runtime.business_date.slice(0, 7);
+        runtimeReady = true;
+        capability.textContent = '可按选定月份批量录入搭档；单日安排和自动生成仍可独立使用。';
+      } catch (_error) {
+        if (monthlyScope.alive(token)) {
+          monthlyMonth = null;
+          runtimeReady = false;
+          capability.textContent = '无法读取当前业务日期，本月录入暂不可用；单日安排和自动生成仍可使用。';
+        }
+      } finally {
+        if (monthlyScope.alive(token)) syncMonthlyReady();
       }
     };
 
@@ -912,6 +1060,264 @@ export function createManagementRoutes(dependencies) {
     const addActiveOptions = select => {
       select.append(option('', '请选择', true));
       for (const child of activeChildren()) select.append(option(String(child.id), displayName(child)));
+    };
+
+    const openMonthly = () => {
+      if (busy || !monthlyReady || monthlyMonth === null) return;
+      retained = null;
+      const dialog = h('dialog', {
+        'aria-label': '录入本月搭档',
+        class: 'management-dialog monthly-roster-dialog',
+      });
+      const formId = 'management-roster-monthly-form';
+      const form = h('form', { id: formId, class: 'monthly-roster-form' });
+      const month = h('input', {
+        type: 'month', required: '', value: monthlyMonth, 'aria-label': '排班月份',
+      });
+      const cycle = h('input', {
+        required: '', maxlength: '64', autocomplete: 'off', 'aria-label': '排班周期',
+      });
+      const settings = h('div', { class: 'monthly-roster-settings' },
+        field('排班月份', month),
+        field('排班周期', cycle),
+      );
+      const rowList = h('div', { class: 'monthly-roster-rows' });
+      const dialogStatus = h('p', {
+        role: 'status', 'aria-live': 'polite', class: 'management-dialog-status',
+      });
+      const guidance = h('p', {
+        class: 'management-capability-note',
+        text: '每个日期需选择两名不同的启用中幼儿。',
+      });
+      const addRow = h('button', { type: 'button', class: 'btn gray', text: '新增日期' });
+      const cancel = h('button', { type: 'button', class: 'btn gray', text: '取消' });
+      const overwrite = h('button', {
+        type: 'button', class: 'btn gray', text: '覆盖已有排班',
+      });
+      const submit = h('button', {
+        type: 'submit', form: formId, class: 'btn', text: '保存本月排班',
+      });
+      const actions = h('footer', { class: 'management-dialog-actions' }, cancel, submit);
+      let draftRows = buildMonthlyRosterRows(
+        monthlyMonth,
+        activeChildren().map(item => item.id),
+      );
+
+      const invalidate = () => {
+        retained = null;
+        if (overwrite.isConnected) overwrite.remove();
+        dialogStatus.setAttribute('role', 'status');
+        dialogStatus.textContent = '';
+      };
+      const currentActiveIds = () => activeChildren().map(item => item.id);
+      const selectedChild = value => {
+        if (value === '') return null;
+        const parsed = Number(value);
+        return positive(parsed) ? parsed : null;
+      };
+      const sync = () => {
+        const enoughChildren = currentActiveIds().length >= 2;
+        const rowCountOkay = draftRows.length >= 1 && draftRows.length <= 31;
+        submit.disabled = busy || !enoughChildren || !rowCountOkay;
+        overwrite.disabled = busy || !enoughChildren || !rowCountOkay;
+        addRow.disabled = busy || draftRows.length >= 31;
+        if (!enoughChildren) {
+          guidance.textContent = '至少需要两名启用中幼儿才能录入本月搭档。';
+        } else if (!rowCountOkay) {
+          guidance.textContent = '本月至少需要一个排班日期，最多 31 个。';
+        } else {
+          guidance.textContent = '每个日期需选择两名不同的启用中幼儿。';
+        }
+      };
+      monthlyAvailability = { dialog, sync };
+
+      const renderDraftRows = () => {
+        rowList.replaceChildren();
+        draftRows.forEach((draft, rowIndex) => {
+          const humanIndex = rowIndex + 1;
+          const date = h('input', {
+            type: 'date', required: '', value: draft.date,
+            'aria-label': `第 ${humanIndex} 行日期`,
+          });
+          const first = h('select', {
+            required: '', 'aria-label': `第 ${humanIndex} 行幼儿 1`,
+          });
+          const second = h('select', {
+            required: '', 'aria-label': `第 ${humanIndex} 行幼儿 2`,
+          });
+          const remove = h('button', {
+            type: 'button', class: 'btn gray monthly-roster-remove',
+            text: '删除', 'aria-label': `删除第 ${humanIndex} 行`,
+          });
+          const populate = (select, selected) => {
+            select.replaceChildren(option('', '请选择'));
+            for (const child of activeChildren()) {
+              select.append(option(String(child.id), displayName(child), child.id === selected));
+            }
+            select.value = selected === null ? '' : String(selected);
+          };
+          populate(first, draft.childIds[0]);
+          populate(second, draft.childIds[1]);
+          const syncPairOptions = () => {
+            const firstValue = first.value;
+            const secondValue = second.value;
+            for (const item of first.options) item.disabled = item.value !== '' && item.value === secondValue;
+            for (const item of second.options) item.disabled = item.value !== '' && item.value === firstValue;
+          };
+          date.addEventListener('input', () => {
+            draftRows[rowIndex].date = date.value;
+            invalidate();
+          });
+          first.addEventListener('change', () => {
+            draftRows[rowIndex].childIds[0] = selectedChild(first.value);
+            syncPairOptions();
+            invalidate();
+          });
+          second.addEventListener('change', () => {
+            draftRows[rowIndex].childIds[1] = selectedChild(second.value);
+            syncPairOptions();
+            invalidate();
+          });
+          remove.addEventListener('click', () => {
+            draftRows.splice(rowIndex, 1);
+            invalidate();
+            renderDraftRows();
+          });
+          syncPairOptions();
+          rowList.append(h('article', {
+            class: 'monthly-roster-row', 'data-monthly-roster-row': '',
+          },
+          field(`第 ${humanIndex} 行日期`, date),
+          field(`第 ${humanIndex} 行幼儿 1`, first),
+          field(`第 ${humanIndex} 行幼儿 2`, second),
+          remove,
+          ));
+        });
+        sync();
+      };
+
+      const collect = replaceExisting => normalizeMonthlyRosterSubmission({
+        month: month.value,
+        cycle: cycle.value,
+        rows: draftRows,
+        activeChildIds: currentActiveIds(),
+        replaceExisting,
+      });
+      const sendMonthly = async (normalized, action) => {
+        if (busy) return;
+        const signature = JSON.stringify(normalized);
+        const snapshot = retained?.kind === 'monthly' && retained.signature === signature
+          ? retained
+          : {
+            kind: 'monthly', signature, normalized,
+            requestId: createRequestId(),
+            month: normalized.month,
+            cycle: normalized.cycle,
+            entries: normalized.entries,
+            replaceExisting: normalized.replaceExisting,
+          };
+        if (!CANONICAL_V4_UUID.test(snapshot.requestId)) throw invalid();
+        retained = snapshot;
+        let succeeded = false;
+        setBusy(true);
+        try {
+          const response = await monthlyScope.run('/api/roster/month', {
+            method: 'POST',
+            requestId: snapshot.requestId,
+            body: {
+              request_id: snapshot.requestId,
+              month: snapshot.month,
+              cycle: snapshot.cycle,
+              entries: snapshot.entries.map(entry => ({
+                date: entry.date,
+                child_ids: entry.childIds,
+              })),
+              replace_existing: snapshot.replaceExisting,
+            },
+          });
+          if (!response.current) return;
+          validateMonthlyRosterAck(response.result, {
+            requestId: snapshot.requestId,
+            month: snapshot.month,
+            cycle: snapshot.cycle,
+            entries: snapshot.entries,
+            replaceExisting: snapshot.replaceExisting,
+          });
+          retained = null;
+          status.setAttribute('role', 'status');
+          status.textContent = '排班已保存';
+          await reload();
+          succeeded = scope.alive() && monthlyScope.alive();
+        } catch (error) {
+          if (monthlyScope.alive()) {
+            dialogStatus.setAttribute('role', 'alert');
+            if (!snapshot.replaceExisting && errorCode(error) === 'ROSTER_DATE_CONFLICT') {
+              dialogStatus.textContent = '目标日期已有排班，可确认覆盖这些日期。';
+              actions.insertBefore(overwrite, submit);
+            } else {
+              dialogStatus.textContent = snapshot.replaceExisting
+                ? '覆盖失败，请使用相同内容重试。'
+                : '排班保存失败，请使用相同内容重试。';
+            }
+          }
+        } finally {
+          if (monthlyScope.alive()) {
+            setBusy(false);
+            if (succeeded) closeDialog(dialog, monthlyLauncher);
+            else if (action.isConnected) action.focus();
+          }
+        }
+      };
+      const submitDraft = (replaceExisting, action) => {
+        let normalized;
+        try {
+          normalized = collect(replaceExisting);
+        } catch (_error) {
+          dialogStatus.setAttribute('role', 'alert');
+          dialogStatus.textContent = '请检查月份、周期、日期，并为每行选择两名不同的启用中幼儿。';
+          action.focus();
+          return;
+        }
+        void sendMonthly(normalized, action);
+      };
+
+      month.addEventListener('input', invalidate);
+      month.addEventListener('change', () => {
+        invalidate();
+        if (!monthString(month.value)) return;
+        draftRows = regenerateMonthlyRosterDates(month.value, draftRows);
+        renderDraftRows();
+      });
+      cycle.addEventListener('input', invalidate);
+      addRow.addEventListener('click', () => {
+        if (!monthString(month.value) || draftRows.length >= 31) return;
+        const used = new Set(draftRows.map(item => item.date));
+        const nextDate = firstWeekdays(month.value, 31).find(date => !used.has(date));
+        if (nextDate === undefined) return;
+        draftRows.push({ date: nextDate, childIds: [null, null] });
+        invalidate();
+        renderDraftRows();
+      });
+      cancel.addEventListener('click', () => closeDialog(dialog, monthlyLauncher, { discardRetry: true }));
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        if (!busy) submitDraft(false, submit);
+      });
+      overwrite.addEventListener('click', () => {
+        if (!busy) submitDraft(true, overwrite);
+      });
+      form.append(settings, guidance, rowList, addRow, dialogStatus);
+      dialog.append(
+        h('header', { class: 'management-dialog-header' },
+          h('p', { class: 'management-eyebrow', text: '班级月排班' }),
+          h('h2', { text: '录入本月搭档' }),
+        ),
+        h('div', { class: 'management-dialog-body monthly-roster-dialog-body' }, form),
+        actions,
+      );
+      renderDraftRows();
+      mountDialog(dialog, monthlyLauncher);
+      month.focus();
     };
 
     const openManual = () => {
@@ -1023,12 +1429,15 @@ export function createManagementRoutes(dependencies) {
       startDate.focus();
     };
 
+    monthlyLauncher.addEventListener('click', openMonthly);
     manualLauncher.addEventListener('click', openManual);
     automaticLauncher.addEventListener('click', openAutomatic);
     void reload();
+    void loadMonthlyContext();
     return { cleanup: () => {
       disposed = true;
       scope.cleanup();
+      monthlyScope.cleanup();
       for (const dialog of dialogs) {
         if (dialog.open) dialog.close();
         if (dialog.isConnected) dialog.remove();

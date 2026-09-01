@@ -2,10 +2,14 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildMonthlyRosterRows,
   createManagementRoutes,
+  normalizeMonthlyRosterSubmission,
   parseChildren,
   parseDucks,
   parseRosterRows,
+  parseRuntimeContext,
+  regenerateMonthlyRosterDates,
   validateArchive,
   validateAvatarMediaAck,
   validateChildAck,
@@ -13,6 +17,7 @@ import {
   validateDuckAck,
   validateDailyRosterAck,
   validateAutoRosterAck,
+  validateMonthlyRosterAck,
 } from '../../../app/frontend/teacher/views/management.mjs';
 
 
@@ -185,4 +190,116 @@ test('roster rows and both idempotent acknowledgements are exact', () => {
     schedule,
     replayed: false,
   }, autoExpected), TypeError);
+});
+
+
+test('monthly defaults pair active children in order and regenerate only dates on month change', () => {
+  const rows = buildMonthlyRosterRows('2026-08', [7, 8, 9, 10, 11]);
+  assert.deepEqual(rows, [
+    { date: '2026-08-03', childIds: [7, 8] },
+    { date: '2026-08-04', childIds: [9, 10] },
+    { date: '2026-08-05', childIds: [11, null] },
+  ]);
+  assert.deepEqual(regenerateMonthlyRosterDates('2026-09', rows), [
+    { date: '2026-09-01', childIds: [7, 8] },
+    { date: '2026-09-02', childIds: [9, 10] },
+    { date: '2026-09-03', childIds: [11, null] },
+  ]);
+  assert.deepEqual(buildMonthlyRosterRows('2026-08', []), []);
+  assert.deepEqual(buildMonthlyRosterRows('2026-08', [7]), [
+    { date: '2026-08-03', childIds: [7, null] },
+  ]);
+  for (const invalid of [
+    ['2026-13', [7, 8]],
+    ['2026-08', [7, 7]],
+    ['2026-08', [0, 8]],
+  ]) assert.throws(() => buildMonthlyRosterRows(invalid[0], invalid[1]), TypeError);
+});
+
+
+test('monthly submission canonicalizes dates and pairs and rejects every editable invalid state', () => {
+  const draft = {
+    month: '2026-08',
+    cycle: ' 2026-秋季 ',
+    rows: [
+      { date: '2026-08-25', childIds: [10, 9] },
+      { date: '2026-08-24', childIds: [8, 7] },
+    ],
+    activeChildIds: [7, 8, 9, 10],
+    replaceExisting: false,
+  };
+  assert.deepEqual(normalizeMonthlyRosterSubmission(draft), {
+    month: '2026-08',
+    cycle: '2026-秋季',
+    entries: [
+      { date: '2026-08-24', childIds: [7, 8] },
+      { date: '2026-08-25', childIds: [9, 10] },
+    ],
+    replaceExisting: false,
+  });
+  for (const changed of [
+    { month: '2026-09' },
+    { cycle: '   ' },
+    { rows: [] },
+    { rows: [{ date: '2026-08-24', childIds: [7, 7] }] },
+    { rows: [{ date: '2026-08-24', childIds: [7, null] }] },
+    { rows: [{ date: '2026-08-24', childIds: [7, 99] }] },
+    { rows: [
+      { date: '2026-08-24', childIds: [7, 8] },
+      { date: '2026-08-24', childIds: [9, 10] },
+    ] },
+    { replaceExisting: 'yes' },
+  ]) assert.throws(() => normalizeMonthlyRosterSubmission({ ...draft, ...changed }), TypeError);
+});
+
+
+test('runtime context and monthly acknowledgement are exact and mutation sensitive', () => {
+  const runtime = {
+    timezone: 'Asia/Shanghai',
+    business_date: '2026-09-02',
+    week_start: '2026-08-31',
+    week_end_exclusive: '2026-09-07',
+  };
+  assert.deepEqual(parseRuntimeContext(runtime), runtime);
+  for (const invalid of [
+    { ...runtime, extra: true },
+    { ...runtime, business_date: '2026-09-31' },
+    { ...runtime, week_end_exclusive: '2026-09-06' },
+  ]) assert.throws(() => parseRuntimeContext(invalid), TypeError);
+
+  const expected = {
+    requestId: 'c30a6409-58b8-48f0-96f0-8ff679bebed7',
+    month: '2026-09',
+    cycle: '2026-秋季',
+    entries: [
+      { date: '2026-09-01', childIds: [7, 8] },
+      { date: '2026-09-02', childIds: [9, 10] },
+    ],
+    replaceExisting: false,
+  };
+  const acknowledgement = {
+    request_id: expected.requestId,
+    month: expected.month,
+    schedule: [
+      { date: '2026-09-01', cycle: expected.cycle, child_ids: [7, 8] },
+      { date: '2026-09-02', cycle: expected.cycle, child_ids: [9, 10] },
+    ],
+    replayed: false,
+  };
+  assert.deepEqual(validateMonthlyRosterAck(acknowledgement, expected), acknowledgement);
+  for (const invalid of [
+    { ...acknowledgement, extra: true },
+    { ...acknowledgement, request_id: 'd30a6409-58b8-48f0-96f0-8ff679bebed7' },
+    { ...acknowledgement, month: '2026-08' },
+    { ...acknowledgement, schedule: [...acknowledgement.schedule].reverse() },
+    { ...acknowledgement, schedule: [
+      { ...acknowledgement.schedule[0], cycle: 'wrong' },
+      acknowledgement.schedule[1],
+    ] },
+    { ...acknowledgement, schedule: [
+      { ...acknowledgement.schedule[0], child_ids: [8, 7] },
+      acknowledgement.schedule[1],
+    ] },
+    { ...acknowledgement, replayed: 'yes' },
+  ]) assert.throws(() => validateMonthlyRosterAck(invalid, expected), TypeError);
 });

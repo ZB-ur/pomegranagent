@@ -11,6 +11,8 @@ from tests.browser.conftest import is_exact_fixture_url
 PIN = "1234"
 VIEWPORTS = [{"width": 1024, "height": 576}, {"width": 1280, "height": 720}]
 VIEWPORT_IDS = ["1024x576", "1280x720"]
+MONTHLY_VIEWPORTS = [{"width": 1024, "height": 768}, {"width": 1440, "height": 900}]
+MONTHLY_VIEWPORT_IDS = ["1024x768", "1440x900"]
 ROOT = Path(__file__).resolve().parents[2]
 OLD_AVATAR = "/api/media/avatars/a30a6409-58b8-48f0-96f0-8ff679bebed7"
 NEW_AVATAR_ID = "b30a6409-58b8-48f0-96f0-8ff679bebed7"
@@ -739,6 +741,19 @@ def test_duck_archive_summary_is_text_and_roster_uses_frozen_idempotent_routes(t
     page.route(f"{teacher_browser.server.base_url}/api/children?include_inactive=true", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(children, ensure_ascii=False)))
     page.route(f"{teacher_browser.server.base_url}/api/ducks?include_inactive=true", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(ducks, ensure_ascii=False)))
     page.route(f"{teacher_browser.server.base_url}/api/roster", lambda route: route.fulfill(status=200, content_type="application/json", body="[]"))
+    page.route(
+        f"{teacher_browser.server.base_url}/api/runtime/context",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "timezone": "Asia/Shanghai",
+                "business_date": "2026-09-02",
+                "week_start": "2026-08-31",
+                "week_end_exclusive": "2026-09-07",
+            }),
+        ),
+    )
     def archive(route):
         archive_calls.append(route.request.url)
         route.fulfill(status=200, content_type="application/json", body='{"duck_id":9,"summary":"<img src=x onerror=secret>"}')
@@ -777,19 +792,20 @@ def test_duck_archive_summary_is_text_and_roster_uses_frozen_idempotent_routes(t
     page.get_by_role("heading", name="值日排班", exact=True).wait_for()
     page.get_by_text("暂无排班", exact=True).wait_for()
     batch = page.get_by_role("button", name="录入本月名单", exact=True)
-    pending_copy = page.get_by_text(
-        "按多日期录入本月名单待批量 API 开放后启用；当前可安排单日或自动生成连续工作日。",
+    batch.wait_for()
+    page.wait_for_function("button => !button.disabled", arg=batch.element_handle())
+    ready_copy = page.get_by_text(
+        "可按选定月份批量录入搭档；单日安排和自动生成仍可独立使用。",
         exact=True,
     )
-    assert batch.is_disabled()
-    assert pending_copy.count() == 1
-    request_count = len(requests)
-    batch.evaluate(
-        "button => new Promise(resolve => { "
-        "button.click(); requestAnimationFrame(() => resolve()); })"
-    )
-    assert len(requests) == request_count
-    assert page.get_by_label("排班日期", exact=True).count() == 0
+    assert ready_copy.count() == 1
+    batch.click()
+    monthly_dialog = page.get_by_role("dialog", name="录入本月搭档", exact=True)
+    monthly_dialog.wait_for()
+    assert monthly_dialog.get_by_label("排班月份", exact=True).input_value() == "2026-09"
+    page.keyboard.press("Escape")
+    monthly_dialog.wait_for(state="detached")
+    assert batch.evaluate("button => document.activeElement === button")
 
     daily_launcher = page.get_by_role("button", name="安排当日", exact=True)
     daily_launcher.click()
@@ -811,6 +827,203 @@ def test_duck_archive_summary_is_text_and_roster_uses_frozen_idempotent_routes(t
     body = json.loads(calls[0].post_data)
     assert set(body) == {"request_id", "cycle", "child_ids"}
     assert calls[0].headers["x-request-id"] == body["request_id"]
+
+
+@pytest.mark.parametrize("viewport", MONTHLY_VIEWPORTS, ids=MONTHLY_VIEWPORT_IDS)
+def test_monthly_roster_defaults_rows_and_retries_only_the_unchanged_snapshot(
+    teacher_browser,
+    viewport,
+):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    children = [
+        {
+            "id": identifier,
+            "name": f"幼儿{identifier}",
+            "nickname": None,
+            "avatar": None,
+            "active": True,
+            "deactivated_at": None,
+            "future_roster_entries": 0,
+            "has_active_conversation": False,
+        }
+        for identifier in (7, 8, 9, 10, 11)
+    ]
+    calls = []
+    final_body = None
+    roster_reads = 0
+
+    page.route(
+        f"{teacher_browser.server.base_url}/api/runtime/context",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "timezone": "Asia/Shanghai",
+                "business_date": "2026-09-02",
+                "week_start": "2026-08-31",
+                "week_end_exclusive": "2026-09-07",
+            }),
+        ),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(children, ensure_ascii=False),
+        ),
+    )
+
+    def roster(route):
+        nonlocal roster_reads
+        roster_reads += 1
+        rows = []
+        if final_body is not None:
+            rows = [
+                {
+                    "id": index,
+                    "cycle": final_body["cycle"],
+                    "date": entry["date"],
+                    "child_id": child_id,
+                }
+                for index, (entry, child_id) in enumerate(
+                    (
+                        (entry, child_id)
+                        for entry in final_body["entries"]
+                        for child_id in entry["child_ids"]
+                    ),
+                    start=1,
+                )
+            ]
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(rows, ensure_ascii=False),
+        )
+
+    def monthly(route):
+        nonlocal final_body
+        body = json.loads(route.request.post_data)
+        calls.append({
+            "body": body,
+            "request_id": route.request.headers.get("x-request-id"),
+        })
+        if len(calls) < 3:
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body=json.dumps({"error": {
+                    "code": "INTERNAL_ERROR",
+                    "message": "synthetic monthly failure",
+                    "field_errors": {},
+                    "retryable": True,
+                    "request_id": body["request_id"],
+                }}),
+            )
+            return
+        final_body = body
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "request_id": body["request_id"],
+                "month": body["month"],
+                "schedule": [
+                    {
+                        "date": entry["date"],
+                        "cycle": body["cycle"],
+                        "child_ids": entry["child_ids"],
+                    }
+                    for entry in body["entries"]
+                ],
+                "replayed": True,
+            }, ensure_ascii=False),
+        )
+
+    page.route(f"{teacher_browser.server.base_url}/api/roster", roster)
+    page.route(f"{teacher_browser.server.base_url}/api/roster/month", monthly)
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#roster",
+        wait_until="domcontentloaded",
+    )
+    setup(page)
+    page.get_by_text("暂无排班", exact=True).wait_for()
+    launcher = page.get_by_role("button", name="录入本月名单", exact=True)
+    page.wait_for_function("button => !button.disabled", arg=launcher.element_handle())
+    launcher.click()
+    dialog = page.get_by_role("dialog", name="录入本月搭档", exact=True)
+    dialog.wait_for()
+
+    assert dialog.get_by_label("排班月份", exact=True).input_value() == "2026-09"
+    assert dialog.locator("[data-monthly-roster-row]").count() == 3
+    assert [
+        dialog.get_by_label(f"第 {index} 行日期", exact=True).input_value()
+        for index in range(1, 4)
+    ] == ["2026-09-01", "2026-09-02", "2026-09-03"]
+    assert [
+        (
+            dialog.get_by_label(f"第 {index} 行幼儿 1", exact=True).input_value(),
+            dialog.get_by_label(f"第 {index} 行幼儿 2", exact=True).input_value(),
+        )
+        for index in range(1, 4)
+    ] == [("7", "8"), ("9", "10"), ("11", "")]
+
+    dialog.get_by_label("排班月份", exact=True).fill("2026-10")
+    dialog.get_by_label("排班月份", exact=True).dispatch_event("change")
+    assert [
+        dialog.get_by_label(f"第 {index} 行日期", exact=True).input_value()
+        for index in range(1, 4)
+    ] == ["2026-10-01", "2026-10-02", "2026-10-05"]
+    dialog.get_by_label("第 3 行幼儿 2", exact=True).select_option("7")
+    dialog.get_by_role("button", name="删除第 2 行", exact=True).click()
+    assert dialog.locator("[data-monthly-roster-row]").count() == 2
+    dialog.get_by_role("button", name="新增日期", exact=True).click()
+    assert dialog.locator("[data-monthly-roster-row]").count() == 3
+    assert dialog.get_by_label("第 3 行日期", exact=True).input_value() == "2026-10-02"
+    dialog.get_by_label("第 3 行幼儿 1", exact=True).select_option("9")
+    dialog.get_by_label("第 3 行幼儿 2", exact=True).select_option("10")
+    cycle = dialog.get_by_label("排班周期", exact=True)
+    cycle.fill(" 2026-秋季 ")
+    submit = dialog.get_by_role("button", name="保存本月排班", exact=True)
+
+    submit.click()
+    dialog.get_by_text("排班保存失败，请使用相同内容重试。", exact=True).wait_for()
+    first_id = calls[0]["body"]["request_id"]
+    assert calls[0]["request_id"] == first_id
+    cycle.fill("2026-秋季-调整")
+    submit.click()
+    submit_handle = submit.element_handle()
+    assert submit_handle is not None
+    page.wait_for_function("button => !button.disabled", arg=submit_handle)
+    assert len(calls) == 2
+    second_id = calls[1]["body"]["request_id"]
+    assert second_id != first_id
+
+    submit.click()
+    dialog.wait_for(state="detached")
+    page.get_by_text("排班已保存", exact=True).wait_for()
+    assert len(calls) == 3
+    assert calls[2] == calls[1]
+    assert calls[1]["body"] == {
+        "request_id": second_id,
+        "month": "2026-10",
+        "cycle": "2026-秋季-调整",
+        "entries": [
+            {"date": "2026-10-01", "child_ids": [7, 8]},
+            {"date": "2026-10-02", "child_ids": [9, 10]},
+            {"date": "2026-10-05", "child_ids": [7, 11]},
+        ],
+        "replace_existing": False,
+    }
+    page.get_by_text(
+        "2026-10-05 · 2026-秋季-调整 · 幼儿7、幼儿11",
+        exact=True,
+    ).wait_for()
+    assert roster_reads == 2
+    assert launcher.evaluate("button => document.activeElement === button")
 
 
 def test_daily_roster_normalizes_reverse_selected_child_ids_before_validating_ack(

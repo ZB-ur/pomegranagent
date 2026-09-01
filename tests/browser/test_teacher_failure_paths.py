@@ -1383,3 +1383,277 @@ def test_teacher_roster_delay_is_single_flight(teacher_browser, case):
                 pass
         page.unroute(mutation_url, mutation_handler)
         held_routes.clear()
+
+
+@pytest.mark.parametrize(
+    "viewport",
+    [{"width": 1024, "height": 768}, {"width": 1440, "height": 900}],
+    ids=["1024x768", "1440x900"],
+)
+def test_monthly_context_failure_disables_only_monthly_entry(
+    teacher_browser,
+    viewport,
+):
+    """A failed independent calendar capability must not take down roster fallbacks."""
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    runtime_calls = 0
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+
+    def runtime(route):
+        nonlocal runtime_calls
+        runtime_calls += 1
+        route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"error": {
+                "code": "INTERNAL_ERROR",
+                "message": RAW_SECRET,
+                "field_errors": {},
+                "retryable": True,
+                "request_id": "runtime-failure",
+            }}),
+        )
+
+    page.route(f"{teacher_browser.server.base_url}/api/runtime/context", runtime)
+    page.route(
+        f"{teacher_browser.server.base_url}/api/roster",
+        lambda route: _fulfill_json(route, []),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: _fulfill_json(route, ROSTER_CHILDREN),
+    )
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#roster",
+        wait_until="domcontentloaded",
+    )
+    _unlock_teacher(page, "值日排班")
+    page.get_by_text(
+        "无法读取当前业务日期，本月录入暂不可用；单日安排和自动生成仍可使用。",
+        exact=True,
+    ).wait_for()
+
+    monthly = page.get_by_role("button", name="录入本月名单", exact=True)
+    manual = page.get_by_role("button", name="安排当日", exact=True)
+    automatic = page.get_by_role("button", name="自动生成", exact=True)
+    assert runtime_calls == 1
+    assert monthly.is_disabled()
+    assert not manual.is_disabled()
+    assert not automatic.is_disabled()
+    manual.click()
+    manual_dialog = page.get_by_role("dialog", name="安排当日值日", exact=True)
+    manual_dialog.wait_for()
+    page.keyboard.press("Escape")
+    manual_dialog.wait_for(state="detached")
+    automatic.click()
+    auto_dialog = page.get_by_role("dialog", name="自动生成排班", exact=True)
+    auto_dialog.wait_for()
+    page.keyboard.press("Escape")
+    auto_dialog.wait_for(state="detached")
+    _assert_raw_secret_absent(page)
+    assert page_errors == []
+
+
+@pytest.mark.parametrize(
+    "viewport",
+    [{"width": 1024, "height": 768}, {"width": 1440, "height": 900}],
+    ids=["1024x768", "1440x900"],
+)
+def test_monthly_conflict_requires_new_overwrite_id_then_reuses_it_on_failure(
+    teacher_browser,
+    viewport,
+):
+    """Conflict acknowledgement must never turn the original UUID into overwrite semantics."""
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    calls: list[dict] = []
+    final_body = None
+
+    page.route(
+        f"{teacher_browser.server.base_url}/api/runtime/context",
+        lambda route: _fulfill_json(route, {
+            "timezone": "Asia/Shanghai",
+            "business_date": "2026-09-02",
+            "week_start": "2026-08-31",
+            "week_end_exclusive": "2026-09-07",
+        }),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: _fulfill_json(route, ROSTER_CHILDREN),
+    )
+
+    def roster(route):
+        rows = []
+        if final_body is not None:
+            rows = [
+                {
+                    "id": index,
+                    "cycle": final_body["cycle"],
+                    "date": entry["date"],
+                    "child_id": child_id,
+                }
+                for index, (entry, child_id) in enumerate(
+                    (
+                        (entry, child_id)
+                        for entry in final_body["entries"]
+                        for child_id in entry["child_ids"]
+                    ),
+                    start=1,
+                )
+            ]
+        _fulfill_json(route, rows)
+
+    def monthly(route):
+        nonlocal final_body
+        request = _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="POST",
+            path="/api/roster/month",
+        )
+        body = json.loads(request.post_data)
+        calls.append({
+            "body": body,
+            "request_id": request.headers.get("x-request-id"),
+        })
+        if len(calls) == 1:
+            _fulfill_json(route, {"error": {
+                "code": "ROSTER_DATE_CONFLICT",
+                "message": RAW_SECRET,
+                "field_errors": {},
+                "retryable": False,
+                "request_id": body["request_id"],
+            }}, status=409)
+            return
+        if len(calls) == 2:
+            _fulfill_json(route, {"error": {
+                "code": "INTERNAL_ERROR",
+                "message": RAW_SECRET,
+                "field_errors": {},
+                "retryable": True,
+                "request_id": body["request_id"],
+            }}, status=500)
+            return
+        final_body = body
+        _fulfill_json(route, {
+            "request_id": body["request_id"],
+            "month": body["month"],
+            "schedule": [
+                {
+                    "date": entry["date"],
+                    "cycle": body["cycle"],
+                    "child_ids": entry["child_ids"],
+                }
+                for entry in body["entries"]
+            ],
+            "replayed": True,
+        })
+
+    page.route(f"{teacher_browser.server.base_url}/api/roster", roster)
+    page.route(f"{teacher_browser.server.base_url}/api/roster/month", monthly)
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#roster",
+        wait_until="domcontentloaded",
+    )
+    _unlock_teacher(page, "值日排班")
+    launcher = page.get_by_role("button", name="录入本月名单", exact=True)
+    page.wait_for_function("button => !button.disabled", arg=launcher.element_handle())
+    launcher.click()
+    dialog = page.get_by_role("dialog", name="录入本月搭档", exact=True)
+    dialog.get_by_label("排班周期", exact=True).fill("2026-秋季")
+    submit = dialog.get_by_role("button", name="保存本月排班", exact=True)
+    submit.click()
+    dialog.get_by_text(
+        "目标日期已有排班，可确认覆盖这些日期。",
+        exact=True,
+    ).wait_for()
+    overwrite = dialog.get_by_role("button", name="覆盖已有排班", exact=True)
+    overwrite.click()
+    dialog.get_by_text(
+        "覆盖失败，请使用相同内容重试。",
+        exact=True,
+    ).wait_for()
+    overwrite.click()
+    dialog.wait_for(state="detached")
+
+    assert len(calls) == 3
+    first_id = calls[0]["body"]["request_id"]
+    overwrite_id = calls[1]["body"]["request_id"]
+    assert first_id != overwrite_id
+    assert calls[2] == calls[1]
+    assert calls[0]["body"]["replace_existing"] is False
+    assert calls[1]["body"]["replace_existing"] is True
+    assert all(call["request_id"] == call["body"]["request_id"] for call in calls)
+    page.get_by_text("排班已保存", exact=True).wait_for()
+    page.get_by_text("2026-09-01 · 2026-秋季 · 甲、乙", exact=True).wait_for()
+    assert launcher.evaluate("button => document.activeElement === button")
+    _assert_raw_secret_absent(page)
+    assert page_errors == []
+
+
+def test_late_monthly_context_after_navigation_cannot_pollute_the_next_route(
+    teacher_browser,
+):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size({"width": 1024, "height": 768})
+    held = []
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.route(
+        f"{teacher_browser.server.base_url}/api/runtime/context",
+        lambda route: held.append(route),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/roster",
+        lambda route: _fulfill_json(route, []),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: _fulfill_json(route, ROSTER_CHILDREN),
+    )
+    try:
+        page.goto(
+            f"{teacher_browser.server.base_url}/teacher.html#roster",
+            wait_until="domcontentloaded",
+        )
+        _unlock_teacher(page, "值日排班")
+        page.wait_for_function("() => window.location.hash === '#roster'")
+        page.wait_for_function("() => document.querySelector('main') !== null")
+        page.wait_for_timeout(0)
+        assert len(held) == 1
+        page.get_by_role("button", name="幼儿管理", exact=True).click()
+        page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
+        try:
+            _fulfill_json(held.pop(), {
+                "timezone": "Asia/Shanghai",
+                "business_date": "2026-09-02",
+                "week_start": "2026-08-31",
+                "week_end_exclusive": "2026-09-07",
+            })
+        except Exception:
+            pass
+        page.wait_for_timeout(50)
+        assert page.get_by_role("heading", name="幼儿管理", exact=True).count() == 1
+        assert page.get_by_role("dialog", name="录入本月搭档", exact=True).count() == 0
+        assert page.get_by_text(
+            "可按选定月份批量录入搭档；单日安排和自动生成仍可独立使用。",
+            exact=True,
+        ).count() == 0
+        assert page_errors == []
+    finally:
+        for route in held:
+            try:
+                route.abort("failed")
+            except Exception:
+                pass

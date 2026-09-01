@@ -680,6 +680,96 @@ def test_release_roster_max_length_cjk_content_stays_in_bounds_without_overlap(
     )
 
 
+@pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
+def test_release_monthly_roster_dialog_keeps_fixed_actions_and_scrollable_rows(
+    teacher_browser,
+    viewport,
+):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    _install_static_routes(page, teacher_browser)
+    children = [
+        {
+            "id": identifier,
+            "name": f"月排幼儿{identifier}",
+            "nickname": None,
+            "avatar": None,
+            "active": True,
+            "deactivated_at": None,
+            "future_roster_entries": 0,
+            "has_active_conversation": False,
+        }
+        for identifier in range(1, 25)
+    ]
+    page.route(
+        f"{teacher_browser.server.base_url}/api/runtime/context",
+        lambda route: _fulfill_json(route, {
+            "timezone": "Asia/Shanghai",
+            "business_date": "2026-09-02",
+            "week_start": "2026-08-31",
+            "week_end_exclusive": "2026-09-07",
+        }),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: _fulfill_json(route, children),
+    )
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#roster",
+        wait_until="domcontentloaded",
+    )
+    page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
+    page.get_by_role("button", name="设置并解锁", exact=True).click()
+    launcher = page.get_by_role("button", name="录入本月名单", exact=True)
+    page.wait_for_function("button => !button.disabled", arg=launcher.element_handle())
+    launcher.click()
+    dialog = page.get_by_role("dialog", name="录入本月搭档", exact=True)
+    dialog.wait_for()
+    header = dialog.locator(".management-dialog-header")
+    body = dialog.locator(".monthly-roster-dialog-body")
+    footer = dialog.locator(".management-dialog-actions")
+    rows = dialog.locator("[data-monthly-roster-row]")
+    assert rows.count() == 12
+
+    boxes = {
+        "dialog": _rect(dialog),
+        "header": _rect(header),
+        "body": _rect(body),
+        "footer": _rect(footer),
+    }
+    assert boxes["dialog"]["left"] >= 0
+    assert boxes["dialog"]["top"] >= 0
+    assert boxes["dialog"]["right"] <= viewport["width"]
+    assert boxes["dialog"]["bottom"] <= viewport["height"]
+    assert boxes["header"]["bottom"] <= boxes["body"]["top"] + 1, boxes
+    assert boxes["body"]["bottom"] <= boxes["footer"]["top"] + 1, boxes
+    dimensions = body.evaluate(
+        "node => ({clientHeight: node.clientHeight, scrollHeight: node.scrollHeight, "
+        "clientWidth: node.clientWidth, scrollWidth: node.scrollWidth, "
+        "overflowY: getComputedStyle(node).overflowY})"
+    )
+    assert dimensions["scrollHeight"] > dimensions["clientHeight"]
+    assert dimensions["scrollWidth"] <= dimensions["clientWidth"] + 1
+    assert dimensions["overflowY"] in {"auto", "scroll"}
+    controls = dialog.locator("input, select, button")
+    heights = controls.evaluate_all(
+        "nodes => nodes.map(node => node.getBoundingClientRect().height)"
+    )
+    assert heights and min(heights) >= 43, heights
+    fixed_before = (_rect(header), _rect(footer))
+    body.evaluate("node => { node.scrollTop = node.scrollHeight; }")
+    fixed_after = (_rect(header), _rect(footer))
+    assert abs(fixed_before[0]["top"] - fixed_after[0]["top"]) <= 1
+    assert abs(fixed_before[1]["bottom"] - fixed_after[1]["bottom"]) <= 1
+    assert dialog.evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
 def _named_child_rows(database: Path, name: str) -> list[tuple[str, str | None]]:
     with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
         return connection.execute(

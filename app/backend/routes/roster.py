@@ -12,7 +12,12 @@ from ..api_errors import APIError
 from ..auth import require_teacher_session
 from ..business_time import BusinessClock
 from ..database import SETTINGS, get_db
-from ..services.roster import generate_roster, get_today_roster, set_daily_roster
+from ..services.roster import (
+    generate_roster,
+    get_today_roster,
+    set_daily_roster,
+    set_monthly_roster,
+)
 
 
 router = APIRouter()
@@ -64,6 +69,15 @@ def auto_roster(
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> schemas.AutoRosterResponse:
     return generate_roster(db, payload, now=BUSINESS_CLOCK.utc_now())
+
+
+@router.post("/api/roster/month", response_model=schemas.MonthlyRosterResponse)
+def monthly_roster(
+    payload: schemas.MonthlyRosterRequest,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+) -> schemas.MonthlyRosterResponse:
+    return set_monthly_roster(db, payload, now=BUSINESS_CLOCK.utc_now())
 
 
 @router.put("/api/roster/{roster_date}", response_model=schemas.DailyRosterResponse)

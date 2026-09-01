@@ -16,7 +16,13 @@ from ..api_errors import APIError
 
 _DAILY_OPERATION = "daily_roster"
 _AUTO_OPERATION = "auto_roster"
-_Response = TypeVar("_Response", schemas.DailyRosterResponse, schemas.AutoRosterResponse)
+_MONTHLY_OPERATION = "monthly_roster"
+_Response = TypeVar(
+    "_Response",
+    schemas.DailyRosterResponse,
+    schemas.AutoRosterResponse,
+    schemas.MonthlyRosterResponse,
+)
 
 _ERROR_MESSAGES = {
     "CHILD_NOT_FOUND": "幼儿不存在或已停用",
@@ -46,7 +52,13 @@ def _canonical_hash(operation: str, body: dict[str, object]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _request_id(payload: schemas.DailyRosterRequest | schemas.AutoRosterRequest) -> str:
+def _request_id(
+    payload: (
+        schemas.DailyRosterRequest
+        | schemas.AutoRosterRequest
+        | schemas.MonthlyRosterRequest
+    ),
+) -> str:
     return str(payload.request_id)
 
 
@@ -365,6 +377,109 @@ def generate_roster(
             schedule=[
                 schemas.AutoRosterScheduleItem(date=target, child_ids=pair)
                 for target, pair in schedule
+            ],
+            replayed=False,
+        )
+        _finish_request(record, response, now=now)
+        db.flush()
+        db.commit()
+        return response
+    except APIError:
+        db.rollback()
+        raise
+    except IntegrityError as error:
+        _raise_after_write_error(db, error)
+    except Exception:
+        db.rollback()
+        raise
+
+
+def set_monthly_roster(
+    db: Session,
+    payload: schemas.MonthlyRosterRequest,
+    *,
+    now: datetime,
+) -> schemas.MonthlyRosterResponse:
+    """Atomically publish one canonical set of explicit monthly duty pairs."""
+
+    entries = sorted(
+        (
+            entry.date,
+            sorted(entry.child_ids),
+        )
+        for entry in payload.entries
+    )
+    request_hash = _canonical_hash(
+        _MONTHLY_OPERATION,
+        {
+            "month": payload.month,
+            "cycle": payload.cycle,
+            "entries": [
+                {
+                    "date": roster_date.isoformat(),
+                    "child_ids": child_ids,
+                }
+                for roster_date, child_ids in entries
+            ],
+            "replace_existing": payload.replace_existing,
+        },
+    )
+    record, replay = _claim_request(
+        db,
+        request_id=_request_id(payload),
+        operation=_MONTHLY_OPERATION,
+        payload_hash=request_hash,
+        now=now,
+        response_type=schemas.MonthlyRosterResponse,
+    )
+    if replay is not None:
+        return replay
+    assert record is not None
+
+    try:
+        distinct_child_ids = sorted(
+            {
+                child_id
+                for _roster_date, child_ids in entries
+                for child_id in child_ids
+            }
+        )
+        _active_children_for_daily(db, distinct_child_ids)
+        target_dates = [roster_date.isoformat() for roster_date, _child_ids in entries]
+        occupied = db.scalar(
+            select(models.DutyRoster.id)
+            .where(models.DutyRoster.date.in_(target_dates))
+            .limit(1)
+        )
+        if occupied is not None and not payload.replace_existing:
+            raise _error(409, "ROSTER_DATE_CONFLICT")
+        if payload.replace_existing:
+            db.execute(
+                delete(models.DutyRoster).where(
+                    models.DutyRoster.date.in_(target_dates)
+                )
+            )
+        db.add_all(
+            [
+                models.DutyRoster(
+                    cycle=payload.cycle,
+                    date=roster_date.isoformat(),
+                    child_id=child_id,
+                )
+                for roster_date, child_ids in entries
+                for child_id in child_ids
+            ]
+        )
+        response = schemas.MonthlyRosterResponse(
+            request_id=payload.request_id,
+            month=payload.month,
+            schedule=[
+                schemas.MonthlyRosterScheduleItem(
+                    date=roster_date,
+                    cycle=payload.cycle,
+                    child_ids=child_ids,
+                )
+                for roster_date, child_ids in entries
             ],
             replayed=False,
         )

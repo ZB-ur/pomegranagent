@@ -71,6 +71,23 @@ def _auto_body(
     }
 
 
+def _monthly_body(
+    *,
+    entries: list[dict[str, object]],
+    request_id: str | None = None,
+    month: str = "2026-08",
+    cycle: str = "2026-W34",
+    replace_existing: bool = False,
+) -> dict[str, object]:
+    return {
+        "request_id": request_id or str(uuid4()),
+        "month": month,
+        "cycle": cycle,
+        "entries": entries,
+        "replace_existing": replace_existing,
+    }
+
+
 def _rows(db_session) -> list[tuple[str, str, int]]:
     db_session.expire_all()
     return [
@@ -89,6 +106,36 @@ def _daily_hash(*, roster_date: str, cycle: str, child_ids: list[int]) -> str:
             "date": roster_date,
             "cycle": cycle,
             "child_ids": sorted(child_ids),
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _monthly_hash(
+    *,
+    month: str,
+    cycle: str,
+    entries: list[dict[str, object]],
+    replace_existing: bool,
+) -> str:
+    """Independent literal oracle for the frozen monthly canonical request."""
+    normalized_entries = [
+        {
+            "date": str(entry["date"]),
+            "child_ids": sorted(int(child_id) for child_id in entry["child_ids"]),
+        }
+        for entry in sorted(entries, key=lambda entry: str(entry["date"]))
+    ]
+    canonical = json.dumps(
+        {
+            "operation": "monthly_roster",
+            "month": month,
+            "cycle": cycle,
+            "entries": normalized_entries,
+            "replace_existing": replace_existing,
         },
         ensure_ascii=False,
         separators=(",", ":"),
@@ -220,10 +267,18 @@ def test_teacher_roster_routes_lock_before_legacy_tombstone_and_tombstone_never_
         "cycle": "2026-W34",
         "replace_existing": False,
     }
+    monthly = {
+        "request_id": str(uuid4()),
+        "month": "not-a-month",
+        "cycle": "",
+        "entries": [],
+        "replace_existing": False,
+    }
     for method, path, payload in [
         ("get", "/api/roster", None),
         ("put", "/api/roster/2026-08-24", body),
         ("post", "/api/roster/auto", auto),
+        ("post", "/api/roster/month", monthly),
         ("post", "/api/roster", {"cycle": "legacy", "date": "2026-08-24", "child_ids": [1, 2]}),
     ]:
         request = getattr(client, method)
@@ -887,6 +942,539 @@ def test_real_concurrent_unique_row_failure_is_classified_as_a_roster_date_confl
     assert classified.value.code == "ROSTER_DATE_CONFLICT"
 
 
+def test_monthly_route_canonicalizes_dates_pairs_and_uses_one_clock_sample(
+    client,
+    db_session,
+    monkeypatch,
+):
+    """Catches request-order hashes, unsorted pairs, current-month limits, or clock resampling."""
+    children = [_child(db_session, name=f"月排幼儿{index}") for index in range(4)]
+    _unlock(client)
+
+    class Clock:
+        calls = 0
+
+        @classmethod
+        def utc_now(cls) -> datetime:
+            cls.calls += 1
+            if cls.calls > 1:
+                raise AssertionError("monthly roster sampled the business clock twice")
+            return NOW
+
+    monkeypatch.setattr(roster_routes, "BUSINESS_CLOCK", Clock)
+    request_id = "846885f8-2b41-4641-a159-8d408d1aae58"
+    response = client.post(
+        "/api/roster/month",
+        json=_monthly_body(
+            request_id=request_id,
+            month="2027-02",
+            cycle=" 2027-春季 ",
+            entries=[
+                {"date": "2027-02-07", "child_ids": [children[3].id, children[2].id]},
+                {"date": "2027-02-01", "child_ids": [children[1].id, children[0].id]},
+            ],
+        ),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "request_id": request_id,
+        "month": "2027-02",
+        "schedule": [
+            {
+                "date": "2027-02-01",
+                "cycle": "2027-春季",
+                "child_ids": [children[0].id, children[1].id],
+            },
+            {
+                "date": "2027-02-07",
+                "cycle": "2027-春季",
+                "child_ids": [children[2].id, children[3].id],
+            },
+        ],
+        "replayed": False,
+    }
+    assert Clock.calls == 1
+    assert _rows(db_session) == [
+        ("2027-02-01", "2027-春季", children[0].id),
+        ("2027-02-01", "2027-春季", children[1].id),
+        ("2027-02-07", "2027-春季", children[2].id),
+        ("2027-02-07", "2027-春季", children[3].id),
+    ]
+
+
+def test_monthly_accepts_31_calendar_dates_and_rejects_every_structural_boundary(
+    client,
+    db_session,
+):
+    """Catches weekend filtering or bypasses of the frozen 1-31/in-month/pair invariants."""
+    first = _child(db_session, name="甲")
+    second = _child(db_session, name="乙")
+    _unlock(client)
+    entries = [
+        {"date": f"2027-01-{day:02d}", "child_ids": [first.id, second.id]}
+        for day in range(1, 32)
+    ]
+
+    accepted = client.post(
+        "/api/roster/month",
+        json=_monthly_body(month="2027-01", entries=entries),
+    )
+
+    assert accepted.status_code == 200
+    assert len(accepted.json()["schedule"]) == 31
+    baseline = _rows(db_session)
+    assert len(baseline) == 62
+    invalid_entries = [
+        [],
+        entries + [entries[0]],
+        [entries[0], entries[0]],
+        [{"date": "2027-02-01", "child_ids": [first.id, second.id]}],
+        [{"date": "2027-01-01", "child_ids": [first.id, first.id]}],
+        [{"date": "2027-01-01", "child_ids": [0, second.id]}],
+    ]
+    for candidate in invalid_entries:
+        response = client.post(
+            "/api/roster/month",
+            json=_monthly_body(month="2027-01", entries=candidate),
+        )
+        _error(response, status=422, code="VALIDATION_ERROR")
+
+    assert _rows(db_session) == baseline
+    assert db_session.scalar(select(func.count(models.RosterRequest.request_id))) == 1
+
+
+def test_monthly_claim_precedes_one_child_query_and_one_occupancy_query(
+    db_session,
+):
+    """Catches validation-before-lock, N+1 child checks, or per-date occupancy reads."""
+    from sqlalchemy import event
+
+    children = [_child(db_session, name=f"查询幼儿{index}") for index in range(4)]
+    payload = schemas.MonthlyRosterRequest.model_validate(
+        _monthly_body(
+            entries=[
+                {"date": "2026-08-24", "child_ids": [children[0].id, children[1].id]},
+                {"date": "2026-08-25", "child_ids": [children[2].id, children[3].id]},
+            ]
+        )
+    )
+    statements: list[str] = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        response = roster_service.set_monthly_roster(db_session, payload, now=NOW)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    claim_indexes = [
+        index for index, statement in enumerate(statements)
+        if statement.startswith("insert into roster_requests")
+    ]
+    child_queries = [
+        index for index, statement in enumerate(statements)
+        if statement.startswith("select") and " from children " in f" {statement} "
+    ]
+    occupancy_queries = [
+        index for index, statement in enumerate(statements)
+        if statement.startswith("select") and " from duty_rosters " in f" {statement} "
+    ]
+    assert response.replayed is False
+    assert len(claim_indexes) == 1
+    assert len(child_queries) == 1
+    assert len(occupancy_queries) == 1
+    assert claim_indexes[0] < child_queries[0] < occupancy_queries[0]
+
+
+def test_monthly_validates_all_distinct_active_children_before_occupancy_or_writes(
+    db_session,
+):
+    """Catches deletion or occupancy work before the complete active-child set is validated."""
+    from sqlalchemy import event
+
+    active = _child(db_session, name="有效")
+    inactive = _child(db_session, name="停用", active=False)
+    old = _child(db_session, name="原排班")
+    _roster(db_session, roster_date="2026-08-24", child_id=old.id, cycle="old")
+    request_id = "76d661ec-a990-4499-b24c-2eb1e3aaee9e"
+    payload = schemas.MonthlyRosterRequest.model_validate(
+        _monthly_body(
+            request_id=request_id,
+            replace_existing=True,
+            entries=[
+                {"date": "2026-08-24", "child_ids": [active.id, inactive.id]},
+                {"date": "2026-08-25", "child_ids": [active.id, 99999]},
+            ],
+        )
+    )
+    statements: list[str] = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _executemany):
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(engine, "before_cursor_execute", capture)
+    try:
+        with pytest.raises(APIError) as raised:
+            roster_service.set_monthly_roster(db_session, payload, now=NOW)
+    finally:
+        event.remove(engine, "before_cursor_execute", capture)
+
+    assert raised.value.status_code == 404
+    assert raised.value.code == "CHILD_NOT_FOUND"
+    assert sum(
+        statement.startswith("select") and " from children " in f" {statement} "
+        for statement in statements
+    ) == 1
+    assert not any(
+        statement.startswith("select") and " from duty_rosters " in f" {statement} "
+        for statement in statements
+    )
+    assert not any(statement.startswith("delete from duty_rosters") for statement in statements)
+    assert _rows(db_session) == [("2026-08-24", "old", old.id)]
+    assert db_session.get(models.RosterRequest, request_id) is None
+
+
+def test_monthly_any_occupied_date_conflicts_without_changing_the_batch_or_ledger(
+    client,
+    db_session,
+):
+    """Catches a non-replace batch that partially inserts dates before finding occupancy."""
+    first = _child(db_session, name="甲")
+    second = _child(db_session, name="乙")
+    old = _child(db_session, name="旧")
+    untouched = _child(db_session, name="别日")
+    _roster(db_session, roster_date="2026-08-25", child_id=old.id, cycle="old")
+    _roster(db_session, roster_date="2026-09-01", child_id=untouched.id, cycle="untouched")
+    _unlock(client)
+    request_id = "969d2b3b-3e2b-45a8-bdb8-35dc3a0d0f78"
+
+    response = client.post(
+        "/api/roster/month",
+        json=_monthly_body(
+            request_id=request_id,
+            entries=[
+                {"date": "2026-08-24", "child_ids": [first.id, second.id]},
+                {"date": "2026-08-25", "child_ids": [first.id, second.id]},
+            ],
+        ),
+    )
+
+    _error(response, status=409, code="ROSTER_DATE_CONFLICT")
+    assert _rows(db_session) == [
+        ("2026-08-25", "old", old.id),
+        ("2026-09-01", "untouched", untouched.id),
+    ]
+    assert db_session.get(models.RosterRequest, request_id) is None
+
+
+def test_monthly_replace_rebuilds_only_submitted_dates_and_keeps_untouched_rows(
+    client,
+    db_session,
+):
+    """Catches month-wide deletion or stale rows surviving on submitted replacement dates."""
+    children = [_child(db_session, name=f"幼儿{index}") for index in range(5)]
+    _roster(db_session, roster_date="2026-08-24", child_id=children[4].id, cycle="old-a")
+    _roster(db_session, roster_date="2026-08-26", child_id=children[4].id, cycle="old-b")
+    _roster(db_session, roster_date="2026-08-31", child_id=children[4].id, cycle="untouched")
+    _roster(db_session, roster_date="2026-09-01", child_id=children[4].id, cycle="outside")
+    _unlock(client)
+
+    response = client.post(
+        "/api/roster/month",
+        json=_monthly_body(
+            cycle="new-cycle",
+            replace_existing=True,
+            entries=[
+                {"date": "2026-08-26", "child_ids": [children[3].id, children[2].id]},
+                {"date": "2026-08-24", "child_ids": [children[1].id, children[0].id]},
+            ],
+        ),
+    )
+
+    assert response.status_code == 200
+    assert _rows(db_session) == [
+        ("2026-08-24", "new-cycle", children[0].id),
+        ("2026-08-24", "new-cycle", children[1].id),
+        ("2026-08-26", "new-cycle", children[2].id),
+        ("2026-08-26", "new-cycle", children[3].id),
+        ("2026-08-31", "untouched", children[4].id),
+        ("2026-09-01", "outside", children[4].id),
+    ]
+
+
+def test_monthly_replay_uses_the_original_snapshot_after_child_deactivation(
+    client,
+    db_session,
+):
+    """Catches replay recomputation or hash sensitivity to entry and pair ordering."""
+    children = [_child(db_session, name=f"重放幼儿{index}") for index in range(4)]
+    _unlock(client)
+    request_id = "8b36ac27-8ec8-423a-b470-8a9a66d75349"
+    original_entries = [
+        {"date": "2026-08-25", "child_ids": [children[3].id, children[2].id]},
+        {"date": "2026-08-24", "child_ids": [children[1].id, children[0].id]},
+    ]
+    first = client.post(
+        "/api/roster/month",
+        json=_monthly_body(request_id=request_id, entries=original_entries),
+    )
+    assert first.status_code == 200
+    snapshot = first.json()
+    children[0].active = False
+    db_session.commit()
+
+    replay = client.post(
+        "/api/roster/month",
+        json=_monthly_body(
+            request_id=request_id,
+            entries=[
+                {"date": "2026-08-24", "child_ids": [children[0].id, children[1].id]},
+                {"date": "2026-08-25", "child_ids": [children[2].id, children[3].id]},
+            ],
+        ),
+    )
+
+    assert replay.status_code == 200
+    assert replay.json() == {**snapshot, "replayed": True}
+    assert len(_rows(db_session)) == 4
+
+    changed_requests = [
+        _monthly_body(request_id=request_id, cycle="changed", entries=original_entries),
+        _monthly_body(
+            request_id=request_id,
+            replace_existing=True,
+            entries=original_entries,
+        ),
+        _monthly_body(
+            request_id=request_id,
+            month="2026-09",
+            entries=[
+                {"date": "2026-09-01", "child_ids": [children[0].id, children[1].id]}
+            ],
+        ),
+        _monthly_body(
+            request_id=request_id,
+            entries=[
+                {"date": "2026-08-24", "child_ids": [children[0].id, children[2].id]}
+            ],
+        ),
+    ]
+    for changed in changed_requests:
+        _error(
+            client.post("/api/roster/month", json=changed),
+            status=409,
+            code="IDEMPOTENCY_CONFLICT",
+        )
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["daily_roster", "auto_roster", "child_create", "duck_create"],
+)
+def test_monthly_request_id_conflicts_with_every_existing_ledger_operation(
+    client,
+    db_session,
+    operation,
+):
+    """Catches cross-operation UUID reuse being mistaken for a monthly replay."""
+    first = _child(db_session, name="甲")
+    second = _child(db_session, name="乙")
+    request_id = str(uuid4())
+    db_session.add(
+        models.RosterRequest(
+            request_id=request_id,
+            operation=operation,
+            payload_hash="0" * 64,
+            status="succeeded",
+            response_json="{}",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    db_session.commit()
+    _unlock(client)
+
+    response = client.post(
+        "/api/roster/month",
+        json=_monthly_body(
+            request_id=request_id,
+            entries=[{"date": "2026-08-24", "child_ids": [first.id, second.id]}],
+        ),
+    )
+
+    _error(response, status=409, code="IDEMPOTENCY_CONFLICT")
+    assert _rows(db_session) == []
+
+
+def test_monthly_processing_request_is_retryable_and_never_mutates_rows(
+    client,
+    db_session,
+):
+    """Catches a retry stealing an in-progress monthly claim."""
+    first = _child(db_session, name="甲")
+    second = _child(db_session, name="乙")
+    request_id = "9842a82d-305f-4670-a574-50163f854c47"
+    entries = [{"date": "2026-08-24", "child_ids": [second.id, first.id]}]
+    db_session.add(
+        models.RosterRequest(
+            request_id=request_id,
+            operation="monthly_roster",
+            payload_hash=_monthly_hash(
+                month="2026-08",
+                cycle="2026-W34",
+                entries=entries,
+                replace_existing=False,
+            ),
+            status="processing",
+            created_at=NOW,
+            updated_at=NOW,
+        )
+    )
+    db_session.commit()
+    _unlock(client)
+
+    response = client.post(
+        "/api/roster/month",
+        json=_monthly_body(request_id=request_id, entries=entries),
+    )
+
+    _error(response, status=409, code="REQUEST_IN_PROGRESS")
+    assert response.json()["error"]["retryable"] is True
+    assert _rows(db_session) == []
+
+
+@pytest.mark.parametrize("failure", ["flush", "commit", "integrity"])
+def test_monthly_write_failures_roll_back_rows_and_processing_ledger(
+    db_session,
+    monkeypatch,
+    failure,
+):
+    """Catches monthly rows or snapshots escaping a failed one-transaction commit."""
+    first = _child(db_session, name="甲")
+    second = _child(db_session, name="乙")
+    old = _child(db_session, name="旧")
+    untouched = _child(db_session, name="别日")
+    _roster(db_session, roster_date="2026-08-24", child_id=old.id, cycle="old")
+    _roster(db_session, roster_date="2026-08-31", child_id=untouched.id, cycle="untouched")
+    request_id = str(uuid4())
+    payload = schemas.MonthlyRosterRequest.model_validate(
+        _monthly_body(
+            request_id=request_id,
+            replace_existing=True,
+            entries=[{"date": "2026-08-24", "child_ids": [first.id, second.id]}],
+        )
+    )
+
+    if failure in {"flush", "integrity"}:
+        original_flush = db_session.flush
+        flush_count = 0
+
+        def fail_final_flush(*args, **kwargs):
+            nonlocal flush_count
+            flush_count += 1
+            if flush_count == 2:
+                if failure == "integrity":
+                    raise IntegrityError(
+                        "INSERT INTO unrelated_monthly",
+                        {},
+                        Exception("unrelated monthly constraint"),
+                    )
+                raise RuntimeError("forced monthly flush failure")
+            return original_flush(*args, **kwargs)
+
+        monkeypatch.setattr(db_session, "flush", fail_final_flush)
+    else:
+        def fail_commit(*args, **kwargs):
+            raise RuntimeError("forced monthly commit failure")
+
+        monkeypatch.setattr(db_session, "commit", fail_commit)
+
+    expected = IntegrityError if failure == "integrity" else RuntimeError
+    with pytest.raises(expected, match="monthly"):
+        roster_service.set_monthly_roster(db_session, payload, now=NOW)
+
+    with SessionLocal() as fresh:
+        assert [
+            (row.date, row.cycle, row.child_id)
+            for row in fresh.scalars(
+                select(models.DutyRoster).order_by(models.DutyRoster.date, models.DutyRoster.id)
+            )
+        ] == [
+            ("2026-08-24", "old", old.id),
+            ("2026-08-31", "untouched", untouched.id),
+        ]
+        assert fresh.get(models.RosterRequest, request_id) is None
+
+
+def test_concurrent_monthly_distinct_uuids_same_date_leave_exactly_one_pair(
+    db_session,
+):
+    """Catches two validated batches racing into a four-child duty date."""
+    children = [_child(db_session, name=f"并发幼儿{index}") for index in range(4)]
+    child_ids = [child.id for child in children]
+    payloads = [
+        schemas.MonthlyRosterRequest.model_validate(
+            _monthly_body(
+                request_id=request_id,
+                entries=[{"date": "2026-08-24", "child_ids": pair}],
+            )
+        )
+        for request_id, pair in [
+            ("51c92cb1-0d52-4ea0-9932-7f3442414ef6", child_ids[:2]),
+            ("b3991426-8a35-4374-90e4-d98b8ba239ed", child_ids[2:]),
+        ]
+    ]
+    start = Barrier(2)
+    lock = Lock()
+    successes: list[schemas.MonthlyRosterResponse] = []
+    conflicts: list[APIError] = []
+    failures: list[BaseException] = []
+
+    def write_month(payload: schemas.MonthlyRosterRequest) -> None:
+        session = SessionLocal()
+        try:
+            start.wait(timeout=2)
+            result = roster_service.set_monthly_roster(session, payload, now=NOW)
+            with lock:
+                successes.append(result)
+        except APIError as error:
+            with lock:
+                conflicts.append(error)
+        except BaseException as error:
+            with lock:
+                failures.append(error)
+        finally:
+            session.close()
+
+    threads = [Thread(target=write_month, args=(payload,)) for payload in payloads]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert failures == []
+    assert len(successes) == 1
+    assert successes[0].replayed is False
+    assert [error.code for error in conflicts] == ["ROSTER_DATE_CONFLICT"]
+    with SessionLocal() as fresh:
+        assigned = list(
+            fresh.scalars(
+                select(models.DutyRoster.child_id)
+                .where(models.DutyRoster.date == "2026-08-24")
+                .order_by(models.DutyRoster.child_id)
+            )
+        )
+        assert assigned in [sorted(child_ids[:2]), sorted(child_ids[2:])]
+        assert fresh.scalar(select(func.count(models.DutyRoster.id))) == 2
+        records = fresh.scalars(select(models.RosterRequest)).all()
+        assert len(records) == 1
+        assert records[0].status == "succeeded"
+
+
 def test_roster_openapi_inventory_has_one_new_handler_per_exact_path():
     """Catches duplicate legacy handlers or static routes shadowed by the date route."""
     from app.backend.main import app
@@ -896,6 +1484,7 @@ def test_roster_openapi_inventory_has_one_new_handler_per_exact_path():
         ("GET", "/api/roster"),
         ("POST", "/api/roster"),
         ("POST", "/api/roster/auto"),
+        ("POST", "/api/roster/month"),
         ("PUT", "/api/roster/{roster_date}"),
     }
     direct_and_included_routes = [
@@ -929,4 +1518,7 @@ def test_roster_openapi_inventory_has_one_new_handler_per_exact_path():
     assert set(documented["/api/roster/today"]) == {"get"}
     assert set(documented["/api/roster"]) == {"get", "post"}
     assert set(documented["/api/roster/auto"]) == {"post"}
+    assert set(documented["/api/roster/month"]) == {"post"}
     assert set(documented["/api/roster/{roster_date}"]) == {"put"}
+    paths = [route.path for route in roster_router.routes]
+    assert paths.index("/api/roster/month") < paths.index("/api/roster/{roster_date}")
