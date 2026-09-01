@@ -21,6 +21,7 @@ from app.backend.schema_migrations import (
     SCHEMA_3_REVISION,
     SchemaFingerprintError,
     UnsupportedDatabaseRevisionError,
+    _normalized_sql,
     ensure_database_schema,
 )
 
@@ -104,25 +105,67 @@ def run_alembic(database: Path, operation: str, revision: str) -> None:
     getattr(command, operation)(config, revision)
 
 
-def stamp_database(database: Path, revision: str) -> None:
+def create_version_table(
+    database: Path,
+    revisions: tuple[str, ...],
+    *,
+    primary_key: bool = True,
+) -> None:
+    primary_key_sql = " PRIMARY KEY" if primary_key else ""
     with sqlite3.connect(database) as connection:
         connection.execute(
-            """
+            f"""
             CREATE TABLE alembic_version (
-                version_num VARCHAR(32) NOT NULL PRIMARY KEY
+                version_num VARCHAR(32) NOT NULL{primary_key_sql}
             )
             """
         )
-        connection.execute(
+        connection.executemany(
             "INSERT INTO alembic_version (version_num) VALUES (?)",
-            (revision,),
+            ((revision,) for revision in revisions),
         )
 
 
-def normalized_sql(value: object) -> object:
-    if not isinstance(value, str):
-        return value
-    return " ".join(value.lower().replace('"', "").split())
+def stamp_database(database: Path, revision: str) -> None:
+    create_version_table(database, (revision,))
+
+
+def partial_index_predicate(index_sql: str) -> str:
+    """Extract WHERE without normalizing any quoted or unquoted SQL text."""
+
+    quote: str | None = None
+    position = 0
+    while position < len(index_sql):
+        character = index_sql[position]
+        if quote is not None:
+            if character == quote:
+                if (
+                    position + 1 < len(index_sql)
+                    and index_sql[position + 1] == quote
+                ):
+                    position += 2
+                    continue
+                quote = None
+            position += 1
+            continue
+        if character in {"'", '"'}:
+            quote = character
+            position += 1
+            continue
+        if index_sql[position : position + 5].upper() == "WHERE":
+            before = index_sql[position - 1] if position else " "
+            after_position = position + 5
+            after = (
+                index_sql[after_position]
+                if after_position < len(index_sql)
+                else " "
+            )
+            if not (before.isalnum() or before == "_") and not (
+                after.isalnum() or after == "_"
+            ):
+                return index_sql[after_position:].strip()
+        position += 1
+    raise AssertionError(f"partial index has no WHERE clause: {index_sql}")
 
 
 def physical_schema_signature(
@@ -155,7 +198,7 @@ def physical_schema_signature(
                     row[1],
                     row[2].upper(),
                     not bool(row[3]),
-                    normalized_sql(row[4]),
+                    row[4],
                     row[5],
                 )
                 for row in connection.execute(
@@ -196,10 +239,9 @@ def physical_schema_signature(
                     "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?",
                     (name,),
                 ).fetchone()
-                index_sql = normalized_sql(index_sql_row[0]) if index_sql_row else None
                 predicate = None
-                if partial and isinstance(index_sql, str):
-                    predicate = index_sql.split(" where ", maxsplit=1)[1]
+                if partial and index_sql_row and isinstance(index_sql_row[0], str):
+                    predicate = partial_index_predicate(index_sql_row[0])
                 indexes.append(
                     (name, bool(unique), index_columns, bool(partial), predicate)
                 )
@@ -217,7 +259,7 @@ def physical_schema_signature(
             signature[table]["checks"] = tuple(sorted(
                 (
                     constraint["name"],
-                    normalized_sql(constraint["sqltext"]),
+                    constraint["sqltext"].strip(),
                 )
                 for constraint in inspector.get_check_constraints(table)
             ))
@@ -286,6 +328,17 @@ def replace_partial_index(database: Path) -> None:
             DROP INDEX uq_conversations_child_active;
             CREATE UNIQUE INDEX uq_conversations_child_active
                 ON conversations (child_id) WHERE status = 'ended';
+            """
+        )
+
+
+def replace_partial_index_literal_case(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            DROP INDEX uq_conversations_child_active;
+            CREATE UNIQUE INDEX uq_conversations_child_active
+                ON conversations (child_id) WHERE status = 'ACTIVE';
             """
         )
 
@@ -362,6 +415,36 @@ def remove_avatar_constraints(database: Path) -> None:
         )
 
 
+def replace_avatar_check_literal_case(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            ALTER TABLE avatar_media RENAME TO old_avatar_media;
+            CREATE TABLE avatar_media (
+                id VARCHAR(36) NOT NULL,
+                file_name VARCHAR(255) NOT NULL,
+                mime_type VARCHAR(32) NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 VARCHAR(64) NOT NULL,
+                created_at DATETIME NOT NULL,
+                CONSTRAINT ck_avatar_media_height_positive CHECK (height > 0),
+                CONSTRAINT ck_avatar_media_webp
+                    CHECK (mime_type = 'IMAGE/WEBP'),
+                CONSTRAINT ck_avatar_media_sha256_length
+                    CHECK (length(sha256) = 64),
+                CONSTRAINT ck_avatar_media_size_positive CHECK (size_bytes > 0),
+                CONSTRAINT ck_avatar_media_width_positive CHECK (width > 0),
+                PRIMARY KEY (id),
+                CONSTRAINT uq_avatar_media_file_name UNIQUE (file_name)
+            );
+            INSERT INTO avatar_media SELECT * FROM old_avatar_media;
+            DROP TABLE old_avatar_media;
+            """
+        )
+
+
 def assert_schema_three_shape(
     database: Path,
     schema_two_signature: dict[str, dict[str, tuple[object, ...]]],
@@ -395,6 +478,25 @@ def assert_schema_three_shape(
         engine.dispose()
     for name, columns in SCHEMA_3_INDEXES.items():
         assert index_columns(database, name) == columns
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        ("  STATUS  =  'AcTiVe'  ", "status = 'AcTiVe'"),
+        (
+            "note = 'O''Brien' AND label = \"MiX\"",
+            "note = 'O''Brien' and label = \"MiX\"",
+        ),
+        ("note = 'two  spaces'", "note = 'two  spaces'"),
+        ("label = \"A\"\"B\"", "label = \"A\"\"B\""),
+    ],
+)
+def test_sql_normalizer_preserves_quoted_literal_content(
+    sql: str,
+    expected: str,
+):
+    assert _normalized_sql(sql) == expected
 
 
 def test_blank_database_upgrades_from_baseline_to_schema_three(
@@ -524,6 +626,7 @@ def test_valid_stamped_schema_two_upgrades_to_schema_three(
         remove_duck_archive_foreign_key,
         remove_roster_unique_constraint,
         replace_partial_index,
+        replace_partial_index_literal_case,
     ],
     ids=[
         "missing-column",
@@ -532,6 +635,7 @@ def test_valid_stamped_schema_two_upgrades_to_schema_three(
         "missing-foreign-key",
         "missing-unique",
         "wrong-partial-index",
+        "case-only-partial-literal",
     ],
 )
 def test_stamped_schema_two_corruption_is_rejected_before_upgrade_ddl(
@@ -566,12 +670,14 @@ def test_stamped_schema_two_corruption_is_rejected_before_upgrade_ddl(
         add_unexpected_table,
         replace_schema_three_index,
         remove_avatar_constraints,
+        replace_avatar_check_literal_case,
     ],
     ids=[
         "missing-historical-column",
         "extra-table",
         "wrong-schema-three-index",
         "missing-avatar-constraints",
+        "case-only-check-literal",
     ],
 )
 def test_stamped_schema_three_corruption_is_rejected(
@@ -653,6 +759,44 @@ def test_unknown_or_newer_revision_is_rejected_before_any_ddl(
 
     assert schema_snapshot(database) == before
     assert scalar(database, "SELECT version_num FROM alembic_version") == revision
+
+
+@pytest.mark.parametrize(
+    ("primary_key", "revisions"),
+    [
+        (False, (SCHEMA_2_REVISION,)),
+        (True, ()),
+        (True, (SCHEMA_2_REVISION, SCHEMA_3_REVISION)),
+    ],
+    ids=["malformed-shape", "zero-rows", "multiple-rows"],
+)
+def test_malformed_alembic_version_state_is_rejected_before_any_ddl(
+    primary_key: bool,
+    revisions: tuple[str, ...],
+    tmp_path: Path,
+):
+    database = load_schema_2_fixture(tmp_path / "malformed-version.db")
+    create_version_table(database, revisions, primary_key=primary_key)
+    before = schema_snapshot(database)
+    engine = engine_for(database)
+    try:
+        with pytest.raises(
+            UnsupportedDatabaseRevisionError,
+            match="unsupported database revision",
+        ):
+            ensure_database_schema(engine, db_mode="app")
+    finally:
+        engine.dispose()
+
+    assert schema_snapshot(database) == before
+    with sqlite3.connect(database) as connection:
+        stored_revisions = tuple(
+            row[0]
+            for row in connection.execute(
+                "SELECT version_num FROM alembic_version ORDER BY version_num"
+            ).fetchall()
+        )
+    assert stored_revisions == tuple(sorted(revisions))
 
 
 def test_schema_three_upgrade_is_idempotent(tmp_path: Path):

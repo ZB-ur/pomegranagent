@@ -358,9 +358,47 @@ def _alembic_config(connection) -> Config:
 
 
 def _normalized_sql(value: object) -> object:
+    """Canonicalize SQL structure without changing quoted token contents."""
+
     if not isinstance(value, str):
         return value
-    return " ".join(value.lower().replace('"', "").split())
+
+    normalized: list[str] = []
+    quote: str | None = None
+    pending_space = False
+    position = 0
+    while position < len(value):
+        character = value[position]
+        if quote is not None:
+            normalized.append(character)
+            if character == quote:
+                if position + 1 < len(value) and value[position + 1] == quote:
+                    normalized.append(value[position + 1])
+                    position += 2
+                    continue
+                quote = None
+            position += 1
+            continue
+        if character in {"'", '"'}:
+            if pending_space and normalized:
+                normalized.append(" ")
+            pending_space = False
+            normalized.append(character)
+            quote = character
+            position += 1
+            continue
+        if character.isspace():
+            pending_space = True
+            position += 1
+            continue
+        if pending_space and normalized:
+            normalized.append(" ")
+        pending_space = False
+        normalized.append(character.lower())
+        position += 1
+    if quote is not None:
+        raise ValueError("unterminated quoted SQL literal")
+    return "".join(normalized)
 
 
 def _sorted_tuple(values) -> tuple:
