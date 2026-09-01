@@ -7,6 +7,10 @@ from app.backend.analysis_worker import AnalysisWorker
 from app.backend.database import SessionLocal
 
 
+CHILD_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000011"
+DUCK_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000012"
+
+
 def unlock_teacher(client) -> None:
     response = client.post("/api/auth/setup", json={"pin": "1234"})
     assert response.status_code == 200
@@ -120,26 +124,70 @@ def test_dimensions_seeded(client):
 
 def test_child_crud_list_smoke(client):
     unlock_teacher(client)
-    created = client.post("/api/children", json={"name": "王小明", "nickname": "小明"})
+    created = client.post("/api/children", json={
+        "name": "  王小明  ",
+        "nickname": "  小明  ",
+        "avatar": f"  {CHILD_AVATAR}  ",
+    })
     assert created.status_code == 200
     child_id = created.json()["id"]
+    assert created.json() == {
+        "name": "王小明",
+        "nickname": "小明",
+        "avatar": CHILD_AVATAR,
+        "active": True,
+        "id": child_id,
+    }
     assert client.get("/api/children").json()[0]["id"] == child_id
 
-    updated = client.put(f"/api/children/{child_id}", json={"name": "王小明", "nickname": "明明"})
+    updated = client.put(f"/api/children/{child_id}", json={
+        "name": "  王小明  ",
+        "nickname": None,
+        "avatar": None,
+    })
     assert updated.status_code == 200
-    assert updated.json()["nickname"] == "明明"
+    assert updated.json() == {
+        "name": "王小明",
+        "nickname": None,
+        "avatar": None,
+        "active": True,
+        "id": child_id,
+    }
 
 
 def test_duck_crud_list_smoke(client):
     unlock_teacher(client)
-    created = client.post("/api/ducks", json={"name": "小黄", "status": "活泼健康"})
+    created = client.post("/api/ducks", json={
+        "name": "  小黄  ",
+        "avatar": f"  {DUCK_AVATAR}  ",
+        "status": "  活泼健康  ",
+        "note": None,
+    })
     assert created.status_code == 200
     duck_id = created.json()["id"]
+    assert created.json() == {
+        "name": "小黄",
+        "avatar": DUCK_AVATAR,
+        "status": "活泼健康",
+        "note": None,
+        "id": duck_id,
+    }
     assert client.get("/api/ducks").json()[0]["id"] == duck_id
 
-    updated = client.put(f"/api/ducks/{duck_id}", json={"name": "小黄", "status": "健康"})
+    updated = client.put(f"/api/ducks/{duck_id}", json={
+        "name": "  小黄  ",
+        "avatar": None,
+        "status": None,
+        "note": "  喜欢菜叶  ",
+    })
     assert updated.status_code == 200
-    assert updated.json()["status"] == "健康"
+    assert updated.json() == {
+        "name": "小黄",
+        "avatar": None,
+        "status": None,
+        "note": "喜欢菜叶",
+        "id": duck_id,
+    }
 
 
 def test_roster_auto_uses_an_idempotency_request_id(client):

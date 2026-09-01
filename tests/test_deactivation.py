@@ -25,6 +25,11 @@ from app.backend.services.reviews import get_review_detail
 CHILD_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000001"
 DUCK_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000002"
 UPDATED_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000003"
+EXTRA_INPUT_MESSAGE = "Extra inputs are not permitted"
+CANONICAL_AVATAR_MESSAGE = (
+    "String should match pattern '^/api/media/avatars/[0-9a-f]{8}-"
+    "[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'"
+)
 
 
 def _unlock(client) -> None:
@@ -37,6 +42,45 @@ def _error(response, *, status: int, code: str) -> dict:
     body = response.json()
     assert body["error"]["code"] == code
     return body["error"]
+
+
+def _assert_exact_api_error(
+    response,
+    *,
+    status: int,
+    code: str,
+    message: str,
+    request_id: str,
+    field_errors: dict[str, list[str]],
+) -> None:
+    assert response.status_code == status
+    assert response.headers["x-request-id"] == request_id
+    assert response.json() == {
+        "error": {
+            "code": code,
+            "message": message,
+            "field_errors": field_errors,
+            "retryable": False,
+            "request_id": request_id,
+        }
+    }
+
+
+def _assert_exact_validation_error(
+    response,
+    *,
+    request_id: str,
+    field: str,
+    message: str,
+) -> None:
+    _assert_exact_api_error(
+        response,
+        status=422,
+        code="VALIDATION_ERROR",
+        message="请求字段校验失败",
+        request_id=request_id,
+        field_errors={f"body.{field}": [message]},
+    )
 
 
 def _child(db_session, *, name: str = "小雨", active: bool = True) -> models.Child:
@@ -198,6 +242,21 @@ def _resource_snapshot(db_session) -> dict[str, list[tuple | int | str]]:
         "insights": list(db_session.scalars(select(models.InsightNote.id).order_by(models.InsightNote.id))),
         "assessments": list(db_session.scalars(select(models.Assessment.id).order_by(models.Assessment.id))),
         "scores": list(db_session.scalars(select(models.AssessmentScore.id).order_by(models.AssessmentScore.id))),
+    }
+
+
+def _mutation_snapshot(db_session) -> dict[str, list[tuple[object, ...]]]:
+    """Capture every persisted field the public resource routes may mutate."""
+    db_session.expire_all()
+    return {
+        "children": [
+            (row.id, row.name, row.nickname, row.avatar, row.active, row.deactivated_at)
+            for row in db_session.scalars(select(models.Child).order_by(models.Child.id))
+        ],
+        "ducks": [
+            (row.id, row.name, row.avatar, row.status, row.note, row.active, row.deactivated_at)
+            for row in db_session.scalars(select(models.Duck).order_by(models.Duck.id))
+        ],
     }
 
 
@@ -905,40 +964,359 @@ def test_query_count_resource_lists_are_ordered_and_use_one_composed_query_after
     assert duck_query_count == 2
 
 
-def test_resource_crud_forces_creation_active_and_cannot_bypass_state_routes(client, db_session):
-    """Catches legacy ChildCreate.active being able to deactivate resources outside state routes."""
+@pytest.mark.parametrize(
+    ("resource_kind", "operation"),
+    [
+        pytest.param("child", "create", id="child-create"),
+        pytest.param("child", "update", id="child-update"),
+        pytest.param("duck", "create", id="duck-create"),
+        pytest.param("duck", "update", id="duck-update"),
+    ],
+)
+def test_resource_mutations_reject_server_owned_ids_and_unknown_fields(
+    client,
+    db_session,
+    resource_kind,
+    operation,
+):
+    """All mutation routes reject non-public fields without changing either resource table."""
+    deactivated_at = datetime(2026, 9, 1, 8, 30)
+    if resource_kind == "child":
+        resource = _child(db_session, active=False)
+        resource.deactivated_at = deactivated_at
+        base_payload = {
+            "name": "保留幼儿",
+            "nickname": "保留",
+            "avatar": CHILD_AVATAR,
+        }
+        collection_path = "/api/children"
+        path_id_field = "child_id"
+    else:
+        resource = _duck(db_session, active=False)
+        resource.deactivated_at = deactivated_at
+        base_payload = {
+            "name": "保留小鸭",
+            "avatar": DUCK_AVATAR,
+            "status": "健康",
+            "note": "保留笔记",
+        }
+        collection_path = "/api/ducks"
+        path_id_field = "duck_id"
+    db_session.commit()
+    resource_id = resource.id
     _unlock(client)
-    created = client.post("/api/children", json={
-        "name": "新同学",
-        "nickname": "新",
+    path = collection_path if operation == "create" else f"{collection_path}/{resource_id}"
+    request = client.post if operation == "create" else client.put
+
+    for index, (field, value) in enumerate((
+        ("active", False),
+        ("deactivated_at", "2026-09-01T08:30:00Z"),
+        ("id", 999),
+        (path_id_field, 999),
+        ("unknown", "must-not-be-ignored"),
+    )):
+        request_id = f"resource-{resource_kind}-{operation}-{index}"
+        before = _mutation_snapshot(db_session)
+        db_session.rollback()
+        response = request(
+            path,
+            json={**base_payload, field: value},
+            headers={"X-Request-ID": request_id},
+        )
+
+        _assert_exact_validation_error(
+            response,
+            request_id=request_id,
+            field=field,
+            message=EXTRA_INPUT_MESSAGE,
+        )
+        assert _mutation_snapshot(db_session) == before
+        db_session.rollback()
+
+
+@pytest.mark.parametrize(
+    ("case", "path", "payload", "field", "message"),
+    [
+        pytest.param(
+            "child-name-blank",
+            "/api/children",
+            {"name": " \t ", "nickname": None, "avatar": None},
+            "name",
+            "String should have at least 1 character",
+            id="child-name-blank",
+        ),
+        pytest.param(
+            "child-name-long",
+            "/api/children",
+            {"name": "儿" * 65, "nickname": None, "avatar": None},
+            "name",
+            "String should have at most 64 characters",
+            id="child-name-over-limit",
+        ),
+        pytest.param(
+            "child-nickname-blank",
+            "/api/children",
+            {"name": "幼儿", "nickname": "  ", "avatar": None},
+            "nickname",
+            "String should have at least 1 character",
+            id="child-nickname-blank",
+        ),
+        pytest.param(
+            "child-nickname-long",
+            "/api/children",
+            {"name": "幼儿", "nickname": "名" * 65, "avatar": None},
+            "nickname",
+            "String should have at most 64 characters",
+            id="child-nickname-over-limit",
+        ),
+        pytest.param(
+            "child-avatar-blank",
+            "/api/children",
+            {"name": "幼儿", "nickname": None, "avatar": "  "},
+            "avatar",
+            CANONICAL_AVATAR_MESSAGE,
+            id="child-avatar-blank",
+        ),
+        pytest.param(
+            "duck-name-blank",
+            "/api/ducks",
+            {"name": " \n ", "avatar": None, "status": None, "note": None},
+            "name",
+            "String should have at least 1 character",
+            id="duck-name-blank",
+        ),
+        pytest.param(
+            "duck-name-long",
+            "/api/ducks",
+            {"name": "鸭" * 65, "avatar": None, "status": None, "note": None},
+            "name",
+            "String should have at most 64 characters",
+            id="duck-name-over-limit",
+        ),
+        pytest.param(
+            "duck-status-blank",
+            "/api/ducks",
+            {"name": "小鸭", "avatar": None, "status": "\t", "note": None},
+            "status",
+            "String should have at least 1 character",
+            id="duck-status-blank",
+        ),
+        pytest.param(
+            "duck-status-long",
+            "/api/ducks",
+            {"name": "小鸭", "avatar": None, "status": "健" * 256, "note": None},
+            "status",
+            "String should have at most 255 characters",
+            id="duck-status-over-limit",
+        ),
+        pytest.param(
+            "duck-note-blank",
+            "/api/ducks",
+            {"name": "小鸭", "avatar": None, "status": None, "note": " \t "},
+            "note",
+            "String should have at least 1 character",
+            id="duck-note-blank",
+        ),
+        pytest.param(
+            "duck-note-long",
+            "/api/ducks",
+            {"name": "小鸭", "avatar": None, "status": None, "note": "笔" * 2001},
+            "note",
+            "String should have at most 2000 characters",
+            id="duck-note-over-limit",
+        ),
+        pytest.param(
+            "duck-avatar-external",
+            "/api/ducks",
+            {
+                "name": "小鸭",
+                "avatar": "https://example.invalid/avatar.png",
+                "status": None,
+                "note": None,
+            },
+            "avatar",
+            CANONICAL_AVATAR_MESSAGE,
+            id="duck-avatar-noncanonical",
+        ),
+    ],
+)
+def test_resource_mutations_reject_blank_and_over_limit_text_without_writes(
+    client,
+    db_session,
+    case,
+    path,
+    payload,
+    field,
+    message,
+):
+    _unlock(client)
+    before = _mutation_snapshot(db_session)
+    db_session.rollback()
+    request_id = f"resource-invalid-{case}"
+
+    response = client.post(
+        path,
+        json=payload,
+        headers={"X-Request-ID": request_id},
+    )
+
+    _assert_exact_validation_error(
+        response,
+        request_id=request_id,
+        field=field,
+        message=message,
+    )
+    assert _mutation_snapshot(db_session) == before
+
+
+def test_resource_mutations_accept_exact_maximum_lengths_and_force_active_creation(client, db_session):
+    """Boundary-valid public fields survive normalization without requiring Task 5 media rows."""
+    _unlock(client)
+    child_name = "儿" * 64
+    child_nickname = "名" * 64
+    duck_name = "鸭" * 64
+    duck_status = "健" * 255
+    duck_note = "记" * 2000
+
+    child_response = client.post("/api/children", json={
+        "name": f"  {child_name}  ",
+        "nickname": f"  {child_nickname}  ",
+        "avatar": f"  {CHILD_AVATAR}  ",
+    })
+    assert child_response.status_code == 200
+    child_id = child_response.json()["id"]
+    assert child_response.json() == {
+        "name": child_name,
+        "nickname": child_nickname,
         "avatar": CHILD_AVATAR,
-        "active": False,
-    })
-    assert created.status_code == 200
-    child = created.json()
-    assert child["active"] is True
-    updated = client.put(f"/api/children/{child['id']}", json={
-        "name": "改名",
-        "nickname": "改",
-        "avatar": UPDATED_AVATAR,
-        "active": False,
-    })
-    assert updated.status_code == 200
-    assert updated.json() == {
-        "id": child["id"],
-        "name": "改名",
-        "nickname": "改",
-        "avatar": UPDATED_AVATAR,
         "active": True,
+        "id": child_id,
     }
+
+    duck_response = client.post("/api/ducks", json={
+        "name": f"  {duck_name}  ",
+        "avatar": f"  {DUCK_AVATAR}  ",
+        "status": f"  {duck_status}  ",
+        "note": f"  {duck_note}  ",
+    })
+    assert duck_response.status_code == 200
+    duck_id = duck_response.json()["id"]
+    assert duck_response.json() == {
+        "name": duck_name,
+        "avatar": DUCK_AVATAR,
+        "status": duck_status,
+        "note": duck_note,
+        "id": duck_id,
+    }
+
     db_session.expire_all()
-    persisted = db_session.get(models.Child, child["id"])
-    assert persisted is not None
-    assert persisted.active is True
-    assert persisted.deactivated_at is None
-    _error(client.put("/api/children/99999", json={"name": "缺失"}), status=404, code="CHILD_NOT_FOUND")
-    _error(client.put("/api/ducks/99999", json={"name": "缺失"}), status=404, code="DUCK_NOT_FOUND")
-    _error(client.post("/api/children", json={"name": "错误", "active": "not-a-bool"}), status=422, code="VALIDATION_ERROR")
+    child = db_session.get(models.Child, child_id)
+    duck = db_session.get(models.Duck, duck_id)
+    assert child is not None and (child.active, child.deactivated_at) == (True, None)
+    assert duck is not None and (duck.active, duck.deactivated_at) == (True, None)
+
+
+def test_resource_updates_preserve_deactivation_state_and_return_exact_public_shapes(client, db_session):
+    deactivated_at = datetime(2026, 9, 1, 8, 30)
+    child = _child(db_session, active=False)
+    duck = _duck(db_session, active=False)
+    child.deactivated_at = deactivated_at
+    duck.deactivated_at = deactivated_at
+    db_session.commit()
+    child_id = child.id
+    duck_id = duck.id
+    _unlock(client)
+
+    child_response = client.put(f"/api/children/{child_id}", json={
+        "name": "  更新幼儿  ",
+        "nickname": None,
+        "avatar": UPDATED_AVATAR,
+    })
+    assert child_response.status_code == 200
+    assert child_response.json() == {
+        "name": "更新幼儿",
+        "nickname": None,
+        "avatar": UPDATED_AVATAR,
+        "active": False,
+        "id": child_id,
+    }
+
+    duck_response = client.put(f"/api/ducks/{duck_id}", json={
+        "name": "  更新小鸭  ",
+        "avatar": UPDATED_AVATAR,
+        "status": None,
+        "note": "  更新笔记  ",
+    })
+    assert duck_response.status_code == 200
+    assert duck_response.json() == {
+        "name": "更新小鸭",
+        "avatar": UPDATED_AVATAR,
+        "status": None,
+        "note": "更新笔记",
+        "id": duck_id,
+    }
+
+    db_session.expire_all()
+    persisted_child = db_session.get(models.Child, child_id)
+    persisted_duck = db_session.get(models.Duck, duck_id)
+    assert persisted_child is not None
+    assert persisted_duck is not None
+    assert (persisted_child.active, persisted_child.deactivated_at) == (False, deactivated_at)
+    assert (persisted_duck.active, persisted_duck.deactivated_at) == (False, deactivated_at)
+
+
+def test_resource_missing_updates_use_exact_404_and_validate_body_before_lookup(client, db_session):
+    _unlock(client)
+    before = _mutation_snapshot(db_session)
+    db_session.rollback()
+    child_request_id = "resource-child-missing"
+    duck_request_id = "resource-duck-missing"
+
+    child_missing = client.put(
+        "/api/children/99999",
+        json={"name": "缺失幼儿", "nickname": None, "avatar": None},
+        headers={"X-Request-ID": child_request_id},
+    )
+    _assert_exact_api_error(
+        child_missing,
+        status=404,
+        code="CHILD_NOT_FOUND",
+        message="幼儿不存在",
+        request_id=child_request_id,
+        field_errors={},
+    )
+    duck_missing = client.put(
+        "/api/ducks/99999",
+        json={"name": "缺失小鸭", "avatar": None, "status": None, "note": None},
+        headers={"X-Request-ID": duck_request_id},
+    )
+    _assert_exact_api_error(
+        duck_missing,
+        status=404,
+        code="DUCK_NOT_FOUND",
+        message="小鸭不存在",
+        request_id=duck_request_id,
+        field_errors={},
+    )
+
+    for resource_kind, path in (
+        ("child", "/api/children/99999"),
+        ("duck", "/api/ducks/99999"),
+    ):
+        request_id = f"resource-{resource_kind}-invalid-before-lookup"
+        invalid = client.put(
+            path,
+            json={"name": "不应查库", "active": False},
+            headers={"X-Request-ID": request_id},
+        )
+        _assert_exact_validation_error(
+            invalid,
+            request_id=request_id,
+            field="active",
+            message=EXTRA_INPUT_MESSAGE,
+        )
+
+    assert _mutation_snapshot(db_session) == before
 
 
 def test_inactive_duck_is_excluded_from_new_chat_context_but_retained_in_historical_review(

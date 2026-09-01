@@ -38,17 +38,11 @@ def list_children(
 
 @router.post("/api/children", response_model=schemas.ChildOut)
 def create_child(
-    payload: schemas.ChildCreate,
+    payload: schemas.ChildMutationRequest,
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> models.Child:
-    child = models.Child(
-        name=payload.name,
-        nickname=payload.nickname,
-        avatar=payload.avatar,
-        active=True,
-        deactivated_at=None,
-    )
+    child = models.Child(**payload.model_dump(), active=True, deactivated_at=None)
     db.add(child)
     db.commit()
     db.refresh(child)
@@ -58,16 +52,15 @@ def create_child(
 @router.put("/api/children/{child_id}", response_model=schemas.ChildOut)
 def update_child(
     child_id: int,
-    payload: schemas.ChildCreate,
+    payload: schemas.ChildMutationRequest,
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> models.Child:
     child = db.get(models.Child, child_id)
     if child is None:
         raise APIError(404, "CHILD_NOT_FOUND", "幼儿不存在")
-    child.name = payload.name
-    child.nickname = payload.nickname
-    child.avatar = payload.avatar
+    for field, value in payload.model_dump().items():
+        setattr(child, field, value)
     db.commit()
     db.refresh(child)
     return child
@@ -131,7 +124,7 @@ def list_ducks(
 
 @router.post("/api/ducks", response_model=schemas.DuckOut)
 def create_duck(
-    payload: schemas.DuckCreate,
+    payload: schemas.DuckMutationRequest,
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> models.Duck:
@@ -145,17 +138,15 @@ def create_duck(
 @router.put("/api/ducks/{duck_id}", response_model=schemas.DuckOut)
 def update_duck(
     duck_id: int,
-    payload: schemas.DuckCreate,
+    payload: schemas.DuckMutationRequest,
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> models.Duck:
     duck = db.get(models.Duck, duck_id)
     if duck is None:
         raise APIError(404, "DUCK_NOT_FOUND", "小鸭不存在")
-    duck.name = payload.name
-    duck.avatar = payload.avatar
-    duck.status = payload.status
-    duck.note = payload.note
+    for field, value in payload.model_dump().items():
+        setattr(duck, field, value)
     db.commit()
     db.refresh(duck)
     return duck
