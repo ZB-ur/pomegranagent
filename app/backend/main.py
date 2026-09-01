@@ -21,6 +21,7 @@ from .http_boundary import install_same_origin_boundary
 from .routes.conversations import router as conversations_router
 from .routes.resources import router as resources_router
 from .routes.roster import router as roster_router
+from .schema_migrations import ensure_database_schema
 from .versioning import VERSION_FILE, load_runtime_version
 
 RUNTIME_VERSION = load_runtime_version()
@@ -42,7 +43,10 @@ logger = logging.getLogger("duck_diary")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("runtime database: db_mode=%s path=%s", DB_MODE, DATABASE_PATH)
-    Base.metadata.create_all(bind=engine)
+    if DB_MODE == "app":
+        ensure_database_schema(engine, DB_MODE)
+    else:
+        Base.metadata.create_all(bind=engine)
     _seed_dimensions()
     if DB_MODE == "app":
         _seed_demo_data()

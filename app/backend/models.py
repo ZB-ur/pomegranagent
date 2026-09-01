@@ -3,6 +3,7 @@ from datetime import datetime
 
 from sqlalchemy import (
     Boolean,
+    CheckConstraint,
     DateTime,
     Float,
     ForeignKey,
@@ -61,6 +62,30 @@ class Duck(Base):
     deactivated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
 
+class AvatarMedia(Base):
+    __tablename__ = "avatar_media"
+    __table_args__ = (
+        CheckConstraint("width > 0", name="ck_avatar_media_width_positive"),
+        CheckConstraint("height > 0", name="ck_avatar_media_height_positive"),
+        CheckConstraint("size_bytes > 0", name="ck_avatar_media_size_positive"),
+        CheckConstraint("mime_type = 'image/webp'", name="ck_avatar_media_webp"),
+        CheckConstraint(
+            "length(sha256) = 64",
+            name="ck_avatar_media_sha256_length",
+        ),
+        UniqueConstraint("file_name", name="uq_avatar_media_file_name"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    file_name: Mapped[str] = mapped_column(String(255), nullable=False)
+    mime_type: Mapped[str] = mapped_column(String(32), nullable=False)
+    width: Mapped[int] = mapped_column(Integer, nullable=False)
+    height: Mapped[int] = mapped_column(Integer, nullable=False)
+    size_bytes: Mapped[int] = mapped_column(Integer, nullable=False)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+
+
 class DutyRoster(Base):
     __tablename__ = "duty_rosters"
     __table_args__ = (
@@ -81,6 +106,21 @@ class Conversation(Base):
             "child_id",
             unique=True,
             sqlite_where=text("status = 'active'"),
+        ),
+        Index(
+            "ix_conversations_status_date_ended_id",
+            "status",
+            "date",
+            "ended_at",
+            "id",
+        ),
+        Index(
+            "ix_conversations_child_status_date_ended_id",
+            "child_id",
+            "status",
+            "date",
+            "ended_at",
+            "id",
         ),
     )
 
@@ -108,6 +148,9 @@ class Conversation(Base):
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index("ix_messages_conversation_id_id", "conversation_id", "id"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     conversation_id: Mapped[int] = mapped_column(ForeignKey("conversations.id"))
@@ -200,6 +243,11 @@ class AnalysisJob(Base):
     __tablename__ = "analysis_jobs"
     __table_args__ = (
         UniqueConstraint("conversation_id", name="uq_analysis_job_conversation"),
+        Index(
+            "ix_analysis_jobs_status_conversation_id",
+            "status",
+            "conversation_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -339,6 +387,11 @@ class Assessment(Base):
     __tablename__ = "assessments"
     __table_args__ = (
         UniqueConstraint("conversation_id", name="uq_assessment_conversation"),
+        Index(
+            "ix_assessments_status_conversation_id",
+            "status",
+            "conversation_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
