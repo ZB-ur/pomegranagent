@@ -388,6 +388,10 @@ textarea { min-height: 46px; width: 100%; }
   background: var(--teacher-status-danger);
   color: var(--teacher-status-danger-text);
 }
+.today-panel[data-state="error"] .today-status-badge {
+  background: var(--teacher-status-danger);
+  color: var(--teacher-status-danger-text);
+}
 .today-panel-body { align-content: start; display: grid; flex: 1; gap: 10px; min-width: 0; }
 .today-list { display: grid; gap: 6px; min-width: 0; }
 .today-panel-link, .today-roster-link, .today-review-link, .today-panel-retry, .today-analysis-retry {

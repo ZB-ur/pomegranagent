@@ -25,6 +25,7 @@ let teacherRouter = null;
 let lockButton = null;
 let lockFeedback = null;
 let currentPinInput = null;
+let currentPinConfirmationInput = null;
 
 nav.setAttribute('aria-busy', 'true');
 nav.querySelectorAll('button').forEach(button => { button.disabled = true; });
@@ -43,7 +44,9 @@ function h(tag, attrs, ...children) {
 
 function clearTeacherPin() {
   if (currentPinInput) currentPinInput.value = '';
+  if (currentPinConfirmationInput) currentPinConfirmationInput.value = '';
   currentPinInput = null;
+  currentPinConfirmationInput = null;
 }
 
 function setTeacherTopbarTitle(title = '安全设置') {
@@ -54,7 +57,11 @@ function updateTeacherNavigation() {
   const enabled = runtimeReady && teacherAuthenticated;
   if (!enabled) {
     nav.setAttribute('aria-busy', 'true');
-    nav.querySelectorAll('button').forEach(button => { button.disabled = true; });
+    nav.querySelectorAll('button').forEach(button => {
+      button.disabled = true;
+      button.classList.remove('active');
+      button.removeAttribute('aria-current');
+    });
     return;
   }
   nav.removeAttribute('aria-busy');
@@ -231,6 +238,25 @@ async function unlockTeacherPage() {
       input,
       h('p', { class: 'teacher-auth-hint' }, '使用容易记住、但不易被幼儿猜到的数字'),
     );
+    const confirmationInput = auth.configured ? null : h('input', {
+      id: 'teacher-pin-confirmation',
+      type: 'password',
+      inputmode: 'numeric',
+      pattern: '[0-9]{4,6}',
+      minlength: '4',
+      maxlength: '6',
+      autocomplete: 'off',
+      required: 'required',
+    });
+    currentPinConfirmationInput = confirmationInput;
+    const confirmationField = confirmationInput ? h('div', { class: 'teacher-auth-field' }) : null;
+    if (confirmationField) {
+      confirmationField.append(
+        h('label', { for: 'teacher-pin-confirmation' }, '再次输入教师 PIN'),
+        confirmationInput,
+        h('p', { class: 'teacher-auth-hint' }, '请再次输入，避免因误按设置了错误 PIN'),
+      );
+    }
     const privacy = h('div', { class: 'teacher-auth-privacy' });
     privacy.append(
       h('span', { class: 'teacher-auth-privacy-icon', 'aria-hidden': 'true' }, 'i'),
@@ -238,17 +264,20 @@ async function unlockTeacherPage() {
     );
     const feedback = h('p', { class: 'teacher-auth-feedback', role: 'alert', 'aria-live': 'assertive' });
     const submit = h('button', { class: 'btn', type: 'submit' }, auth.configured ? '解锁' : '设置并解锁');
-    form.append(
-      formHeader,
-      field,
-      privacy,
-      feedback,
-      submit,
-    );
+    form.append(formHeader, field);
+    if (confirmationField) form.append(confirmationField);
+    form.append(privacy, feedback, submit);
     form.addEventListener('submit', async event => {
       event.preventDefault();
       submit.disabled = true;
       feedback.textContent = '';
+      if (confirmationInput && input.value !== confirmationInput.value) {
+        confirmationInput.value = '';
+        feedback.textContent = '两次输入的 PIN 不一致，请重新确认。';
+        submit.disabled = false;
+        confirmationInput.focus();
+        return;
+      }
       try {
         if (auth.configured) await window.DuckAuth.unlock(input.value);
         else await window.DuckAuth.setup(input.value);
@@ -262,7 +291,12 @@ async function unlockTeacherPage() {
       } catch (error) {
         feedback.textContent = authenticationErrorCopy(error);
         submit.disabled = false;
-        input.focus();
+        if (confirmationInput) {
+          confirmationInput.value = '';
+          confirmationInput.focus();
+        } else {
+          input.focus();
+        }
       }
     });
     view.append(

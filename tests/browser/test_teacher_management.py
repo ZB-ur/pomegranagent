@@ -20,12 +20,14 @@ def open_teacher(teacher_browser, viewport, fragment):
     page.on("request", lambda request: requests.append(request))
     page.goto(f"{teacher_browser.server.base_url}/teacher.html{fragment}", wait_until="domcontentloaded")
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     return context, page, requests
 
 
 def setup(page):
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
 
 
@@ -58,6 +60,7 @@ def test_children_management_is_labeled_strict_and_never_sends_delete(teacher_br
     page.route(f"{teacher_browser.server.base_url}/api/children**", children)
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#children", wait_until="domcontentloaded")
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
 
     page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
@@ -112,6 +115,7 @@ def test_child_deactivation_uses_named_dialog_and_real_undo(teacher_browser, vie
     page.route(f"{teacher_browser.server.base_url}/api/children/7/reactivate", state)
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#children", wait_until="domcontentloaded")
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
 
     launcher = page.get_by_role("button", name="停用：雨雨", exact=True)
@@ -254,6 +258,7 @@ def test_duck_archive_summary_is_text_and_roster_uses_frozen_idempotent_routes(t
 
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#ducks", wait_until="domcontentloaded")
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("button", name="查看档案：小黄", exact=True).evaluate(
         "button => { button.click(); button.click(); }"

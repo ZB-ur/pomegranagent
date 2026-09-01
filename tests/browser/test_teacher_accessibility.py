@@ -538,6 +538,10 @@ def test_teacher_complete_review_flow_is_page_keyboard_only(teacher_browser, cas
         assert pin.evaluate("node => document.activeElement === node")
         page.keyboard.type(PIN)
         page.keyboard.press("Tab")
+        confirmation = page.locator("#teacher-pin-confirmation")
+        assert confirmation.evaluate("node => document.activeElement === node")
+        page.keyboard.type(PIN)
+        page.keyboard.press("Tab")
         unlock = page.get_by_role("button", name="设置并解锁", exact=True)
         _assert_active_outline(unlock)
         page.keyboard.press("Enter")
@@ -693,6 +697,10 @@ def test_teacher_dirty_review_dialog_is_named_keyboard_operable_and_restores_foc
     assert pin.evaluate("node => document.activeElement === node")
     page.keyboard.type(PIN)
     page.keyboard.press("Tab")
+    confirmation = page.locator("#teacher-pin-confirmation")
+    assert confirmation.evaluate("node => document.activeElement === node")
+    page.keyboard.type(PIN)
+    page.keyboard.press("Tab")
     unlock = page.get_by_role("button", name="设置并解锁", exact=True)
     _assert_active_outline(unlock)
     page.keyboard.press("Enter")
@@ -768,6 +776,10 @@ def test_teacher_authenticated_routes_have_frozen_accessibility_structure(
     pin = page.locator("#teacher-pin")
     pin.wait_for()
     assert pin.evaluate("node => document.activeElement === node")
+    page.keyboard.type(PIN)
+    page.keyboard.press("Tab")
+    confirmation = page.locator("#teacher-pin-confirmation")
+    assert confirmation.evaluate("node => document.activeElement === node")
     page.keyboard.type(PIN)
     page.keyboard.press("Tab")
     page.keyboard.press("Enter")
@@ -864,6 +876,10 @@ def test_teacher_pin_and_locked_states_use_the_separate_h2_contract(
         assert pin.evaluate("node => document.activeElement === node")
         page.keyboard.type(PIN)
         page.keyboard.press("Tab")
+        confirmation = page.locator("#teacher-pin-confirmation")
+        assert confirmation.evaluate("node => document.activeElement === node")
+        page.keyboard.type(PIN)
+        page.keyboard.press("Tab")
         page.keyboard.press("Enter")
         today_heading = page.locator("main#main h1", has_text="今日任务")
         today_heading.wait_for()
@@ -879,6 +895,8 @@ def test_teacher_pin_and_locked_states_use_the_separate_h2_contract(
     assert page.locator("main#main h2:visible").count() == 1
     assert page.locator("main#main h1").count() == 0
     assert page.get_by_label(case["pin_label"], exact=True).count() == 1
+    expected_confirmation_count = 1 if case["state"] == "initial" else 0
+    assert page.get_by_label("再次输入教师 PIN", exact=True).count() == expected_confirmation_count
     assert page.get_by_role(
         "button", name=case["submit"], exact=True
     ).count() == 1

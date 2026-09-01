@@ -349,6 +349,7 @@ def _open_teacher(teacher_browser, viewport, fragment: str = "#today"):
 
 def _unlock_teacher(page, heading: str) -> None:
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("heading", name=heading, exact=True).wait_for()
 

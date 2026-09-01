@@ -82,6 +82,7 @@ def open_teacher(teacher_browser, viewport, fragment: str = "#review?conversatio
 
 def unlock_review(page) -> None:
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("heading", name="值日审阅", exact=True).wait_for()
 

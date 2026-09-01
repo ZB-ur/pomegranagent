@@ -32,10 +32,12 @@ def open_teacher_page(teacher_browser, viewport):
 
 def setup_teacher(page, *, pin: str = PIN) -> None:
     page.get_by_label("设置教师 PIN", exact=True).fill(pin)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(pin)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("heading", name="今日任务", exact=True).wait_for()
     assert page.locator("form").count() == 0
     assert page.locator("#teacher-pin").count() == 0
+    assert page.locator("#teacher-pin-confirmation").count() == 0
 
 
 def lock_teacher(page) -> None:
@@ -110,6 +112,9 @@ def test_teacher_locked_shell_uses_the_approved_brand_topbar_and_auth_regions(
     assert page.locator(".teacher-auth-view").count() == 1
     assert page.locator(".teacher-auth-card").count() == 1
     assert page.get_by_text("仅本机验证", exact=True).count() == 1
+    assert page.get_by_label("再次输入教师 PIN", exact=True).count() == 1
+    assert page.locator("#nav button.active").count() == 0
+    assert page.locator('#nav button[aria-current="page"]').count() == 0
 
     sidebar_box = page.locator(".teacher-sidebar").bounding_box()
     assert sidebar_box is not None
@@ -124,6 +129,33 @@ def test_teacher_locked_shell_uses_the_approved_brand_topbar_and_auth_regions(
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_mismatched_setup_pin_is_local_and_never_calls_setup(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher_page(teacher_browser, viewport)
+    requests = []
+    page.on("request", lambda request: requests.append(request))
+    primary = page.get_by_label("设置教师 PIN", exact=True)
+    confirmation = page.get_by_label("再次输入教师 PIN", exact=True)
+    primary.fill(PIN)
+    confirmation.fill("2469")
+
+    page.get_by_role("button", name="设置并解锁", exact=True).click()
+
+    page.get_by_text("两次输入的 PIN 不一致，请重新确认。", exact=True).wait_for()
+    assert "/api/auth/setup" not in application_paths(
+        requests, teacher_browser.server.base_url
+    )
+    assert primary.input_value() == PIN
+    assert confirmation.input_value() == ""
+    assert confirmation.evaluate("node => document.activeElement === node")
+    assert page.get_by_role("button", name="设置并解锁", exact=True).is_enabled()
+    assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
+    assert_pin_absent(page, PIN)
+    assert_pin_absent(page, "2469")
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -320,6 +352,13 @@ def test_teacher_pagehide_clears_pin_and_success_paths_leave_no_pin_material(tea
         if "/api/auth/" in request.url
         else None,
     )
+    setup_input = page.get_by_label("设置教师 PIN", exact=True)
+    confirmation_input = page.get_by_label("再次输入教师 PIN", exact=True)
+    setup_input.fill("1357")
+    confirmation_input.fill("1357")
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+    assert setup_input.input_value() == ""
+    assert confirmation_input.input_value() == ""
     setup_teacher(page)
     assert_pin_absent(page, PIN)
     lock_teacher(page)
@@ -329,6 +368,7 @@ def test_teacher_pagehide_clears_pin_and_success_paths_leave_no_pin_material(tea
     page.get_by_role("heading", name="今日任务", exact=True).wait_for()
     assert page.locator("form").count() == 0
     assert page.locator("#teacher-pin").count() == 0
+    assert page.locator("#teacher-pin-confirmation").count() == 0
     assert_pin_absent(page, PIN)
     lock_teacher(page)
     input_box = page.get_by_label("教师 PIN", exact=True)

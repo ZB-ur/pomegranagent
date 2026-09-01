@@ -74,6 +74,7 @@ def open_teacher(teacher_browser, viewport, fragment: str = ""):
 
 def setup_teacher(page) -> None:
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("heading", name="今日任务", exact=True).wait_for()
 
@@ -336,6 +337,10 @@ def test_teacher_today_panel_failures_are_safe_and_retry_only_that_panel(teacher
     setup_teacher(page)
     target_panel = panel(page, key)
     target_panel.get_by_text("加载失败，请重试。", exact=True).wait_for()
+    assert target_panel.get_attribute("data-state") == "error"
+    assert target_panel.locator(".today-status-badge").evaluate(
+        "node => getComputedStyle(node).backgroundColor"
+    ) == "rgb(248, 226, 222)"
     assert "raw-panel-detail" not in page.locator("body").inner_text()
     target_panel.get_by_role("button", name=RELOAD_COPY[key], exact=True).click()
     target_panel.get_by_text(EMPTY_COPY[key], exact=True).wait_for()

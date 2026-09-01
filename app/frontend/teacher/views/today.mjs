@@ -195,7 +195,8 @@ function createPanel(document, key, title, subtitle, loadingCopy, tone) {
     createElement(document, 'p', { class: 'today-panel-subtitle muted' }, subtitle));
   const header = createElement(document, 'header', { class: 'today-panel-header' }, heading, status);
   const panel = createElement(document, 'section', {
-    class: 'card today-panel', 'data-today-panel': key, 'data-tone': tone, 'aria-busy': 'true',
+    class: 'card today-panel', 'data-today-panel': key, 'data-tone': tone,
+    'data-state': 'loading', 'aria-busy': 'true',
   }, header, body);
   return { panel, status, body };
 }
@@ -221,6 +222,7 @@ const PANEL_SPECS = Object.freeze({
 
 function setPanelLoading(state, key) {
   const spec = PANEL_SPECS[key];
+  state.panels[key].panel.setAttribute('data-state', 'loading');
   state.panels[key].panel.setAttribute('aria-busy', 'true');
   state.panels[key].status.replaceChildren(spec.loading);
   state.panels[key].body.replaceChildren();
@@ -229,6 +231,7 @@ function setPanelLoading(state, key) {
 function setPanelEmpty(state, key) {
   const spec = PANEL_SPECS[key];
   const panel = state.panels[key];
+  panel.panel.setAttribute('data-state', 'empty');
   panel.panel.removeAttribute('aria-busy');
   panel.status.replaceChildren(spec.empty);
   panel.body.replaceChildren();
@@ -243,6 +246,7 @@ function setPanelEmpty(state, key) {
 function setPanelError(state, key) {
   const spec = PANEL_SPECS[key];
   const panel = state.panels[key];
+  panel.panel.setAttribute('data-state', 'error');
   panel.panel.removeAttribute('aria-busy');
   panel.status.replaceChildren('加载失败，请重试。');
   const retry = createElement(state.document, 'button', {
@@ -293,6 +297,7 @@ function setPanelRows(state, key, rows) {
     return;
   }
   const panel = state.panels[key];
+  panel.panel.setAttribute('data-state', 'loaded');
   panel.panel.removeAttribute('aria-busy');
   panel.status.replaceChildren(`已加载 ${rows.length} 条`);
   const list = createElement(state.document, 'div', { class: 'today-list' });

@@ -179,6 +179,10 @@ def test_release_focus_indicator_meets_three_to_one(
     _keyboard_focus(page, pin)
     measure("input", pin)
     pin.fill(PIN)
+    confirmation = page.locator("#teacher-pin-confirmation")
+    _keyboard_focus(page, confirmation)
+    measure("confirmation-input", confirmation)
+    confirmation.fill(PIN)
     unlock = page.get_by_role("button", name="设置并解锁", exact=True)
     _keyboard_focus(page, unlock)
     measure("native-button", unlock)
@@ -249,10 +253,11 @@ def test_release_focus_indicator_meets_three_to_one(
         "route-h2",
         "dialog-target",
         "dialog-return",
-        "native-button",
-        "link",
-        "input",
-        "select",
+            "native-button",
+            "link",
+            "input",
+            "confirmation-input",
+            "select",
         "textarea",
         "nav-button",
         "primary-blue-button",
@@ -336,6 +341,7 @@ def test_release_teacher_action_persists_to_disposable_sqlite(
         wait_until="domcontentloaded",
     )
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
 

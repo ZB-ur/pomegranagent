@@ -24,6 +24,7 @@ def open_teacher(teacher_browser, viewport, fragment: str = ""):
 
 def setup_teacher(page, heading: str = "今日任务") -> None:
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("heading", name=heading, exact=True).wait_for()
     assert page.locator("form").count() == 0
