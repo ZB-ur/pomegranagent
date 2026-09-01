@@ -96,7 +96,7 @@ A11Y_ROUTE_CASES = [
         {
             "fragment": "search",
             "navigation": "明细检索",
-            "heading": "明细检索",
+            "heading": "查找历史日记",
             "settled": "暂无历史记录",
             "viewport": {"width": 1024, "height": 768},
         },
@@ -125,7 +125,7 @@ A11Y_ROUTE_CASES = [
                 "能力成长曲线",
                 "请选择一名幼儿查看成长曲线。",
             ),
-            ("search", "明细检索", "明细检索", "暂无历史记录"),
+            ("search", "明细检索", "查找历史日记", "暂无历史记录"),
         )
     ],
 ]

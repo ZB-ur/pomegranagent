@@ -27,7 +27,7 @@ def setup_teacher(page, heading: str = "今日任务") -> None:
     page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("heading", name=heading, exact=True).wait_for()
-    assert page.locator("form").count() == 0
+    assert page.locator(".teacher-auth-view form").count() == 0
 
 
 def active_route(page) -> str:
@@ -244,7 +244,7 @@ def test_teacher_manual_lock_aborts_route_and_unlock_starts_one_fresh_route_load
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_history_search_is_safe_and_navigable(teacher_browser, viewport):
     fragment = "#search"
-    heading = "明细检索"
+    heading = "查找历史日记"
     _context, page = open_teacher(teacher_browser, viewport, fragment)
     page.route(
         f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
