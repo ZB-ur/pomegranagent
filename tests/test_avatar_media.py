@@ -10,7 +10,8 @@ import os
 from pathlib import Path
 import shutil
 import stat
-from threading import Lock, Thread, get_ident, local
+from threading import Event, Lock, Thread, current_thread, get_ident, local
+import time
 from types import SimpleNamespace
 from uuid import UUID
 import zlib
@@ -1243,6 +1244,259 @@ def test_pinned_root_reset_closes_every_held_descriptor(db_session) -> None:
     for descriptor in descriptors:
         with pytest.raises(OSError):
             os.fstat(descriptor)
+
+
+def test_pid_guard_closes_inherited_registry_before_child_reopens_root(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.backend.services import avatar_media
+
+    stored = avatar_media.store_avatar(
+        db_session,
+        _direct_upload(_image_bytes("PNG"), "image/png"),
+        media_root=MEDIA_ROOT,
+        now=CAPTURED_NOW,
+    )
+    inherited = next(iter(avatar_media._PINNED_ROOTS.values()))
+    inherited_fd = inherited.fd
+    parent_pid = os.getpid()
+    original_secure_open = avatar_media._secure_open_media_root_fd
+    inspections: list[tuple[bool, bool]] = []
+
+    def inspecting_secure_open(media_root, *, create):
+        try:
+            os.fstat(inherited_fd)
+        except OSError:
+            inherited_closed = True
+        else:
+            inherited_closed = False
+        inspections.append((avatar_media._PINNED_ROOTS == {}, inherited_closed))
+        return original_secure_open(media_root, create=create)
+
+    monkeypatch.setattr(avatar_media, "_secure_open_media_root_fd", inspecting_secure_open)
+    monkeypatch.setattr(avatar_media.os, "getpid", lambda: parent_pid + 1)
+
+    loaded = avatar_media.load_avatar(db_session, stored.id, media_root=MEDIA_ROOT)
+
+    assert loaded.media.id == stored.id
+    assert inspections == [(True, True)]
+    assert next(iter(avatar_media._PINNED_ROOTS.values())) is not inherited
+
+
+def test_invalidating_waiter_never_closes_a_root_held_by_an_active_reader(
+    db_session,
+    monkeypatch,
+) -> None:
+    """Catches validation/close occurring before the incumbent root lease ends."""
+
+    from app.backend.services import avatar_media
+
+    stored = avatar_media.store_avatar(
+        db_session,
+        _direct_upload(_image_bytes("PNG"), "image/png"),
+        media_root=MEDIA_ROOT,
+        now=CAPTURED_NOW,
+    )
+    expected = (MEDIA_ROOT / stored.file_name).read_bytes()
+    original_mode = stat.S_IMODE(MEDIA_ROOT.stat().st_mode)
+    original_open = avatar_media.os.open
+    reader_at_fd_operation = Event()
+    release_reader = Event()
+    waiter_done = Event()
+    reader_result: dict[str, object] = {}
+    waiter_result: dict[str, object] = {}
+
+    def blocking_open(path, flags, mode=0o777, *, dir_fd=None):
+        if (
+            current_thread().name == "active-avatar-reader"
+            and os.fspath(path) == stored.file_name
+            and dir_fd is not None
+        ):
+            reader_at_fd_operation.set()
+            if not release_reader.wait(timeout=3):
+                raise AssertionError("reader release timed out")
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    def read_as(target: dict[str, object], done: Event | None = None) -> None:
+        session = SessionLocal()
+        try:
+            target["blob"] = avatar_media.load_avatar(
+                session,
+                stored.id,
+                media_root=MEDIA_ROOT,
+            )
+        except BaseException as error:
+            target["error"] = error
+        finally:
+            session.close()
+            if done is not None:
+                done.set()
+
+    monkeypatch.setattr(avatar_media.os, "open", blocking_open)
+    reader = Thread(
+        target=read_as,
+        name="active-avatar-reader",
+        args=(reader_result,),
+    )
+    waiter = Thread(
+        target=read_as,
+        name="invalidating-avatar-waiter",
+        args=(waiter_result, waiter_done),
+    )
+    try:
+        reader.start()
+        assert reader_at_fd_operation.wait(timeout=3)
+        MEDIA_ROOT.chmod(0o777)
+        waiter.start()
+        waiter_finished_while_reader_held = waiter_done.wait(timeout=0.2)
+    finally:
+        release_reader.set()
+        reader.join(timeout=3)
+        waiter.join(timeout=3)
+        MEDIA_ROOT.chmod(original_mode)
+
+    assert not reader.is_alive()
+    assert not waiter.is_alive()
+    assert waiter_finished_while_reader_held is False
+    assert "error" not in reader_result
+    assert reader_result["blob"].content == expected
+    assert isinstance(waiter_result.get("error"), APIError)
+    assert waiter_result["error"].code == "AVATAR_NOT_FOUND"
+
+
+def test_waiting_store_revalidates_root_after_permission_drift_before_any_write(
+    db_session,
+) -> None:
+    """Catches a safe validation result being reused after waiting on root.lock."""
+
+    from app.backend.services import avatar_media
+
+    baseline = avatar_media.store_avatar(
+        db_session,
+        _direct_upload(_image_bytes("PNG"), "image/png"),
+        media_root=MEDIA_ROOT,
+        now=CAPTURED_NOW,
+    )
+    baseline_files = {path.name for path in MEDIA_ROOT.iterdir()}
+    original_mode = stat.S_IMODE(MEDIA_ROOT.stat().st_mode)
+    pinned = next(iter(avatar_media._PINNED_ROOTS.values()))
+    result: dict[str, object] = {}
+
+    def waiting_store() -> None:
+        session = SessionLocal()
+        try:
+            result["stored"] = avatar_media.store_avatar(
+                session,
+                _direct_upload(_image_bytes("PNG", color=(20, 40, 220)), "image/png"),
+                media_root=MEDIA_ROOT,
+                now=CAPTURED_NOW,
+            )
+        except BaseException as error:
+            result["error"] = error
+        finally:
+            session.close()
+
+    pinned.lock.acquire()
+    thread = Thread(target=waiting_store, name="permission-drift-avatar-store")
+    try:
+        thread.start()
+        deadline = time.monotonic() + 3
+        waiter_holds_registry = False
+        while time.monotonic() < deadline:
+            if not avatar_media._PINNED_ROOTS_LOCK.acquire(blocking=False):
+                waiter_holds_registry = True
+                break
+            avatar_media._PINNED_ROOTS_LOCK.release()
+            time.sleep(0.005)
+        assert waiter_holds_registry is True
+        MEDIA_ROOT.chmod(0o777)
+    finally:
+        pinned.lock.release()
+        thread.join(timeout=3)
+        MEDIA_ROOT.chmod(original_mode)
+
+    assert not thread.is_alive()
+    assert "stored" not in result
+    assert isinstance(result.get("error"), APIError)
+    assert result["error"].code == "AVATAR_STORAGE_UNAVAILABLE"
+    db_session.expire_all()
+    assert db_session.scalar(select(func.count(models.AvatarMedia.id))) == 1
+    assert db_session.get(models.AvatarMedia, baseline.id) is not None
+    assert {path.name for path in MEDIA_ROOT.iterdir()} == baseline_files
+
+
+def test_reader_holds_root_lease_through_stored_content_validation(
+    db_session,
+    monkeypatch,
+) -> None:
+    """The validated root lease covers the complete load, not only fd reads."""
+
+    from app.backend.services import avatar_media
+
+    stored = avatar_media.store_avatar(
+        db_session,
+        _direct_upload(_image_bytes("PNG"), "image/png"),
+        media_root=MEDIA_ROOT,
+        now=CAPTURED_NOW,
+    )
+    original_validate = avatar_media._validate_stored_webp
+    reader_at_validation = Event()
+    release_reader = Event()
+    waiter_done = Event()
+    reader_result: dict[str, object] = {}
+    waiter_result: dict[str, object] = {}
+
+    def blocking_validate(content, row):
+        if current_thread().name == "active-avatar-validator":
+            reader_at_validation.set()
+            if not release_reader.wait(timeout=3):
+                raise AssertionError("validator release timed out")
+        return original_validate(content, row)
+
+    def load_as(target: dict[str, object], done: Event | None = None) -> None:
+        session = SessionLocal()
+        try:
+            target["blob"] = avatar_media.load_avatar(
+                session,
+                stored.id,
+                media_root=MEDIA_ROOT,
+            )
+        except BaseException as error:
+            target["error"] = error
+        finally:
+            session.close()
+            if done is not None:
+                done.set()
+
+    monkeypatch.setattr(avatar_media, "_validate_stored_webp", blocking_validate)
+    reader = Thread(
+        target=load_as,
+        name="active-avatar-validator",
+        args=(reader_result,),
+    )
+    waiter = Thread(
+        target=load_as,
+        name="waiting-avatar-reader",
+        args=(waiter_result, waiter_done),
+    )
+    try:
+        reader.start()
+        assert reader_at_validation.wait(timeout=3)
+        waiter.start()
+        waiter_finished_while_reader_held = waiter_done.wait(timeout=0.2)
+    finally:
+        release_reader.set()
+        reader.join(timeout=3)
+        waiter.join(timeout=3)
+
+    assert not reader.is_alive()
+    assert not waiter.is_alive()
+    assert waiter_finished_while_reader_held is False
+    assert "error" not in reader_result
+    assert "error" not in waiter_result
+    assert reader_result["blob"].media.id == stored.id
+    assert waiter_result["blob"].media.id == stored.id
 
 
 @pytest.mark.parametrize(

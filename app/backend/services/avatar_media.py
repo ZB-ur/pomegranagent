@@ -1,6 +1,7 @@
 """Validated, durable storage for same-origin avatar media."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -75,6 +76,7 @@ class _PinnedMediaRoot:
 
 _PINNED_ROOTS: dict[str, _PinnedMediaRoot] = {}
 _PINNED_ROOTS_LOCK = RLock()
+_PINNED_ROOTS_PID = os.getpid()
 
 
 def _invalid_avatar() -> APIError:
@@ -160,49 +162,124 @@ def _secure_open_media_root_fd(media_root: Path, *, create: bool) -> int:
         raise _root_error(create=create) from None
 
 
-def _pin_media_root(media_root: Path, *, create: bool) -> _PinnedMediaRoot:
-    """Pin one configured path to its first securely opened device/inode."""
+def _reset_inherited_media_roots() -> None:
+    """Drop inherited descriptors and locks in a forked child process."""
 
-    key = os.fspath(_absolute_without_symlink_resolution(Path(media_root)))
-    with _PINNED_ROOTS_LOCK:
-        pinned = _PINNED_ROOTS.get(key)
-        if pinned is not None:
-            try:
-                current = os.fstat(pinned.fd)
-            except OSError:
-                _PINNED_ROOTS.pop(key, None)
-                try:
-                    os.close(pinned.fd)
-                except OSError:
-                    pass
-                raise _root_error(create=create) from None
-            if (
-                not stat.S_ISDIR(current.st_mode)
-                or current.st_uid != os.geteuid()
-                or current.st_mode & 0o022
-                or _inode_identity(current) != pinned.identity
-            ):
-                _PINNED_ROOTS.pop(key, None)
-                try:
-                    os.close(pinned.fd)
-                except OSError:
-                    pass
-                raise _root_error(create=create)
-            return pinned
+    global _PINNED_ROOTS, _PINNED_ROOTS_LOCK, _PINNED_ROOTS_PID
 
-        descriptor = _secure_open_media_root_fd(Path(media_root), create=create)
+    inherited = list(_PINNED_ROOTS.values())
+    _PINNED_ROOTS = {}
+    _PINNED_ROOTS_LOCK = RLock()
+    _PINNED_ROOTS_PID = os.getpid()
+    for pinned in inherited:
         try:
-            root_stat = os.fstat(descriptor)
-            pinned = _PinnedMediaRoot(
-                fd=descriptor,
-                identity=_inode_identity(root_stat),
-                lock=RLock(),
-            )
-            _PINNED_ROOTS[key] = pinned
-            return pinned
+            os.close(pinned.fd)
+        except OSError:
+            pass
+
+
+def _ensure_media_root_process() -> None:
+    if os.getpid() != _PINNED_ROOTS_PID:
+        _reset_inherited_media_roots()
+
+
+def _validate_pinned_media_root(
+    pinned: _PinnedMediaRoot,
+    *,
+    create: bool,
+) -> None:
+    try:
+        current = os.fstat(pinned.fd)
+    except OSError:
+        raise _root_error(create=create) from None
+    if (
+        not stat.S_ISDIR(current.st_mode)
+        or current.st_uid != os.geteuid()
+        or current.st_mode & 0o022
+        or _inode_identity(current) != pinned.identity
+    ):
+        raise _root_error(create=create)
+
+
+def _close_pinned_media_root(key: str, pinned: _PinnedMediaRoot) -> None:
+    """Close one entry while registry lock then its root lock are held."""
+
+    if _PINNED_ROOTS.get(key) is pinned:
+        _PINNED_ROOTS.pop(key, None)
+    try:
+        os.close(pinned.fd)
+    except OSError:
+        pass
+
+
+@contextmanager
+def _media_root_lease(media_root: Path, *, create: bool):
+    """Yield one continuously locked, freshly validated pinned root.
+
+    Lock order is always registry then root. The registry lock is retained
+    while waiting for an existing root lock, so an invalid descriptor cannot
+    be closed underneath an active operation. Validation happens only after
+    that wait and the root lock is handed directly to the full store/load
+    operation. Lease acquisition for another configured root can briefly wait
+    behind this handoff; operations on distinct acquired roots run concurrently.
+    """
+
+    _ensure_media_root_process()
+    key = os.fspath(_absolute_without_symlink_resolution(Path(media_root)))
+    registry_lock = _PINNED_ROOTS_LOCK
+    pinned: _PinnedMediaRoot | None = None
+    root_acquired = False
+    new_entry = False
+    closed = False
+    registry_lock.acquire()
+    try:
+        pinned = _PINNED_ROOTS.get(key)
+        if pinned is None:
+            descriptor = _secure_open_media_root_fd(Path(media_root), create=create)
+            try:
+                root_stat = os.fstat(descriptor)
+                pinned = _PinnedMediaRoot(
+                    fd=descriptor,
+                    identity=_inode_identity(root_stat),
+                    lock=RLock(),
+                )
+                new_entry = True
+            except Exception:
+                os.close(descriptor)
+                raise
+
+        pinned.lock.acquire()
+        root_acquired = True
+        try:
+            _validate_pinned_media_root(pinned, create=create)
         except Exception:
-            os.close(descriptor)
+            _close_pinned_media_root(key, pinned)
+            closed = True
+            pinned.lock.release()
+            root_acquired = False
             raise
+        if new_entry:
+            _PINNED_ROOTS[key] = pinned
+    except Exception:
+        if root_acquired and pinned is not None:
+            pinned.lock.release()
+            root_acquired = False
+        if new_entry and pinned is not None and not closed:
+            if _PINNED_ROOTS.get(key) is pinned:
+                _PINNED_ROOTS.pop(key, None)
+            try:
+                os.close(pinned.fd)
+            except OSError:
+                pass
+        raise
+    finally:
+        registry_lock.release()
+
+    try:
+        yield pinned
+    finally:
+        if root_acquired:
+            pinned.lock.release()
 
 
 def close_pinned_media_roots() -> None:
@@ -212,17 +289,19 @@ def close_pinned_media_roots() -> None:
     identities cannot leak between cases.
     """
 
-    with _PINNED_ROOTS_LOCK:
-        roots = list(_PINNED_ROOTS.values())
-        _PINNED_ROOTS.clear()
-        for pinned in roots:
-            with pinned.lock:
-                try:
-                    os.close(pinned.fd)
-                except OSError:
-                    pass
+    _ensure_media_root_process()
+    registry_lock = _PINNED_ROOTS_LOCK
+    with registry_lock:
+        for key, pinned in list(_PINNED_ROOTS.items()):
+            pinned.lock.acquire()
+            try:
+                _close_pinned_media_root(key, pinned)
+            finally:
+                pinned.lock.release()
 
 
+if hasattr(os, "register_at_fork"):
+    os.register_at_fork(after_in_child=_reset_inherited_media_roots)
 atexit.register(close_pinned_media_roots)
 
 
@@ -541,152 +620,166 @@ def store_avatar(
         raise APIError(415, "AVATAR_TYPE_UNSUPPORTED", "仅支持 JPEG、PNG 或 WebP 头像")
     raw = _read_bounded(upload.file)
     encoded, width, height = _transcode(raw, declared_type)
-    with _PINNED_ROOTS_LOCK:
-        pinned = _pin_media_root(Path(media_root), create=True)
-        pinned.lock.acquire()
+    with _media_root_lease(Path(media_root), create=True) as pinned:
+        return _store_avatar_under_lease(
+            db,
+            encoded=encoded,
+            width=width,
+            height=height,
+            now=now,
+            pinned=pinned,
+        )
+
+
+def _store_avatar_under_lease(
+    db: Session,
+    *,
+    encoded: bytes,
+    width: int,
+    height: int,
+    now: datetime,
+    pinned: _PinnedMediaRoot,
+) -> StoredAvatar:
+    """Publish and commit while the caller continuously holds the root lease."""
+
     media_id: str | None = None
     file_name: str | None = None
     final_identity: tuple[int, int] | None = None
     temporary_name: str | None = None
     temporary_identity: tuple[int, int] | None = None
     try:
-        with pinned.lock:
-            directory_fd = pinned.fd
-            for _attempt in range(128):
-                media_id = str(uuid4())
-                file_name = f"{media_id}.webp"
-                final_identity = None
-                temporary_name = None
-                temporary_identity = None
+        directory_fd = pinned.fd
+        for _attempt in range(128):
+            media_id = str(uuid4())
+            file_name = f"{media_id}.webp"
+            final_identity = None
+            temporary_name = None
+            temporary_identity = None
 
-                candidate_row = models.AvatarMedia(
-                    id=media_id,
-                    file_name=file_name,
-                    mime_type="image/webp",
-                    width=width,
-                    height=height,
-                    size_bytes=len(encoded),
-                    sha256=sha256(encoded).hexdigest(),
-                    created_at=now.astimezone(UTC).replace(tzinfo=None),
-                )
-                db.add(candidate_row)
+            candidate_row = models.AvatarMedia(
+                id=media_id,
+                file_name=file_name,
+                mime_type="image/webp",
+                width=width,
+                height=height,
+                size_bytes=len(encoded),
+                sha256=sha256(encoded).hexdigest(),
+                created_at=now.astimezone(UTC).replace(tzinfo=None),
+            )
+            db.add(candidate_row)
+            try:
+                db.flush()
+            except IntegrityError:
+                db.rollback()
+                continue
+
+            for _temp_attempt in range(128):
+                candidate_temp = f".avatar-{uuid4()}.tmp"
                 try:
-                    db.flush()
-                except IntegrityError:
-                    db.rollback()
-                    continue
-
-                for _temp_attempt in range(128):
-                    candidate_temp = f".avatar-{uuid4()}.tmp"
-                    try:
-                        file_descriptor = os.open(
-                            candidate_temp,
-                            os.O_WRONLY
-                            | os.O_CREAT
-                            | os.O_EXCL
-                            | getattr(os, "O_NOFOLLOW", 0)
-                            | getattr(os, "O_CLOEXEC", 0),
-                            0o600,
-                            dir_fd=directory_fd,
-                        )
-                    except FileExistsError:
-                        continue
-                    temporary_name = candidate_temp
-                    break
-                else:
-                    raise _storage_unavailable()
-
-                raw_descriptor: int | None = file_descriptor
-                try:
-                    temporary_stat = os.fstat(raw_descriptor)
-                    if not stat.S_ISREG(temporary_stat.st_mode):
-                        raise _storage_unavailable()
-                    temporary_identity = _inode_identity(temporary_stat)
-                    try:
-                        output = os.fdopen(raw_descriptor, "wb")
-                    except Exception:
-                        os.close(raw_descriptor)
-                        raw_descriptor = None
-                        raise
-                    raw_descriptor = None
-                    with output:
-                        output.write(encoded)
-                        output.flush()
-                        os.fsync(output.fileno())
-                finally:
-                    if raw_descriptor is not None:
-                        os.close(raw_descriptor)
-
-                try:
-                    os.link(
-                        temporary_name,
-                        file_name,
-                        src_dir_fd=directory_fd,
-                        dst_dir_fd=directory_fd,
-                        follow_symlinks=False,
+                    file_descriptor = os.open(
+                        candidate_temp,
+                        os.O_WRONLY
+                        | os.O_CREAT
+                        | os.O_EXCL
+                        | getattr(os, "O_NOFOLLOW", 0)
+                        | getattr(os, "O_CLOEXEC", 0),
+                        0o600,
+                        dir_fd=directory_fd,
                     )
                 except FileExistsError:
-                    db.rollback()
-                    _remove_owned_entry(
-                        directory_fd,
-                        temporary_name,
-                        temporary_identity,
-                    )
-                    temporary_name = None
-                    temporary_identity = None
                     continue
+                temporary_name = candidate_temp
+                break
+            else:
+                raise _storage_unavailable()
 
-                final_identity = temporary_identity
-                if not _remove_owned_entry(
+            raw_descriptor: int | None = file_descriptor
+            try:
+                temporary_stat = os.fstat(raw_descriptor)
+                if not stat.S_ISREG(temporary_stat.st_mode):
+                    raise _storage_unavailable()
+                temporary_identity = _inode_identity(temporary_stat)
+                try:
+                    output = os.fdopen(raw_descriptor, "wb")
+                except Exception:
+                    os.close(raw_descriptor)
+                    raw_descriptor = None
+                    raise
+                raw_descriptor = None
+                with output:
+                    output.write(encoded)
+                    output.flush()
+                    os.fsync(output.fileno())
+            finally:
+                if raw_descriptor is not None:
+                    os.close(raw_descriptor)
+
+            try:
+                os.link(
+                    temporary_name,
+                    file_name,
+                    src_dir_fd=directory_fd,
+                    dst_dir_fd=directory_fd,
+                    follow_symlinks=False,
+                )
+            except FileExistsError:
+                db.rollback()
+                _remove_owned_entry(
                     directory_fd,
                     temporary_name,
                     temporary_identity,
-                ):
-                    raise _storage_unavailable()
+                )
                 temporary_name = None
                 temporary_identity = None
-                installed_stat = os.stat(
-                    file_name,
-                    dir_fd=directory_fd,
-                    follow_symlinks=False,
-                )
-                if (
-                    not stat.S_ISREG(installed_stat.st_mode)
-                    or installed_stat.st_nlink != 1
-                    or _inode_identity(installed_stat) != final_identity
-                ):
-                    raise _storage_unavailable()
-                os.fsync(directory_fd)
-                snapshot = StoredAvatar(
-                    id=candidate_row.id,
-                    file_name=candidate_row.file_name,
-                    mime_type=candidate_row.mime_type,
-                    width=candidate_row.width,
-                    height=candidate_row.height,
-                    size_bytes=candidate_row.size_bytes,
-                    sha256=candidate_row.sha256,
-                )
-                db.commit()
-                return snapshot
-            raise _storage_unavailable()
+                continue
+
+            final_identity = temporary_identity
+            if not _remove_owned_entry(
+                directory_fd,
+                temporary_name,
+                temporary_identity,
+            ):
+                raise _storage_unavailable()
+            temporary_name = None
+            temporary_identity = None
+            installed_stat = os.stat(
+                file_name,
+                dir_fd=directory_fd,
+                follow_symlinks=False,
+            )
+            if (
+                not stat.S_ISREG(installed_stat.st_mode)
+                or installed_stat.st_nlink != 1
+                or _inode_identity(installed_stat) != final_identity
+            ):
+                raise _storage_unavailable()
+            os.fsync(directory_fd)
+            snapshot = StoredAvatar(
+                id=candidate_row.id,
+                file_name=candidate_row.file_name,
+                mime_type=candidate_row.mime_type,
+                width=candidate_row.width,
+                height=candidate_row.height,
+                size_bytes=candidate_row.size_bytes,
+                sha256=candidate_row.sha256,
+            )
+            db.commit()
+            return snapshot
+        raise _storage_unavailable()
     except APIError:
         db.rollback()
-        with pinned.lock:
-            if file_name is not None and final_identity is not None:
-                _remove_owned_entry(pinned.fd, file_name, final_identity)
-            if temporary_name is not None:
-                _remove_owned_entry(pinned.fd, temporary_name, temporary_identity)
+        if file_name is not None and final_identity is not None:
+            _remove_owned_entry(pinned.fd, file_name, final_identity)
+        if temporary_name is not None:
+            _remove_owned_entry(pinned.fd, temporary_name, temporary_identity)
         raise
     except Exception:
         db.rollback()
-        with pinned.lock:
-            if file_name is not None and final_identity is not None:
-                _remove_owned_entry(pinned.fd, file_name, final_identity)
-            if temporary_name is not None:
-                _remove_owned_entry(pinned.fd, temporary_name, temporary_identity)
+        if file_name is not None and final_identity is not None:
+            _remove_owned_entry(pinned.fd, file_name, final_identity)
+        if temporary_name is not None:
+            _remove_owned_entry(pinned.fd, temporary_name, temporary_identity)
         raise _storage_unavailable() from None
-    finally:
-        pinned.lock.release()
 
 
 def _canonical_media_id(media_id: str | UUID) -> str:
@@ -771,56 +864,47 @@ def load_avatar(
         raise _not_found()
 
     try:
-        with _PINNED_ROOTS_LOCK:
-            pinned = _pin_media_root(Path(media_root), create=False)
-            pinned.lock.acquire()
+        with _media_root_lease(Path(media_root), create=False) as pinned:
+            path_stat = os.stat(
+                row.file_name,
+                dir_fd=pinned.fd,
+                follow_symlinks=False,
+            )
+            if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
+                raise _not_found()
+            flags = (
+                os.O_RDONLY
+                | getattr(os, "O_NOFOLLOW", 0)
+                | getattr(os, "O_CLOEXEC", 0)
+            )
+            descriptor = os.open(row.file_name, flags, dir_fd=pinned.fd)
+            try:
+                opened_stat = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened_stat.st_mode)
+                    or opened_stat.st_nlink != 1
+                    or (opened_stat.st_dev, opened_stat.st_ino)
+                    != (path_stat.st_dev, path_stat.st_ino)
+                ):
+                    raise _not_found()
+                with os.fdopen(descriptor, "rb", closefd=False) as source:
+                    content = source.read(row.size_bytes + 1)
+                finished_stat = os.fstat(descriptor)
+                if (
+                    finished_stat.st_nlink != 1
+                    or _inode_identity(finished_stat) != _inode_identity(opened_stat)
+                ):
+                    raise _not_found()
+            finally:
+                os.close(descriptor)
+            if len(content) != row.size_bytes or sha256(content).hexdigest() != row.sha256:
+                raise _not_found()
+            _validate_stored_webp(content, row)
+            return AvatarBlob(media=row, content=content)
     except APIError:
         raise _not_found() from None
-    try:
-        with pinned.lock:
-            try:
-                path_stat = os.stat(
-                    row.file_name,
-                    dir_fd=pinned.fd,
-                    follow_symlinks=False,
-                )
-                if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
-                    raise _not_found()
-                flags = (
-                    os.O_RDONLY
-                    | getattr(os, "O_NOFOLLOW", 0)
-                    | getattr(os, "O_CLOEXEC", 0)
-                )
-                descriptor = os.open(row.file_name, flags, dir_fd=pinned.fd)
-                try:
-                    opened_stat = os.fstat(descriptor)
-                    if (
-                        not stat.S_ISREG(opened_stat.st_mode)
-                        or opened_stat.st_nlink != 1
-                        or (opened_stat.st_dev, opened_stat.st_ino)
-                        != (path_stat.st_dev, path_stat.st_ino)
-                    ):
-                        raise _not_found()
-                    with os.fdopen(descriptor, "rb", closefd=False) as source:
-                        content = source.read(row.size_bytes + 1)
-                    finished_stat = os.fstat(descriptor)
-                    if (
-                        finished_stat.st_nlink != 1
-                        or _inode_identity(finished_stat) != _inode_identity(opened_stat)
-                    ):
-                        raise _not_found()
-                finally:
-                    os.close(descriptor)
-            except APIError:
-                raise _not_found() from None
-            except (FileNotFoundError, OSError, ValueError):
-                raise _not_found() from None
-    finally:
-        pinned.lock.release()
-    if len(content) != row.size_bytes or sha256(content).hexdigest() != row.sha256:
-        raise _not_found()
-    _validate_stored_webp(content, row)
-    return AvatarBlob(media=row, content=content)
+    except (FileNotFoundError, OSError, ValueError):
+        raise _not_found() from None
 
 
 def validate_avatar_reference(

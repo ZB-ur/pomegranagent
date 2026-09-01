@@ -27,7 +27,7 @@ async def _raw_asgi_create(
     path: str,
     body: dict[str, object],
     cookie: str,
-    request_id_headers: list[bytes],
+    request_id_headers: list[bytes | tuple[bytes, bytes]],
 ) -> tuple[int, dict[str, str], dict[str, object]]:
     encoded = json.dumps(body, ensure_ascii=False).encode("utf-8")
     messages: list[dict] = []
@@ -48,7 +48,10 @@ async def _raw_asgi_create(
         (b"content-length", str(len(encoded)).encode("ascii")),
         (b"cookie", f"{COOKIE_NAME}={cookie}".encode("ascii")),
     ]
-    headers.extend((b"x-request-id", value) for value in request_id_headers)
+    headers.extend(
+        value if isinstance(value, tuple) else (b"x-request-id", value)
+        for value in request_id_headers
+    )
     scope = {
         "type": "http",
         "asgi": {"version": "3.0", "spec_version": "2.3"},
@@ -199,6 +202,13 @@ def test_create_without_request_id_keeps_p5_non_idempotent_compatibility(client,
             ],
             id="duplicate",
         ),
+        pytest.param(
+            [
+                (b"X-Request-ID", b"abcdefab-cdef-4abc-8def-abcdefabcdef"),
+                (b"x-ReQuEsT-Id", b"abcdefab-cdef-4abc-8def-abcdefabcdef"),
+            ],
+            id="mixed-case-raw-duplicate",
+        ),
         pytest.param([b""], id="empty"),
         pytest.param([b"not-a-uuid"], id="not-uuid"),
         pytest.param([b"ABCDEFAB-CDEF-4ABC-8DEF-ABCDEFABCDEF"], id="uppercase"),
@@ -247,6 +257,7 @@ def test_present_noncanonical_request_id_is_422_before_resource_or_ledger_write(
 @pytest.mark.parametrize(
     ("ledger_status", "expected_status", "expected_code", "retryable"),
     [
+        pytest.param("processing", 409, "REQUEST_IN_PROGRESS", True, id="processing"),
         pytest.param("failed", 409, "REQUEST_FAILED", False, id="failed"),
         pytest.param("unexpected", 500, "INTERNAL_ERROR", True, id="unknown"),
     ],
