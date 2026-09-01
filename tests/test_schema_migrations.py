@@ -8,6 +8,8 @@ import subprocess
 import sys
 import textwrap
 
+from alembic import command
+from alembic.config import Config
 from fastapi import FastAPI
 import pytest
 from sqlalchemy import create_engine, inspect, select
@@ -62,6 +64,23 @@ SCHEMA_3_INDEXES = {
     "ix_analysis_jobs_status_conversation_id": ("status", "conversation_id"),
     "ix_assessments_status_conversation_id": ("status", "conversation_id"),
 }
+AVATAR_MEDIA_COLUMNS = (
+    ("id", "VARCHAR(36)", False, None, 1),
+    ("file_name", "VARCHAR(255)", False, None, 0),
+    ("mime_type", "VARCHAR(32)", False, None, 0),
+    ("width", "INTEGER", False, None, 0),
+    ("height", "INTEGER", False, None, 0),
+    ("size_bytes", "INTEGER", False, None, 0),
+    ("sha256", "VARCHAR(64)", False, None, 0),
+    ("created_at", "DATETIME", False, None, 0),
+)
+AVATAR_MEDIA_CHECKS = (
+    ("ck_avatar_media_height_positive", "height > 0"),
+    ("ck_avatar_media_sha256_length", "length(sha256) = 64"),
+    ("ck_avatar_media_size_positive", "size_bytes > 0"),
+    ("ck_avatar_media_webp", "mime_type = 'image/webp'"),
+    ("ck_avatar_media_width_positive", "width > 0"),
+)
 
 
 def engine_for(database: Path):
@@ -76,6 +95,141 @@ def load_schema_2_fixture(database: Path) -> Path:
     with sqlite3.connect(database) as connection:
         connection.executescript(SCHEMA_2_FIXTURE.read_text(encoding="utf-8"))
     return database
+
+
+def run_alembic(database: Path, operation: str, revision: str) -> None:
+    config = Config(str(ROOT / "alembic.ini"))
+    config.set_main_option("script_location", str(ROOT / "migrations"))
+    config.set_main_option("sqlalchemy.url", f"sqlite:///{database}")
+    getattr(command, operation)(config, revision)
+
+
+def stamp_database(database: Path, revision: str) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TABLE alembic_version (
+                version_num VARCHAR(32) NOT NULL PRIMARY KEY
+            )
+            """
+        )
+        connection.execute(
+            "INSERT INTO alembic_version (version_num) VALUES (?)",
+            (revision,),
+        )
+
+
+def normalized_sql(value: object) -> object:
+    if not isinstance(value, str):
+        return value
+    return " ".join(value.lower().replace('"', "").split())
+
+
+def physical_schema_signature(
+    database: Path,
+    *,
+    excluded_tables: set[str] | None = None,
+    excluded_indexes: set[str] | None = None,
+) -> dict[str, dict[str, tuple[object, ...]]]:
+    """Inspect persisted SQLite structure without importing migration code."""
+
+    excluded_tables = excluded_tables or set()
+    excluded_indexes = excluded_indexes or set()
+    signature: dict[str, dict[str, tuple[object, ...]]] = {}
+    with sqlite3.connect(database) as connection:
+        table_names = [
+            row[0]
+            for row in connection.execute(
+                """
+                SELECT name
+                FROM sqlite_schema
+                WHERE type = 'table' AND name NOT LIKE 'sqlite_%'
+                ORDER BY name
+                """
+            ).fetchall()
+            if row[0] not in excluded_tables
+        ]
+        for table in table_names:
+            columns = tuple(
+                (
+                    row[1],
+                    row[2].upper(),
+                    not bool(row[3]),
+                    normalized_sql(row[4]),
+                    row[5],
+                )
+                for row in connection.execute(
+                    f'PRAGMA table_info("{table}")'
+                ).fetchall()
+            )
+            foreign_keys = tuple(sorted(
+                (
+                    row[3],
+                    row[2],
+                    row[4],
+                    row[5].lower(),
+                    row[6].lower(),
+                    row[7].lower(),
+                )
+                for row in connection.execute(
+                    f'PRAGMA foreign_key_list("{table}")'
+                ).fetchall()
+            ))
+            unique_constraints: list[tuple[str, ...]] = []
+            indexes: list[tuple[object, ...]] = []
+            for index_row in connection.execute(
+                f'PRAGMA index_list("{table}")'
+            ).fetchall():
+                _, name, unique, origin, partial = index_row[:5]
+                index_columns = tuple(
+                    row[2]
+                    for row in connection.execute(
+                        f'PRAGMA index_info("{name}")'
+                    ).fetchall()
+                )
+                if origin == "u":
+                    unique_constraints.append(index_columns)
+                    continue
+                if origin == "pk" or name in excluded_indexes:
+                    continue
+                index_sql_row = connection.execute(
+                    "SELECT sql FROM sqlite_schema WHERE type = 'index' AND name = ?",
+                    (name,),
+                ).fetchone()
+                index_sql = normalized_sql(index_sql_row[0]) if index_sql_row else None
+                predicate = None
+                if partial and isinstance(index_sql, str):
+                    predicate = index_sql.split(" where ", maxsplit=1)[1]
+                indexes.append(
+                    (name, bool(unique), index_columns, bool(partial), predicate)
+                )
+            signature[table] = {
+                "columns": columns,
+                "foreign_keys": foreign_keys,
+                "unique_constraints": tuple(sorted(unique_constraints)),
+                "indexes": tuple(sorted(indexes)),
+            }
+
+    engine = engine_for(database)
+    try:
+        inspector = inspect(engine)
+        for table in signature:
+            signature[table]["checks"] = tuple(sorted(
+                (
+                    constraint["name"],
+                    normalized_sql(constraint["sqltext"]),
+                )
+                for constraint in inspector.get_check_constraints(table)
+            ))
+    finally:
+        engine.dispose()
+    return signature
+
+
+@pytest.fixture
+def schema_two_signature(tmp_path: Path):
+    reference = load_schema_2_fixture(tmp_path / "frozen-schema-2.db")
+    return physical_schema_signature(reference)
 
 
 def scalar(database: Path, statement: str):
@@ -110,7 +264,115 @@ def index_columns(database: Path, index_name: str) -> tuple[str, ...]:
     return tuple(row[2] for row in rows)
 
 
-def assert_schema_three_shape(database: Path) -> None:
+def remove_ducks_note(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute("ALTER TABLE ducks DROP COLUMN note")
+
+
+def add_ducks_column(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute("ALTER TABLE ducks ADD COLUMN unexpected_note TEXT")
+
+
+def add_unexpected_table(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE unexpected_extension (id INTEGER PRIMARY KEY)")
+
+
+def replace_partial_index(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            DROP INDEX uq_conversations_child_active;
+            CREATE UNIQUE INDEX uq_conversations_child_active
+                ON conversations (child_id) WHERE status = 'ended';
+            """
+        )
+
+
+def remove_duck_archive_foreign_key(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            ALTER TABLE duck_archives RENAME TO old_duck_archives;
+            CREATE TABLE duck_archives (
+                id INTEGER NOT NULL,
+                duck_id INTEGER NOT NULL,
+                summary TEXT,
+                updated_at DATETIME NOT NULL,
+                PRIMARY KEY (id)
+            );
+            INSERT INTO duck_archives SELECT * FROM old_duck_archives;
+            DROP TABLE old_duck_archives;
+            """
+        )
+
+
+def remove_roster_unique_constraint(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            PRAGMA foreign_keys = OFF;
+            ALTER TABLE duty_rosters RENAME TO old_duty_rosters;
+            CREATE TABLE duty_rosters (
+                id INTEGER NOT NULL,
+                cycle VARCHAR(64) NOT NULL,
+                date VARCHAR(16) NOT NULL,
+                child_id INTEGER NOT NULL,
+                PRIMARY KEY (id),
+                FOREIGN KEY(child_id) REFERENCES children (id)
+            );
+            INSERT INTO duty_rosters SELECT * FROM old_duty_rosters;
+            DROP TABLE old_duty_rosters;
+            """
+        )
+
+
+def replace_schema_three_index(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            DROP INDEX ix_messages_conversation_id_id;
+            CREATE INDEX ix_messages_conversation_id_id
+                ON messages (conversation_id);
+            """
+        )
+
+
+def remove_avatar_constraints(database: Path) -> None:
+    with sqlite3.connect(database) as connection:
+        connection.executescript(
+            """
+            ALTER TABLE avatar_media RENAME TO old_avatar_media;
+            CREATE TABLE avatar_media (
+                id VARCHAR(36) NOT NULL,
+                file_name VARCHAR(255) NOT NULL,
+                mime_type VARCHAR(32) NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 VARCHAR(64) NOT NULL,
+                created_at DATETIME NOT NULL,
+                PRIMARY KEY (id)
+            );
+            INSERT INTO avatar_media SELECT * FROM old_avatar_media;
+            DROP TABLE old_avatar_media;
+            """
+        )
+
+
+def assert_schema_three_shape(
+    database: Path,
+    schema_two_signature: dict[str, dict[str, tuple[object, ...]]],
+) -> None:
+    historical_signature = physical_schema_signature(
+        database,
+        excluded_tables={"alembic_version", "avatar_media"},
+        excluded_indexes=set(SCHEMA_3_INDEXES),
+    )
+    assert historical_signature == schema_two_signature
+
     engine = engine_for(database)
     try:
         inspector = inspect(engine)
@@ -119,23 +381,26 @@ def assert_schema_three_shape(database: Path) -> None:
             "alembic_version",
             "avatar_media",
         }
-        assert [column["name"] for column in inspector.get_columns("avatar_media")] == [
-            "id",
-            "file_name",
-            "mime_type",
-            "width",
-            "height",
-            "size_bytes",
-            "sha256",
-            "created_at",
-        ]
+        assert physical_schema_signature(
+            database,
+            excluded_tables={*SCHEMA_2_TABLES, "alembic_version"},
+        )["avatar_media"] == {
+            "columns": AVATAR_MEDIA_COLUMNS,
+            "foreign_keys": (),
+            "unique_constraints": (("file_name",),),
+            "indexes": (),
+            "checks": AVATAR_MEDIA_CHECKS,
+        }
     finally:
         engine.dispose()
     for name, columns in SCHEMA_3_INDEXES.items():
         assert index_columns(database, name) == columns
 
 
-def test_blank_database_upgrades_from_baseline_to_schema_three(tmp_path: Path):
+def test_blank_database_upgrades_from_baseline_to_schema_three(
+    tmp_path: Path,
+    schema_two_signature,
+):
     database = tmp_path / "blank.db"
     engine = engine_for(database)
     try:
@@ -146,7 +411,24 @@ def test_blank_database_upgrades_from_baseline_to_schema_three(tmp_path: Path):
     assert scalar(database, "SELECT version_num FROM alembic_version") == (
         SCHEMA_3_REVISION
     )
-    assert_schema_three_shape(database)
+    assert_schema_three_shape(database, schema_two_signature)
+
+
+def test_blank_baseline_matches_complete_frozen_schema_two_signature(
+    tmp_path: Path,
+    schema_two_signature,
+):
+    database = tmp_path / "blank-baseline.db"
+
+    run_alembic(database, "upgrade", SCHEMA_2_REVISION)
+
+    assert scalar(database, "SELECT version_num FROM alembic_version") == (
+        SCHEMA_2_REVISION
+    )
+    assert physical_schema_signature(
+        database,
+        excluded_tables={"alembic_version"},
+    ) == schema_two_signature
 
 
 def test_baseline_upgrade_does_not_import_the_current_orm(tmp_path: Path):
@@ -187,7 +469,10 @@ def test_baseline_upgrade_does_not_import_the_current_orm(tmp_path: Path):
     )
 
 
-def test_schema_2_database_is_stamped_then_upgraded_without_data_loss(tmp_path: Path):
+def test_schema_2_database_is_stamped_then_upgraded_without_data_loss(
+    tmp_path: Path,
+    schema_two_signature,
+):
     database = load_schema_2_fixture(tmp_path / "schema2.db")
     before = table_rows(database, SCHEMA_2_TABLES)
     engine = engine_for(database)
@@ -207,7 +492,112 @@ def test_schema_2_database_is_stamped_then_upgraded_without_data_loss(tmp_path: 
     with sqlite3.connect(database) as connection:
         connection.execute("PRAGMA foreign_keys = ON")
         assert connection.execute("PRAGMA foreign_key_check").fetchall() == []
-    assert_schema_three_shape(database)
+    assert_schema_three_shape(database, schema_two_signature)
+
+
+def test_valid_stamped_schema_two_upgrades_to_schema_three(
+    tmp_path: Path,
+    schema_two_signature,
+):
+    database = load_schema_2_fixture(tmp_path / "stamped-schema2.db")
+    before = table_rows(database, SCHEMA_2_TABLES)
+    stamp_database(database, SCHEMA_2_REVISION)
+    engine = engine_for(database)
+    try:
+        ensure_database_schema(engine, db_mode="app")
+    finally:
+        engine.dispose()
+
+    assert scalar(database, "SELECT version_num FROM alembic_version") == (
+        SCHEMA_3_REVISION
+    )
+    assert table_rows(database, SCHEMA_2_TABLES) == before
+    assert_schema_three_shape(database, schema_two_signature)
+
+
+@pytest.mark.parametrize(
+    "corrupt_schema",
+    [
+        remove_ducks_note,
+        add_ducks_column,
+        add_unexpected_table,
+        remove_duck_archive_foreign_key,
+        remove_roster_unique_constraint,
+        replace_partial_index,
+    ],
+    ids=[
+        "missing-column",
+        "extra-column",
+        "extra-table",
+        "missing-foreign-key",
+        "missing-unique",
+        "wrong-partial-index",
+    ],
+)
+def test_stamped_schema_two_corruption_is_rejected_before_upgrade_ddl(
+    corrupt_schema,
+    tmp_path: Path,
+):
+    database = load_schema_2_fixture(tmp_path / "corrupt-stamped-schema2.db")
+    stamp_database(database, SCHEMA_2_REVISION)
+    corrupt_schema(database)
+    before = schema_snapshot(database)
+    engine = engine_for(database)
+    try:
+        with pytest.raises(SchemaFingerprintError, match="schema-2 fingerprint"):
+            ensure_database_schema(engine, db_mode="app")
+    finally:
+        engine.dispose()
+
+    assert schema_snapshot(database) == before
+    assert scalar(database, "SELECT version_num FROM alembic_version") == (
+        SCHEMA_2_REVISION
+    )
+    assert scalar(
+        database,
+        "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='avatar_media'",
+    ) == 0
+
+
+@pytest.mark.parametrize(
+    "corrupt_schema",
+    [
+        remove_ducks_note,
+        add_unexpected_table,
+        replace_schema_three_index,
+        remove_avatar_constraints,
+    ],
+    ids=[
+        "missing-historical-column",
+        "extra-table",
+        "wrong-schema-three-index",
+        "missing-avatar-constraints",
+    ],
+)
+def test_stamped_schema_three_corruption_is_rejected(
+    corrupt_schema,
+    tmp_path: Path,
+):
+    database = tmp_path / "corrupt-schema3.db"
+    engine = engine_for(database)
+    try:
+        ensure_database_schema(engine, db_mode="app")
+    finally:
+        engine.dispose()
+    corrupt_schema(database)
+    before = schema_snapshot(database)
+
+    engine = engine_for(database)
+    try:
+        with pytest.raises(SchemaFingerprintError, match="schema-3 fingerprint"):
+            ensure_database_schema(engine, db_mode="app")
+    finally:
+        engine.dispose()
+
+    assert schema_snapshot(database) == before
+    assert scalar(database, "SELECT version_num FROM alembic_version") == (
+        SCHEMA_3_REVISION
+    )
 
 
 def test_missing_schema_2_column_is_rejected_before_any_migration_ddl(tmp_path: Path):
@@ -249,14 +639,7 @@ def test_unknown_or_newer_revision_is_rejected_before_any_ddl(
     tmp_path: Path,
 ):
     database = load_schema_2_fixture(tmp_path / f"{revision}.db")
-    with sqlite3.connect(database) as connection:
-        connection.execute(
-            "CREATE TABLE alembic_version (version_num VARCHAR(32) NOT NULL)"
-        )
-        connection.execute(
-            "INSERT INTO alembic_version (version_num) VALUES (?)",
-            (revision,),
-        )
+    stamp_database(database, revision)
     before = schema_snapshot(database)
     engine = engine_for(database)
     try:
@@ -283,6 +666,24 @@ def test_schema_three_upgrade_is_idempotent(tmp_path: Path):
         engine.dispose()
 
     assert schema_snapshot(database) == before
+
+
+def test_blank_head_downgrades_to_complete_schema_two_signature(
+    tmp_path: Path,
+    schema_two_signature,
+):
+    database = tmp_path / "downgrade.db"
+    run_alembic(database, "upgrade", "head")
+
+    run_alembic(database, "downgrade", SCHEMA_2_REVISION)
+
+    assert scalar(database, "SELECT version_num FROM alembic_version") == (
+        SCHEMA_2_REVISION
+    )
+    assert physical_schema_signature(
+        database,
+        excluded_tables={"alembic_version"},
+    ) == schema_two_signature
 
 
 def test_test_mode_migrator_leaves_blank_database_untouched(tmp_path: Path):
@@ -328,6 +729,9 @@ def test_app_lifespan_migrates_before_seed_and_worker_start(monkeypatch):
     events: list[str] = []
 
     class Worker:
+        def __init__(self):
+            events.append("worker_construct")
+
         def start(self):
             events.append("worker_start")
 
@@ -372,6 +776,7 @@ def test_app_lifespan_migrates_before_seed_and_worker_start(monkeypatch):
         "migrate",
         "seed_dimensions",
         "seed_demo",
+        "worker_construct",
         "worker_start",
         "serving",
         "worker_stop",
@@ -384,6 +789,9 @@ def test_test_lifespan_keeps_explicit_metadata_create_all(monkeypatch):
     events: list[str] = []
 
     class Worker:
+        def __init__(self):
+            events.append("worker_construct")
+
         def start(self):
             events.append("worker_start")
 
@@ -422,6 +830,7 @@ def test_test_lifespan_keeps_explicit_metadata_create_all(monkeypatch):
     assert events == [
         "create_all",
         "seed_dimensions",
+        "worker_construct",
         "worker_start",
         "serving",
         "worker_stop",
