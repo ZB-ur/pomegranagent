@@ -237,7 +237,7 @@ def test_teacher_route_inventory_has_the_session_dependency():
         "/api/analysis/overview": {"GET"},
         "/api/runtime/context": {"GET"},
         "/api/media/avatars": {"POST"},
-        "/api/media/avatars/{}": {"GET"},
+        "/api/media/avatars/{}": {"GET", "HEAD"},
     }
 
     effective_routes = _effective_routes(app.router.routes)
@@ -264,6 +264,7 @@ def test_teacher_route_inventory_has_the_session_dependency():
         ("POST", "/api/conversations/{}/finalize"),
         ("GET", "/api/runtime/context"),
         ("GET", "/api/media/avatars/{}"),
+        ("HEAD", "/api/media/avatars/{}"),
     }:
         route = next(
             route

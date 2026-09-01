@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 import warnings
 
 from PIL import Image, ImageOps, UnidentifiedImageError
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from starlette.datastructures import UploadFile
 
@@ -61,40 +62,59 @@ def _absolute_without_symlink_resolution(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path.expanduser())))
 
 
-def _safe_media_root(media_root: Path, *, create: bool) -> Path:
-    """Return a canonical, non-symlink directory or fail closed."""
+def _root_error(*, create: bool) -> APIError:
+    return _storage_unavailable() if create else _not_found()
+
+
+def _open_media_root_fd(media_root: Path, *, create: bool) -> int:
+    """Walk from a trusted slash fd so parent swaps cannot redirect the root."""
 
     root = _absolute_without_symlink_resolution(Path(media_root))
+    parts = root.parts
+    if not root.is_absolute() or len(parts) < 2 or parts[0] != "/":
+        raise _root_error(create=create)
+    flags = (
+        os.O_RDONLY
+        | getattr(os, "O_DIRECTORY", 0)
+        | getattr(os, "O_NOFOLLOW", 0)
+        | getattr(os, "O_CLOEXEC", 0)
+    )
+    descriptor: int | None = None
     try:
-        if root.resolve(strict=False) != root:
-            raise _storage_unavailable()
-        if root.is_symlink():
-            raise _storage_unavailable()
-        if not root.exists():
-            if not create:
-                raise _not_found()
-            root.mkdir(parents=True, exist_ok=False)
-        root_stat = root.lstat()
-        if not stat.S_ISDIR(root_stat.st_mode) or root.is_symlink():
-            raise _storage_unavailable()
-        if root.resolve(strict=True) != root:
-            raise _storage_unavailable()
+        descriptor = os.open("/", flags)
+        for component in parts[1:]:
+            if component in {"", ".", ".."}:
+                raise _root_error(create=create)
+            child: int | None = None
+            try:
+                child = os.open(component, flags, dir_fd=descriptor)
+            except FileNotFoundError:
+                if not create:
+                    raise _not_found() from None
+                try:
+                    os.mkdir(component, mode=0o700, dir_fd=descriptor)
+                    os.fsync(descriptor)
+                except FileExistsError:
+                    pass
+                child = os.open(component, flags, dir_fd=descriptor)
+            try:
+                child_stat = os.fstat(child)
+                if not stat.S_ISDIR(child_stat.st_mode):
+                    raise _root_error(create=create)
+            except Exception:
+                os.close(child)
+                raise
+            os.close(descriptor)
+            descriptor = child
+        return descriptor
     except APIError:
+        if descriptor is not None:
+            os.close(descriptor)
         raise
-    except (FileExistsError, FileNotFoundError, OSError):
-        if create:
-            raise _storage_unavailable() from None
-        raise _not_found() from None
-    return root
-
-
-def _open_directory(root: Path) -> int:
-    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    descriptor = os.open(root, flags)
-    if not stat.S_ISDIR(os.fstat(descriptor).st_mode):
-        os.close(descriptor)
-        raise _storage_unavailable()
-    return descriptor
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
+        if descriptor is not None:
+            os.close(descriptor)
+        raise _root_error(create=create) from None
 
 
 def _read_bounded(file_object: BinaryIO) -> bytes:
@@ -114,14 +134,76 @@ def _read_bounded(file_object: BinaryIO) -> bytes:
     return data
 
 
+def _png_has_exact_end(data: bytes) -> bool:
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return False
+    offset = 8
+    while offset < len(data):
+        if len(data) - offset < 12:
+            return False
+        length = int.from_bytes(data[offset:offset + 4], "big")
+        end = offset + 12 + length
+        if end > len(data):
+            return False
+        kind = data[offset + 4:offset + 8]
+        if kind == b"IEND":
+            return (
+                length == 0
+                and data[offset:end] == b"\x00\x00\x00\x00IEND\xaeB`\x82"
+                and end == len(data)
+            )
+        offset = end
+    return False
+
+
+def _jpeg_has_exact_end(data: bytes) -> bool:
+    if not data.startswith(b"\xff\xd8"):
+        return False
+    offset = 2
+    in_scan = False
+    while offset < len(data):
+        if in_scan:
+            marker = data.find(b"\xff", offset)
+            if marker < 0:
+                return False
+            offset = marker + 1
+        else:
+            if data[offset] != 0xFF:
+                return False
+            offset += 1
+        while offset < len(data) and data[offset] == 0xFF:
+            offset += 1
+        if offset >= len(data):
+            return False
+        code = data[offset]
+        offset += 1
+        if in_scan and code == 0x00:
+            continue
+        if in_scan and 0xD0 <= code <= 0xD7:
+            continue
+        in_scan = False
+        if code == 0xD9:
+            return offset == len(data)
+        if code == 0xD8 or code == 0x00:
+            return False
+        if code == 0x01 or 0xD0 <= code <= 0xD7:
+            continue
+        if len(data) - offset < 2:
+            return False
+        length = int.from_bytes(data[offset:offset + 2], "big")
+        if length < 2 or offset + length > len(data):
+            return False
+        offset += length
+        if code == 0xDA:
+            in_scan = True
+    return False
+
+
 def _has_exact_container(data: bytes, image_format: str) -> bool:
     if image_format == "PNG":
-        return (
-            data.startswith(b"\x89PNG\r\n\x1a\n")
-            and data.endswith(b"\x00\x00\x00\x00IEND\xaeB`\x82")
-        )
+        return _png_has_exact_end(data)
     if image_format == "JPEG":
-        return data.startswith(b"\xff\xd8") and data.endswith(b"\xff\xd9")
+        return _jpeg_has_exact_end(data)
     if image_format == "WEBP":
         return (
             len(data) >= 12
@@ -205,8 +287,21 @@ def _transcode(data: bytes, declared_type: str) -> tuple[bytes, int, int]:
         raise _invalid_avatar() from None
 
 
-def _remove_directory_entry(directory_fd: int, name: str) -> None:
+def _inode_identity(file_stat: os.stat_result) -> tuple[int, int]:
+    return file_stat.st_dev, file_stat.st_ino
+
+
+def _remove_owned_entry(
+    directory_fd: int,
+    name: str,
+    identity: tuple[int, int] | None,
+) -> None:
+    if identity is None:
+        return
     try:
+        current = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if _inode_identity(current) != identity:
+            return
         os.unlink(name, dir_fd=directory_fd)
     except OSError:
         return
@@ -230,17 +325,66 @@ def store_avatar(
         raise APIError(415, "AVATAR_TYPE_UNSUPPORTED", "仅支持 JPEG、PNG 或 WebP 头像")
     raw = _read_bounded(upload.file)
     encoded, width, height = _transcode(raw, declared_type)
-    root = _safe_media_root(Path(media_root), create=True)
-
-    media_id = str(uuid4())
-    while db.get(models.AvatarMedia, media_id) is not None or (root / f"{media_id}.webp").exists():
-        media_id = str(uuid4())
-    file_name = f"{media_id}.webp"
     directory_fd: int | None = None
+    media_id: str | None = None
+    file_name: str | None = None
+    final_identity: tuple[int, int] | None = None
     temporary_name: str | None = None
-    file_installed = False
+    temporary_identity: tuple[int, int] | None = None
+    row: models.AvatarMedia | None = None
     try:
-        directory_fd = _open_directory(root)
+        directory_fd = _open_media_root_fd(Path(media_root), create=True)
+        for _attempt in range(128):
+            candidate_id = str(uuid4())
+            candidate_name = f"{candidate_id}.webp"
+            try:
+                reservation_fd = os.open(
+                    candidate_name,
+                    os.O_WRONLY
+                    | os.O_CREAT
+                    | os.O_EXCL
+                    | getattr(os, "O_NOFOLLOW", 0)
+                    | getattr(os, "O_CLOEXEC", 0),
+                    0o600,
+                    dir_fd=directory_fd,
+                )
+            except FileExistsError:
+                continue
+            try:
+                reservation_stat = os.fstat(reservation_fd)
+                if not stat.S_ISREG(reservation_stat.st_mode):
+                    raise _storage_unavailable()
+                reserved_identity = _inode_identity(reservation_stat)
+            finally:
+                os.close(reservation_fd)
+            file_name = candidate_name
+            final_identity = reserved_identity
+
+            candidate_row = models.AvatarMedia(
+                id=candidate_id,
+                file_name=candidate_name,
+                mime_type="image/webp",
+                width=width,
+                height=height,
+                size_bytes=len(encoded),
+                sha256=sha256(encoded).hexdigest(),
+                created_at=now.astimezone(UTC).replace(tzinfo=None),
+            )
+            db.add(candidate_row)
+            try:
+                db.flush()
+            except IntegrityError:
+                db.rollback()
+                _remove_owned_entry(directory_fd, candidate_name, reserved_identity)
+                file_name = None
+                final_identity = None
+                continue
+            media_id = candidate_id
+            row = candidate_row
+            break
+        if media_id is None or file_name is None or row is None:
+            raise _storage_unavailable()
+
         temporary_name = f".avatar-{uuid4()}.tmp"
         file_descriptor = os.open(
             temporary_name,
@@ -251,10 +395,18 @@ def store_avatar(
             0o600,
             dir_fd=directory_fd,
         )
+        temporary_identity = _inode_identity(os.fstat(file_descriptor))
         with os.fdopen(file_descriptor, "wb") as output:
             output.write(encoded)
             output.flush()
             os.fsync(output.fileno())
+        reservation_stat = os.stat(
+            file_name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
+        )
+        if _inode_identity(reservation_stat) != final_identity:
+            raise _storage_unavailable()
         os.replace(
             temporary_name,
             file_name,
@@ -262,35 +414,34 @@ def store_avatar(
             dst_dir_fd=directory_fd,
         )
         temporary_name = None
-        file_installed = True
-        os.fsync(directory_fd)
-
-        row = models.AvatarMedia(
-            id=media_id,
-            file_name=file_name,
-            mime_type="image/webp",
-            width=width,
-            height=height,
-            size_bytes=len(encoded),
-            sha256=sha256(encoded).hexdigest(),
-            created_at=now.astimezone(UTC).replace(tzinfo=None),
+        final_identity = temporary_identity
+        installed_stat = os.stat(
+            file_name,
+            dir_fd=directory_fd,
+            follow_symlinks=False,
         )
-        db.add(row)
+        if (
+            not stat.S_ISREG(installed_stat.st_mode)
+            or installed_stat.st_nlink != 1
+            or _inode_identity(installed_stat) != final_identity
+        ):
+            raise _storage_unavailable()
+        os.fsync(directory_fd)
         db.commit()
         return row
     except APIError:
         db.rollback()
-        if directory_fd is not None and file_installed:
-            _remove_directory_entry(directory_fd, file_name)
+        if directory_fd is not None and file_name is not None:
+            _remove_owned_entry(directory_fd, file_name, final_identity)
         if directory_fd is not None and temporary_name is not None:
-            _remove_directory_entry(directory_fd, temporary_name)
+            _remove_owned_entry(directory_fd, temporary_name, temporary_identity)
         raise
     except Exception:
         db.rollback()
-        if directory_fd is not None and file_installed:
-            _remove_directory_entry(directory_fd, file_name)
+        if directory_fd is not None and file_name is not None:
+            _remove_owned_entry(directory_fd, file_name, final_identity)
         if directory_fd is not None and temporary_name is not None:
-            _remove_directory_entry(directory_fd, temporary_name)
+            _remove_owned_entry(directory_fd, temporary_name, temporary_identity)
         raise _storage_unavailable() from None
     finally:
         if directory_fd is not None:
@@ -306,6 +457,51 @@ def _canonical_media_id(media_id: str | UUID) -> str:
     if str(media_id) != canonical:
         raise _not_found()
     return canonical
+
+
+def _validate_stored_webp(content: bytes, row: models.AvatarMedia) -> None:
+    try:
+        if not _has_exact_container(content, "WEBP"):
+            raise _not_found()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(BytesIO(content)) as probe:
+                if (
+                    probe.format != "WEBP"
+                    or getattr(probe, "is_animated", False)
+                    or getattr(probe, "n_frames", 1) != 1
+                ):
+                    raise _not_found()
+                probe.verify()
+            with Image.open(BytesIO(content)) as decoded:
+                if (
+                    decoded.format != "WEBP"
+                    or getattr(decoded, "is_animated", False)
+                    or getattr(decoded, "n_frames", 1) != 1
+                ):
+                    raise _not_found()
+                decoded.load()
+                width, height = decoded.size
+                if (
+                    width <= 0
+                    or height <= 0
+                    or width > OUTPUT_MAX_EDGE
+                    or height > OUTPUT_MAX_EDGE
+                    or (width, height) != (row.width, row.height)
+                ):
+                    raise _not_found()
+    except APIError:
+        raise
+    except (
+        Image.DecompressionBombError,
+        Image.DecompressionBombWarning,
+        UnidentifiedImageError,
+        EOFError,
+        OSError,
+        SyntaxError,
+        ValueError,
+    ):
+        raise _not_found() from None
 
 
 def load_avatar(
@@ -324,36 +520,50 @@ def load_avatar(
         row.mime_type != "image/webp"
         or row.size_bytes <= 0
         or row.size_bytes > MAX_UPLOAD_BYTES
+        or row.width <= 0
+        or row.height <= 0
+        or row.width > OUTPUT_MAX_EDGE
+        or row.height > OUTPUT_MAX_EDGE
         or len(row.sha256) != 64
+        or any(character not in "0123456789abcdef" for character in row.sha256)
     ):
         raise _not_found()
 
     try:
-        root = _safe_media_root(Path(media_root), create=False)
+        directory_fd = _open_media_root_fd(Path(media_root), create=False)
     except APIError:
         raise _not_found() from None
-    directory_fd: int | None = None
     try:
-        directory_fd = _open_directory(root)
         path_stat = os.stat(
             row.file_name,
             dir_fd=directory_fd,
             follow_symlinks=False,
         )
-        if not stat.S_ISREG(path_stat.st_mode):
+        if not stat.S_ISREG(path_stat.st_mode) or path_stat.st_nlink != 1:
             raise _not_found()
-        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_CLOEXEC", 0)
+        )
         descriptor = os.open(row.file_name, flags, dir_fd=directory_fd)
         try:
             opened_stat = os.fstat(descriptor)
             if (
                 not stat.S_ISREG(opened_stat.st_mode)
+                or opened_stat.st_nlink != 1
                 or (opened_stat.st_dev, opened_stat.st_ino)
                 != (path_stat.st_dev, path_stat.st_ino)
             ):
                 raise _not_found()
             with os.fdopen(descriptor, "rb", closefd=False) as source:
                 content = source.read(row.size_bytes + 1)
+            finished_stat = os.fstat(descriptor)
+            if (
+                finished_stat.st_nlink != 1
+                or _inode_identity(finished_stat) != _inode_identity(opened_stat)
+            ):
+                raise _not_found()
         finally:
             os.close(descriptor)
     except APIError:
@@ -361,10 +571,10 @@ def load_avatar(
     except (FileNotFoundError, OSError, ValueError):
         raise _not_found() from None
     finally:
-        if directory_fd is not None:
-            os.close(directory_fd)
+        os.close(directory_fd)
     if len(content) != row.size_bytes or sha256(content).hexdigest() != row.sha256:
         raise _not_found()
+    _validate_stored_webp(content, row)
     return AvatarBlob(media=row, content=content)
 
 

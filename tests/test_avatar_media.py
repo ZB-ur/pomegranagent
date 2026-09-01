@@ -1,13 +1,19 @@
 """Safe avatar upload, storage, retrieval, and resource-reference contracts."""
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from hashlib import sha256
 from io import BytesIO
+import json
 import os
 from pathlib import Path
 import shutil
+import stat
+from threading import Barrier, Lock, Thread, local
+from types import SimpleNamespace
 from uuid import UUID
+import zlib
 
 import pytest
 from PIL import Image, PngImagePlugin
@@ -16,12 +22,15 @@ from starlette.datastructures import Headers, UploadFile
 
 from app.backend import models
 from app.backend.api_errors import APIError
-from app.backend.database import SETTINGS
+from app.backend.auth import COOKIE_NAME
+from app.backend.database import SETTINGS, SessionLocal
+from app.backend.main import app
 
 
 MEDIA_ROOT = SETTINGS.media_root
 MAX_UPLOAD_BYTES = 5 * 1024 * 1024
 CAPTURED_NOW = datetime(2026, 9, 2, 3, 4, 5, tzinfo=UTC)
+MAX_MULTIPART_BYTES = MAX_UPLOAD_BYTES + 64 * 1024
 
 
 def _remove_media_root() -> None:
@@ -52,6 +61,7 @@ def _image_bytes(
     color=(220, 40, 80),
     exif_orientation: int | None = None,
     png_text: bool = False,
+    progressive: bool = False,
 ) -> bytes:
     image = Image.new("RGB", size, color)
     output = BytesIO()
@@ -62,10 +72,56 @@ def _image_bytes(
         kwargs["exif"] = exif
     if png_text:
         info = PngImagePlugin.PngInfo()
-        info.add_text("private-note", "must be stripped")
+        info.add_text("private-note", "IEND bytes in metadata must be stripped")
         kwargs["pnginfo"] = info
+    if progressive:
+        kwargs["progressive"] = True
     image.save(output, format=image_format, **kwargs)
     return output.getvalue()
+
+
+def _jpeg_with_false_eoi_comment() -> bytes:
+    image = Image.new("RGB", (80, 48))
+    pixels = image.load()
+    for y in range(image.height):
+        for x in range(image.width):
+            pixels[x, y] = (
+                (x * 37 + y * 17) % 256,
+                (x * 19 + y * 43) % 256,
+                (x * 71 + y * 11) % 256,
+            )
+    output = BytesIO()
+    image.save(
+        output,
+        format="JPEG",
+        quality=88,
+        progressive=True,
+        restart_marker_rows=1,
+    )
+    source = output.getvalue()
+    comment = b"metadata-before-\xff\xd9-metadata-after"
+    segment = b"\xff\xfe" + (len(comment) + 2).to_bytes(2, "big") + comment
+    return source[:2] + segment + source[2:]
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    return (
+        len(payload).to_bytes(4, "big")
+        + kind
+        + payload
+        + zlib.crc32(kind + payload).to_bytes(4, "big")
+    )
+
+
+def _png_polyglot_with_second_iend() -> bytes:
+    script = b"Comment\x00<script>alert(1)</script>"
+    return _image_bytes("PNG") + _png_chunk(b"tEXt", script) + _png_chunk(b"IEND", b"")
+
+
+def _jpeg_polyglot_with_second_eoi() -> bytes:
+    script = b"<script>alert(1)</script>"
+    comment = b"\xff\xfe" + (len(script) + 2).to_bytes(2, "big") + script
+    return _image_bytes("JPEG") + comment + b"\xff\xd9"
 
 
 def _animated_webp() -> bytes:
@@ -121,13 +177,15 @@ def _insert_media(
     media_id: str,
     file_name: str,
     data: bytes,
+    width: int = 12,
+    height: int = 8,
 ) -> models.AvatarMedia:
     row = models.AvatarMedia(
         id=media_id,
         file_name=file_name,
         mime_type="image/webp",
-        width=12,
-        height=8,
+        width=width,
+        height=height,
         size_bytes=len(data),
         sha256=sha256(data).hexdigest(),
         created_at=CAPTURED_NOW,
@@ -135,6 +193,70 @@ def _insert_media(
     db_session.add(row)
     db_session.commit()
     return row
+
+
+def _multipart_body(*, boundary: str, file_data: bytes, epilogue: bytes = b"") -> bytes:
+    return (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="avatar.png"\r\n'
+        "Content-Type: image/png\r\n\r\n"
+    ).encode("ascii") + file_data + f"\r\n--{boundary}--\r\n".encode("ascii") + epilogue
+
+
+async def _asgi_post(
+    *,
+    chunks: list[bytes],
+    headers: list[tuple[bytes, bytes]],
+) -> tuple[int, dict[str, str], bytes, int, int]:
+    messages: list[dict] = []
+    chunk_index = 0
+    receive_calls = 0
+    received_bytes = 0
+
+    async def receive() -> dict:
+        nonlocal chunk_index, receive_calls, received_bytes
+        receive_calls += 1
+        if chunk_index >= len(chunks):
+            return {"type": "http.disconnect"}
+        body = chunks[chunk_index]
+        chunk_index += 1
+        received_bytes += len(body)
+        return {
+            "type": "http.request",
+            "body": body,
+            "more_body": chunk_index < len(chunks),
+        }
+
+    async def send(message: dict) -> None:
+        messages.append(message)
+
+    scope = {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.3"},
+        "http_version": "1.1",
+        "method": "POST",
+        "scheme": "http",
+        "path": "/api/media/avatars",
+        "raw_path": b"/api/media/avatars",
+        "query_string": b"",
+        "root_path": "",
+        "headers": headers,
+        "client": ("testclient", 50000),
+        "server": ("testserver", 80),
+        "state": {},
+    }
+    await app(scope, receive, send)
+    start = next(message for message in messages if message["type"] == "http.response.start")
+    body = b"".join(
+        message.get("body", b"")
+        for message in messages
+        if message["type"] == "http.response.body"
+    )
+    response_headers = {
+        key.decode("latin-1").lower(): value.decode("latin-1")
+        for key, value in start["headers"]
+    }
+    return start["status"], response_headers, body, receive_calls, received_bytes
 
 
 def test_upload_authentication_precedes_multipart_parsing_content_length_and_writes(
@@ -153,6 +275,143 @@ def test_upload_authentication_precedes_multipart_parsing_content_length_and_wri
 
     _assert_error(response, status=401, code="TEACHER_AUTH_REQUIRED")
     assert response.headers["x-request-id"] == "avatar-auth-before-body"
+    assert _stored_rows(db_session) == []
+    assert not MEDIA_ROOT.exists()
+
+
+def test_unauthenticated_asgi_request_reads_zero_body_bytes(client, db_session) -> None:
+    boundary = "avatar-auth-receive-spy"
+    body = _multipart_body(
+        boundary=boundary,
+        file_data=b"x",
+        epilogue=b"z" * (MAX_MULTIPART_BYTES + 1),
+    )
+
+    status, response_headers, response_body, receive_calls, received_bytes = asyncio.run(
+        _asgi_post(
+            chunks=[body[:1024], body[1024:]],
+            headers=[
+                (b"content-type", f"multipart/form-data; boundary={boundary}".encode("ascii")),
+                (b"x-request-id", b"avatar-auth-receive-spy"),
+            ],
+        )
+    )
+
+    assert status == 401
+    assert response_headers["x-request-id"] == "avatar-auth-receive-spy"
+    assert json.loads(response_body)["error"]["code"] == "TEACHER_AUTH_REQUIRED"
+    assert (receive_calls, received_bytes) == (0, 0)
+    assert _stored_rows(db_session) == []
+    assert not MEDIA_ROOT.exists()
+
+
+def test_authenticated_chunked_multipart_total_budget_stops_before_oversize_epilogue(
+    client,
+    db_session,
+) -> None:
+    _unlock(client)
+    boundary = "avatar-total-stream-budget"
+    repeated_part_epilogue = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="second.png"\r\n'
+        "Content-Type: image/png\r\n\r\n"
+    ).encode("ascii") + b"q" * (MAX_MULTIPART_BYTES + 256 * 1024)
+    body = _multipart_body(
+        boundary=boundary,
+        file_data=b"x",
+        epilogue=repeated_part_epilogue,
+    )
+    chunks = [body[index:index + 16 * 1024] for index in range(0, len(body), 16 * 1024)]
+    cookie = f"{COOKIE_NAME}={client.cookies.get(COOKIE_NAME)}".encode("ascii")
+
+    status, _headers, response_body, receive_calls, received_bytes = asyncio.run(
+        _asgi_post(
+            chunks=chunks,
+            headers=[
+                (b"content-type", f"multipart/form-data; boundary={boundary}".encode("ascii")),
+                (b"cookie", cookie),
+                (b"x-request-id", b"avatar-total-stream-budget"),
+            ],
+        )
+    )
+
+    assert status == 413
+    assert json.loads(response_body)["error"]["code"] == "AVATAR_TOO_LARGE"
+    assert receive_calls < len(chunks)
+    assert MAX_MULTIPART_BYTES < received_bytes < len(body)
+    assert _stored_rows(db_session) == []
+    assert not MEDIA_ROOT.exists()
+
+
+def test_authenticated_chunked_oversize_preamble_hits_total_budget_and_stops_receive(
+    client,
+    db_session,
+) -> None:
+    _unlock(client)
+    boundary = "avatar-total-preamble-budget"
+    body = (b"\r\n" * ((MAX_MULTIPART_BYTES // 2) + 128 * 1024)) + _multipart_body(
+        boundary=boundary,
+        file_data=b"x",
+    )
+    chunks = [body[index:index + 16 * 1024] for index in range(0, len(body), 16 * 1024)]
+    cookie = f"{COOKIE_NAME}={client.cookies.get(COOKIE_NAME)}".encode("ascii")
+
+    status, _headers, response_body, receive_calls, received_bytes = asyncio.run(
+        _asgi_post(
+            chunks=chunks,
+            headers=[
+                (b"content-type", f"multipart/form-data; boundary={boundary}".encode("ascii")),
+                (b"cookie", cookie),
+                (b"x-request-id", b"avatar-total-preamble-budget"),
+            ],
+        )
+    )
+
+    assert status == 413
+    assert json.loads(response_body)["error"]["code"] == "AVATAR_TOO_LARGE"
+    assert receive_calls < len(chunks)
+    assert MAX_MULTIPART_BYTES < received_bytes < len(body)
+    assert _stored_rows(db_session) == []
+    assert not MEDIA_ROOT.exists()
+
+
+def test_authenticated_repeated_file_parts_stop_before_receiving_second_payload(
+    client,
+    db_session,
+) -> None:
+    _unlock(client)
+    boundary = "avatar-repeated-parts"
+    part_header = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="avatar.png"\r\n'
+        "Content-Type: image/png\r\n\r\n"
+    ).encode("ascii")
+    body = (
+        part_header
+        + b"x"
+        + f"\r\n--{boundary}\r\n".encode("ascii")
+        + part_header.split(b"\r\n", 1)[1]
+        + (b"q" * MAX_MULTIPART_BYTES)
+        + f"\r\n--{boundary}--\r\n".encode("ascii")
+    )
+    chunks = [body[index:index + 256] for index in range(0, len(body), 256)]
+    cookie = f"{COOKIE_NAME}={client.cookies.get(COOKIE_NAME)}".encode("ascii")
+
+    status, _headers, response_body, receive_calls, received_bytes = asyncio.run(
+        _asgi_post(
+            chunks=chunks,
+            headers=[
+                (b"content-type", f"multipart/form-data; boundary={boundary}".encode("ascii")),
+                (b"cookie", cookie),
+                (b"x-request-id", b"avatar-repeated-parts"),
+            ],
+        )
+    )
+
+    assert status == 422
+    assert json.loads(response_body)["error"]["code"] == "AVATAR_INVALID"
+    assert receive_calls < len(chunks)
+    assert received_bytes < MAX_MULTIPART_BYTES
     assert _stored_rows(db_session) == []
     assert not MEDIA_ROOT.exists()
 
@@ -239,6 +498,22 @@ def test_processing_applies_exif_orientation_resizes_and_strips_metadata(client,
         pytest.param(b"not an image", "image/png", "broken.png", 422, "AVATAR_INVALID", id="malformed"),
         pytest.param(_image_bytes("PNG"), "image/jpeg", "mismatch.jpg", 422, "AVATAR_INVALID", id="declared-mismatch"),
         pytest.param(_image_bytes("PNG") + b"<script>alert(1)</script>", "image/png", "polyglot.png", 422, "AVATAR_INVALID", id="polyglot"),
+        pytest.param(
+            _png_polyglot_with_second_iend(),
+            "image/png",
+            "polyglot-second-iend.png",
+            422,
+            "AVATAR_INVALID",
+            id="png-polyglot-second-terminator",
+        ),
+        pytest.param(
+            _jpeg_polyglot_with_second_eoi(),
+            "image/jpeg",
+            "polyglot-second-eoi.jpg",
+            422,
+            "AVATAR_INVALID",
+            id="jpeg-polyglot-second-terminator",
+        ),
     ],
 )
 def test_unsafe_or_malformed_uploads_are_rejected_without_rows_or_files(
@@ -257,6 +532,24 @@ def test_unsafe_or_malformed_uploads_are_rejected_without_rows_or_files(
     _assert_error(response, status=status, code=code)
     assert _stored_rows(db_session) == []
     assert _stored_files() == []
+
+
+def test_valid_progressive_jpeg_with_false_eoi_inside_comment_is_accepted(client) -> None:
+    _unlock(client)
+    data = _jpeg_with_false_eoi_comment()
+    assert data.count(b"\xff\xda") > 1
+    assert b"\xff\x00" in data
+    assert any(bytes((0xFF, marker)) in data for marker in range(0xD0, 0xD8))
+
+    response = _upload(
+        client,
+        data,
+        "image/jpeg",
+        "commented-progressive.jpg",
+    )
+
+    assert response.status_code == 200
+    assert response.json()["mime_type"] == "image/webp"
 
 
 def test_dimension_and_stream_size_limits_fail_before_storage(client, db_session) -> None:
@@ -299,17 +592,50 @@ def test_authenticated_oversize_content_length_is_rejected_before_multipart_pars
     assert not MEDIA_ROOT.exists()
 
 
+def test_authenticated_upload_runs_sync_image_file_and_database_work_off_event_loop(
+    client,
+    monkeypatch,
+) -> None:
+    from app.backend.routes import media as media_routes
+
+    observed_running_loop: list[bool] = []
+
+    def fake_store_avatar(*_args, **_kwargs):
+        try:
+            asyncio.get_running_loop()
+        except RuntimeError:
+            observed_running_loop.append(False)
+        else:
+            observed_running_loop.append(True)
+        return SimpleNamespace(
+            id="11111111-1111-4111-8111-111111111111",
+            width=8,
+            height=8,
+            size_bytes=32,
+            sha256="ab" * 32,
+        )
+
+    monkeypatch.setattr(media_routes, "store_avatar", fake_store_avatar)
+    _unlock(client)
+
+    response = _upload(client, _image_bytes("PNG"), "image/png")
+
+    assert response.status_code == 200
+    assert observed_running_loop == [False]
+
+
 def test_store_fsyncs_file_and_directory_and_cleans_up_atomic_replace_failure(
     db_session,
     monkeypatch,
 ) -> None:
     from app.backend.services import avatar_media
 
-    calls: list[int] = []
+    calls: list[str] = []
     original_fsync = avatar_media.os.fsync
 
     def recording_fsync(fd: int) -> None:
-        calls.append(fd)
+        mode = os.fstat(fd).st_mode
+        calls.append("directory" if stat.S_ISDIR(mode) else "file")
         original_fsync(fd)
 
     monkeypatch.setattr(avatar_media.os, "fsync", recording_fsync)
@@ -320,7 +646,8 @@ def test_store_fsyncs_file_and_directory_and_cleans_up_atomic_replace_failure(
         now=CAPTURED_NOW,
     )
     assert stored.mime_type == "image/webp"
-    assert len(calls) >= 2
+    assert "file" in calls
+    assert "directory" in calls
     assert len(_stored_rows(db_session)) == 1
     assert len(_stored_files()) == 1
 
@@ -328,7 +655,14 @@ def test_store_fsyncs_file_and_directory_and_cleans_up_atomic_replace_failure(
     db_session.commit()
     _remove_media_root()
 
-    def fail_replace(_source, _destination) -> None:
+    def fail_replace(
+        _source,
+        _destination,
+        *,
+        src_dir_fd=None,
+        dst_dir_fd=None,
+    ) -> None:
+        del src_dir_fd, dst_dir_fd
         raise OSError("synthetic replace failure")
 
     monkeypatch.setattr(avatar_media.os, "replace", fail_replace)
@@ -381,6 +715,34 @@ def test_public_get_is_exact_webp_with_cache_nosniff_etag_and_no_auth(client) ->
     with Image.open(BytesIO(response.content)) as decoded:
         assert decoded.format == "WEBP"
         assert decoded.n_frames == 1
+
+
+def test_public_head_conditional_get_and_unsupported_range_have_explicit_contract(client) -> None:
+    _unlock(client)
+    uploaded = _upload(client, _image_bytes("PNG"), "image/png").json()
+    assert client.post("/api/auth/lock").status_code == 200
+
+    head = client.head(uploaded["url"])
+    assert head.status_code == 200
+    assert head.content == b""
+    assert head.headers["content-type"] == "image/webp"
+    assert head.headers["content-length"] == str(uploaded["size_bytes"])
+    assert head.headers["etag"] == f'"{uploaded["sha256"]}"'
+    assert head.headers["cache-control"] == "public, max-age=31536000, immutable"
+    assert head.headers["x-content-type-options"] == "nosniff"
+
+    conditional = client.get(
+        uploaded["url"],
+        headers={"If-None-Match": head.headers["etag"]},
+    )
+    assert conditional.status_code == 304
+    assert conditional.content == b""
+    assert conditional.headers["etag"] == head.headers["etag"]
+    assert conditional.headers["cache-control"] == head.headers["cache-control"]
+    assert conditional.headers["x-content-type-options"] == "nosniff"
+
+    ranged = client.get(uploaded["url"], headers={"Range": "bytes=0-0"})
+    _assert_error(ranged, status=416, code="AVATAR_RANGE_UNSUPPORTED")
 
 
 def test_missing_row_missing_file_symlink_and_path_escape_fail_closed(
@@ -454,6 +816,252 @@ def test_symlink_media_root_is_rejected_for_reads_and_writes(
     _assert_error(upload, status=500, code="AVATAR_STORAGE_UNAVAILABLE")
     assert _stored_rows(db_session) == []
     assert list(target.iterdir()) == []
+
+
+def test_store_holds_trusted_parent_fd_when_root_parent_is_swapped_to_symlink(
+    db_session,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.backend.services import avatar_media
+
+    safe_parent = tmp_path / "safe"
+    media_root = safe_parent / "avatars"
+    media_root.mkdir(parents=True)
+    moved_parent = tmp_path / "safe-held"
+    outside_parent = tmp_path / "outside"
+    outside_root = outside_parent / "avatars"
+    outside_root.mkdir(parents=True)
+    original_open = avatar_media.os.open
+    swapped = False
+
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        path_text = os.fspath(path)
+        if not swapped and (path_text == os.fspath(media_root) or path_text == "avatars"):
+            safe_parent.rename(moved_parent)
+            safe_parent.symlink_to(outside_parent, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(avatar_media.os, "open", swapping_open)
+
+    stored = avatar_media.store_avatar(
+        db_session,
+        _direct_upload(_image_bytes("PNG"), "image/png"),
+        media_root=media_root,
+        now=CAPTURED_NOW,
+    )
+
+    assert swapped is True
+    assert list(outside_root.iterdir()) == []
+    assert (moved_parent / "avatars" / stored.file_name).is_file()
+
+
+def test_load_holds_trusted_parent_fd_when_root_parent_is_swapped_to_symlink(
+    db_session,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.backend.services import avatar_media
+
+    safe_parent = tmp_path / "safe"
+    media_root = safe_parent / "avatars"
+    media_root.mkdir(parents=True)
+    stored = avatar_media.store_avatar(
+        db_session,
+        _direct_upload(_image_bytes("PNG"), "image/png"),
+        media_root=media_root,
+        now=CAPTURED_NOW,
+    )
+    expected = (media_root / stored.file_name).read_bytes()
+    moved_parent = tmp_path / "safe-held"
+    outside_parent = tmp_path / "outside"
+    outside_root = outside_parent / "avatars"
+    outside_root.mkdir(parents=True)
+    (outside_root / stored.file_name).write_bytes(b"x" * len(expected))
+    original_open = avatar_media.os.open
+    swapped = False
+
+    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
+        nonlocal swapped
+        path_text = os.fspath(path)
+        if not swapped and (path_text == os.fspath(media_root) or path_text == "avatars"):
+            safe_parent.rename(moved_parent)
+            safe_parent.symlink_to(outside_parent, target_is_directory=True)
+            swapped = True
+        return original_open(path, flags, mode, dir_fd=dir_fd)
+
+    monkeypatch.setattr(avatar_media.os, "open", swapping_open)
+
+    loaded = avatar_media.load_avatar(db_session, stored.id, media_root=media_root)
+
+    assert swapped is True
+    assert loaded.content == expected
+
+
+@pytest.mark.parametrize(
+    ("data", "row_width", "row_height"),
+    [
+        pytest.param(_image_bytes("PNG"), 80, 48, id="non-webp"),
+        pytest.param(_image_bytes("WEBP"), 79, 48, id="row-dimension-mismatch"),
+        pytest.param(_image_bytes("WEBP", size=(1200, 600)), 1200, 600, id="stored-edge-over-1024"),
+        pytest.param(_animated_webp(), 32, 24, id="stored-animation"),
+    ],
+)
+def test_public_and_reference_reject_row_backed_files_with_invalid_decoded_webp(
+    client,
+    db_session,
+    data,
+    row_width,
+    row_height,
+) -> None:
+    media_id = "88888888-8888-4888-8888-888888888888"
+    MEDIA_ROOT.mkdir(parents=True)
+    (MEDIA_ROOT / f"{media_id}.webp").write_bytes(data)
+    _insert_media(
+        db_session,
+        media_id=media_id,
+        file_name=f"{media_id}.webp",
+        data=data,
+        width=row_width,
+        height=row_height,
+    )
+
+    public = client.get(f"/api/media/avatars/{media_id}")
+    _assert_error(public, status=404, code="AVATAR_NOT_FOUND")
+
+    _unlock(client)
+    reference = client.post(
+        "/api/children",
+        json={
+            "name": "不应保存",
+            "nickname": None,
+            "avatar": f"/api/media/avatars/{media_id}",
+        },
+    )
+    _assert_error(reference, status=422, code="VALIDATION_ERROR")
+    assert db_session.scalar(select(func.count(models.Child.id))) == 0
+
+
+def test_public_and_reference_reject_hardlinked_avatar_file(
+    client,
+    db_session,
+    tmp_path,
+) -> None:
+    media_id = "99999999-9999-4999-8999-999999999999"
+    data = _image_bytes("WEBP")
+    source = tmp_path / "outside.webp"
+    source.write_bytes(data)
+    MEDIA_ROOT.mkdir(parents=True)
+    os.link(source, MEDIA_ROOT / f"{media_id}.webp")
+    _insert_media(
+        db_session,
+        media_id=media_id,
+        file_name=f"{media_id}.webp",
+        data=data,
+        width=80,
+        height=48,
+    )
+
+    public = client.get(f"/api/media/avatars/{media_id}")
+    _assert_error(public, status=404, code="AVATAR_NOT_FOUND")
+
+    _unlock(client)
+    reference = client.post(
+        "/api/ducks",
+        json={
+            "name": "不应保存",
+            "avatar": f"/api/media/avatars/{media_id}",
+            "status": None,
+            "note": None,
+        },
+    )
+    _assert_error(reference, status=422, code="VALIDATION_ERROR")
+    assert db_session.scalar(select(func.count(models.Duck.id))) == 0
+
+
+def test_concurrent_fixed_uuid_collision_never_overwrites_or_deletes_winner(
+    monkeypatch,
+) -> None:
+    from app.backend.services import avatar_media
+
+    MEDIA_ROOT.mkdir(parents=True)
+    fixed = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    sequences = {
+        "avatar-a": [
+            fixed,
+            UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"),
+            UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2"),
+        ],
+        "avatar-b": [
+            fixed,
+            UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"),
+            UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2"),
+        ],
+    }
+    state = local()
+    id_barrier = Barrier(2)
+    exists_barrier = Barrier(2)
+    original_exists = Path.exists
+
+    def controlled_uuid4():
+        index = getattr(state, "uuid_index", 0)
+        state.uuid_index = index + 1
+        if index == 0:
+            id_barrier.wait(timeout=2)
+        return sequences[state.thread_name][index]
+
+    def synchronized_exists(path: Path) -> bool:
+        result = original_exists(path)
+        if path.name == f"{fixed}.webp":
+            exists_barrier.wait(timeout=2)
+        return result
+
+    monkeypatch.setattr(avatar_media, "uuid4", controlled_uuid4)
+    monkeypatch.setattr(Path, "exists", synchronized_exists)
+    results: list[str] = []
+    errors: list[BaseException] = []
+    result_lock = Lock()
+
+    def upload_in_thread(name: str, color: tuple[int, int, int]) -> None:
+        state.thread_name = name
+        session = SessionLocal()
+        try:
+            row = avatar_media.store_avatar(
+                session,
+                _direct_upload(_image_bytes("PNG", color=color), "image/png"),
+                media_root=MEDIA_ROOT,
+                now=CAPTURED_NOW,
+            )
+            with result_lock:
+                results.append(row.id)
+        except BaseException as error:
+            with result_lock:
+                errors.append(error)
+        finally:
+            session.close()
+
+    threads = [
+        Thread(target=upload_in_thread, name="avatar-a", args=("avatar-a", (220, 20, 20))),
+        Thread(target=upload_in_thread, name="avatar-b", args=("avatar-b", (20, 20, 220))),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert not any(thread.is_alive() for thread in threads)
+    assert errors == []
+    assert len(set(results)) == 2
+    with SessionLocal() as fresh:
+        rows = fresh.scalars(select(models.AvatarMedia).order_by(models.AvatarMedia.id)).all()
+        assert {row.id for row in rows} == set(results)
+        assert {path.name for path in MEDIA_ROOT.iterdir()} == {row.file_name for row in rows}
+        for row in rows:
+            content = (MEDIA_ROOT / row.file_name).read_bytes()
+            assert len(content) == row.size_bytes
+            assert sha256(content).hexdigest() == row.sha256
 
 
 def test_resource_avatar_reference_requires_safe_row_and_file_before_any_write(

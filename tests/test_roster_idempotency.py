@@ -842,6 +842,7 @@ def test_teacher_list_is_unfiltered_deterministic_and_path_is_iso_date(client, d
 def test_real_concurrent_unique_row_failure_is_classified_as_a_roster_date_conflict(db_session):
     """Catches a missing final database guard or classification of its real unique failure as generic conflict."""
     child = _child(db_session, name="甲")
+    child_id = child.id
     barrier = Barrier(2)
     outcomes: list[str] = []
     errors: list[IntegrityError] = []
@@ -850,7 +851,7 @@ def test_real_concurrent_unique_row_failure_is_classified_as_a_roster_date_confl
         session = SessionLocal()
         try:
             session.add(
-                models.DutyRoster(cycle="race", date="2026-08-24", child_id=child.id)
+                models.DutyRoster(cycle="race", date="2026-08-24", child_id=child_id)
             )
             barrier.wait(timeout=2)
             session.commit()
@@ -878,7 +879,7 @@ def test_real_concurrent_unique_row_failure_is_classified_as_a_roster_date_confl
         assert fresh.scalar(
             select(func.count(models.DutyRoster.id)).where(
                 models.DutyRoster.date == "2026-08-24",
-                models.DutyRoster.child_id == child.id,
+                models.DutyRoster.child_id == child_id,
             )
         ) == 1
         with pytest.raises(APIError) as classified:

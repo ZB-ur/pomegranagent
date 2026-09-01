@@ -766,7 +766,7 @@ def test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping(
     assert orb_rect["x"] - (panel_rect["x"] + panel_rect["width"]) == pytest.approx(24, abs=1)
     assert panel_rect["y"] == pytest.approx(orb_rect["y"], abs=1)
     assert panel_rect["height"] == pytest.approx(orb_rect["height"], abs=1)
-    if roster_mode == "two_cards":
+    if roster_mode == "avatar_cards":
         first, second = measured["cards"]
         assert first["x"] + first["width"] <= second["x"]
         assert first["y"] == pytest.approx(second["y"], abs=1)

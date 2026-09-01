@@ -91,6 +91,104 @@ def test_children_page_owns_create_dialog_instead_of_a_persistent_form(teacher_b
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_child_create_retries_lost_response_with_one_resource(
+    teacher_browser,
+    viewport,
+):
+    rows = []
+    attempts = []
+    ledger = {}
+
+    def children(route):
+        if route.request.method == "POST":
+            request_id = route.request.headers["x-request-id"]
+            body = json.loads(route.request.post_data)
+            attempts.append((request_id, body))
+            stored = ledger.get(request_id)
+            if stored is None:
+                ack = {
+                    "id": 17,
+                    "name": body["name"],
+                    "nickname": body["nickname"],
+                    "avatar": body["avatar"],
+                    "active": True,
+                }
+                rows.append({
+                    **ack,
+                    "deactivated_at": None,
+                    "future_roster_entries": 0,
+                    "has_active_conversation": False,
+                })
+                ledger[request_id] = (body, ack)
+                route.fulfill(
+                    status=503,
+                    content_type="application/json",
+                    body=json.dumps({"error": {
+                        "code": "RESPONSE_LOST_AFTER_COMMIT",
+                        "message": "synthetic lost response",
+                        "field_errors": {},
+                        "retryable": True,
+                        "request_id": request_id,
+                    }}),
+                )
+                return
+            assert stored[0] == body
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps(stored[1], ensure_ascii=False),
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(rows, ensure_ascii=False),
+        )
+
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    page.route(f"{teacher_browser.server.base_url}/api/children**", children)
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#children",
+        wait_until="domcontentloaded",
+    )
+    setup(page)
+
+    page.get_by_role("button", name="添加幼儿", exact=True).click()
+    dialog = page.get_by_role("dialog", name="新增幼儿", exact=True)
+    name = dialog.get_by_label("幼儿姓名", exact=True)
+    nickname = dialog.get_by_label("小名", exact=True)
+    name.fill("  丢响应幼儿  ")
+    nickname.fill("  只创建一次  ")
+    save = dialog.get_by_role("button", name=re.compile(r"^(确认)?添加幼儿$"))
+
+    save.click()
+    dialog.get_by_text("保存失败，表单内容已保留，请重试。", exact=True).wait_for()
+    assert name.input_value() == "  丢响应幼儿  "
+    assert nickname.input_value() == "  只创建一次  "
+    assert len(rows) == 1
+
+    save.click()
+    dialog.wait_for(state="detached")
+
+    assert len(rows) == 1
+    assert len(attempts) == 2
+    assert attempts[0] == attempts[1]
+    assert re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+        attempts[0][0],
+    )
+    assert attempts[0][1] == {
+        "name": "丢响应幼儿",
+        "nickname": "只创建一次",
+        "avatar": None,
+    }
+    page.get_by_role("button", name="编辑：只创建一次", exact=True).wait_for()
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_children_management_is_labeled_strict_and_never_sends_delete(teacher_browser, viewport):
     calls = []
     rows = [{

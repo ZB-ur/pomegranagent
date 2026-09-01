@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from datetime import timezone
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
-from ..api_errors import APIError
+from ..api_errors import APIError, REQUEST_ID_PATTERN
 from ..auth import require_teacher_session
 from ..business_time import BusinessClock
 from ..database import SETTINGS, get_db
@@ -18,10 +18,19 @@ from ..services.deactivation import (
     set_duck_active,
 )
 from ..services.avatar_media import validate_avatar_reference
+from ..services.resource_create import create_child as create_child_resource
+from ..services.resource_create import create_duck as create_duck_resource
 
 
 router = APIRouter()
 BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
+
+
+def _incoming_request_id(request: Request) -> str | None:
+    values = request.headers.getlist("X-Request-ID")
+    if len(values) != 1 or not REQUEST_ID_PATTERN.fullmatch(values[0]):
+        return None
+    return values[0]
 
 
 @router.get("/api/children", response_model=list[schemas.TeacherChildOut])
@@ -39,16 +48,18 @@ def list_children(
 
 @router.post("/api/children", response_model=schemas.ChildOut)
 def create_child(
+    request: Request,
     payload: schemas.ChildMutationRequest,
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
-) -> models.Child:
-    validate_avatar_reference(db, payload.avatar, media_root=SETTINGS.media_root)
-    child = models.Child(**payload.model_dump(), active=True, deactivated_at=None)
-    db.add(child)
-    db.commit()
-    db.refresh(child)
-    return child
+) -> schemas.ChildOut:
+    return create_child_resource(
+        db,
+        payload,
+        request_id=_incoming_request_id(request),
+        media_root=SETTINGS.media_root,
+        now=BUSINESS_CLOCK.utc_now(),
+    )
 
 
 @router.put("/api/children/{child_id}", response_model=schemas.ChildOut)
@@ -127,16 +138,18 @@ def list_ducks(
 
 @router.post("/api/ducks", response_model=schemas.DuckOut)
 def create_duck(
+    request: Request,
     payload: schemas.DuckMutationRequest,
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
-) -> models.Duck:
-    validate_avatar_reference(db, payload.avatar, media_root=SETTINGS.media_root)
-    duck = models.Duck(**payload.model_dump(), active=True, deactivated_at=None)
-    db.add(duck)
-    db.commit()
-    db.refresh(duck)
-    return duck
+) -> schemas.DuckOut:
+    return create_duck_resource(
+        db,
+        payload,
+        request_id=_incoming_request_id(request),
+        media_root=SETTINGS.media_root,
+        now=BUSINESS_CLOCK.utc_now(),
+    )
 
 
 @router.put("/api/ducks/{duck_id}", response_model=schemas.DuckOut)
