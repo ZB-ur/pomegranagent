@@ -38,6 +38,7 @@ def _canonical_hash(operation: str, payload: BaseModel) -> str:
 def _idempotency_error(code: str, *, retryable: bool = False) -> APIError:
     messages = {
         "IDEMPOTENCY_CONFLICT": "请求 ID 与已有提交不一致",
+        "REQUEST_FAILED": "该请求先前处理失败，请使用新的请求 ID 重试",
         "REQUEST_IN_PROGRESS": "请求正在处理中",
     }
     return APIError(409, code, messages[code], retryable=retryable)
@@ -69,9 +70,20 @@ def _load_replay(
     if record.operation != operation or record.payload_hash != payload_hash:
         db.rollback()
         raise _idempotency_error("IDEMPOTENCY_CONFLICT")
-    if record.status != "succeeded":
+    if record.status == "processing":
         db.rollback()
         raise _idempotency_error("REQUEST_IN_PROGRESS", retryable=True)
+    if record.status == "failed":
+        db.rollback()
+        raise _idempotency_error("REQUEST_FAILED")
+    if record.status != "succeeded":
+        db.rollback()
+        raise APIError(
+            500,
+            "INTERNAL_ERROR",
+            "服务暂时不可用，请稍后重试",
+            retryable=True,
+        )
     if not record.response_json:
         db.rollback()
         raise APIError(

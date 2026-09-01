@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from datetime import timezone
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
-from ..api_errors import APIError, REQUEST_ID_PATTERN
+from ..api_errors import APIError
 from ..auth import require_teacher_session
 from ..business_time import BusinessClock
 from ..database import SETTINGS, get_db
@@ -27,10 +28,27 @@ BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
 
 
 def _incoming_request_id(request: Request) -> str | None:
-    values = request.headers.getlist("X-Request-ID")
-    if len(values) != 1 or not REQUEST_ID_PATTERN.fullmatch(values[0]):
+    values = [
+        value
+        for name, value in request.scope.get("headers", [])
+        if name.lower() == b"x-request-id"
+    ]
+    if not values:
         return None
-    return values[0]
+    try:
+        raw = values[0].decode("ascii")
+        parsed = UUID(raw)
+    except (AttributeError, UnicodeDecodeError, ValueError):
+        parsed = None
+        raw = ""
+    if len(values) != 1 or parsed is None or parsed.version != 4 or str(parsed) != raw:
+        raise APIError(
+            422,
+            "VALIDATION_ERROR",
+            "请求字段校验失败",
+            {"header.x-request-id": ["X-Request-ID 必须是单个 canonical UUIDv4"]},
+        )
+    return raw
 
 
 @router.get("/api/children", response_model=list[schemas.TeacherChildOut])

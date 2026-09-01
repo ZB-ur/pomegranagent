@@ -10,20 +10,20 @@ import os
 from pathlib import Path
 import shutil
 import stat
-from threading import Barrier, Lock, Thread, local
+from threading import Lock, Thread, get_ident, local
 from types import SimpleNamespace
 from uuid import UUID
 import zlib
 
 import pytest
 from PIL import Image, PngImagePlugin
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 from starlette.datastructures import Headers, UploadFile
 
 from app.backend import models
 from app.backend.api_errors import APIError
 from app.backend.auth import COOKIE_NAME
-from app.backend.database import SETTINGS, SessionLocal
+from app.backend.database import SETTINGS, SessionLocal, engine
 from app.backend.main import app
 
 
@@ -45,8 +45,13 @@ def _remove_media_root() -> None:
 
 @pytest.fixture(autouse=True)
 def isolated_media_root():
+    from app.backend.services import avatar_media
+
+    close_roots = getattr(avatar_media, "close_pinned_media_roots", lambda: None)
+    close_roots()
     _remove_media_root()
     yield
+    close_roots()
     _remove_media_root()
 
 
@@ -122,6 +127,38 @@ def _jpeg_polyglot_with_second_eoi() -> bytes:
     script = b"<script>alert(1)</script>"
     comment = b"\xff\xfe" + (len(script) + 2).to_bytes(2, "big") + script
     return _image_bytes("JPEG") + comment + b"\xff\xd9"
+
+
+def _jpeg_with_tem_in_scan() -> bytes:
+    """Pillow-compatible JPEG carrying the legal stand-alone TEM scan marker."""
+
+    source = _image_bytes("JPEG")
+    assert source.endswith(b"\xff\xd9")
+    return source[:-2] + b"\xff\x01\xff\xd9"
+
+
+def _jpeg_marker_fixture_with_dnl_in_scan() -> bytes:
+    """Minimal marker grammar fixture exercising legal DNL scan continuity."""
+
+    return (
+        b"\xff\xd8"
+        b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00"
+        b"scan-data"
+        b"\xff\xdc\x00\x04\x00\x30"
+        b"more-scan-data"
+        b"\xff\xd9"
+    )
+
+
+def _jpeg_marker_fixture_with_tem_in_scan() -> bytes:
+    return (
+        b"\xff\xd8"
+        b"\xff\xda\x00\x08\x01\x01\x00\x00\x3f\x00"
+        b"scan-before-tem"
+        b"\xff\x01"
+        b"scan-after-tem"
+        b"\xff\xd9"
+    )
 
 
 def _animated_webp() -> bytes:
@@ -552,6 +589,23 @@ def test_valid_progressive_jpeg_with_false_eoi_inside_comment_is_accepted(client
     assert response.json()["mime_type"] == "image/webp"
 
 
+def test_legal_tem_and_dnl_markers_keep_jpeg_scan_state(client) -> None:
+    from app.backend.services import avatar_media
+
+    _unlock(client)
+    tem = _jpeg_with_tem_in_scan()
+    with Image.open(BytesIO(tem)) as decoded:
+        decoded.load()
+        assert decoded.format == "JPEG"
+
+    response = _upload(client, tem, "image/jpeg", "tem-in-scan.jpg")
+
+    assert response.status_code == 200
+    assert response.json()["mime_type"] == "image/webp"
+    assert avatar_media._jpeg_has_exact_end(_jpeg_marker_fixture_with_tem_in_scan()) is True
+    assert avatar_media._jpeg_has_exact_end(_jpeg_marker_fixture_with_dnl_in_scan()) is True
+
+
 def test_dimension_and_stream_size_limits_fail_before_storage(client, db_session) -> None:
     _unlock(client)
     too_wide = _upload(
@@ -609,6 +663,7 @@ def test_authenticated_upload_runs_sync_image_file_and_database_work_off_event_l
             observed_running_loop.append(True)
         return SimpleNamespace(
             id="11111111-1111-4111-8111-111111111111",
+            mime_type="image/webp",
             width=8,
             height=8,
             size_bytes=32,
@@ -624,7 +679,39 @@ def test_authenticated_upload_runs_sync_image_file_and_database_work_off_event_l
     assert observed_running_loop == [False]
 
 
-def test_store_fsyncs_file_and_directory_and_cleans_up_atomic_replace_failure(
+def test_upload_materializes_expired_orm_response_inside_worker_thread(
+    client,
+    monkeypatch,
+) -> None:
+    from app.backend.routes import media as media_routes
+
+    worker_threads: list[int] = []
+    avatar_sql_threads: list[int] = []
+    original_store = media_routes.store_avatar
+
+    def recording_store(*args, **kwargs):
+        worker_threads.append(get_ident())
+        return original_store(*args, **kwargs)
+
+    def record_sql(_conn, _cursor, statement, _parameters, _context, _executemany):
+        if "avatar_media" in statement.lower():
+            avatar_sql_threads.append(get_ident())
+
+    monkeypatch.setattr(media_routes, "store_avatar", recording_store)
+    event.listen(engine, "before_cursor_execute", record_sql)
+    try:
+        _unlock(client)
+        response = _upload(client, _image_bytes("PNG"), "image/png")
+    finally:
+        event.remove(engine, "before_cursor_execute", record_sql)
+
+    assert response.status_code == 200
+    assert len(worker_threads) == 1
+    assert avatar_sql_threads
+    assert set(avatar_sql_threads) == set(worker_threads)
+
+
+def test_store_fsyncs_file_and_directory_and_cleans_up_atomic_link_failure(
     db_session,
     monkeypatch,
 ) -> None:
@@ -653,19 +740,21 @@ def test_store_fsyncs_file_and_directory_and_cleans_up_atomic_replace_failure(
 
     db_session.query(models.AvatarMedia).delete()
     db_session.commit()
+    avatar_media.close_pinned_media_roots()
     _remove_media_root()
 
-    def fail_replace(
+    def fail_link(
         _source,
         _destination,
         *,
         src_dir_fd=None,
         dst_dir_fd=None,
+        follow_symlinks=True,
     ) -> None:
-        del src_dir_fd, dst_dir_fd
-        raise OSError("synthetic replace failure")
+        del src_dir_fd, dst_dir_fd, follow_symlinks
+        raise OSError("synthetic link failure")
 
-    monkeypatch.setattr(avatar_media.os, "replace", fail_replace)
+    monkeypatch.setattr(avatar_media.os, "link", fail_link)
     with pytest.raises(APIError) as error:
         avatar_media.store_avatar(
             db_session,
@@ -695,6 +784,235 @@ def test_store_compensates_the_final_file_when_database_commit_fails(db_session,
     assert error.value.code == "AVATAR_STORAGE_UNAVAILABLE"
     assert list(db_session.new) == []
     assert _stored_files() == []
+
+
+def test_atomic_publish_never_overwrites_boundary_attacker_and_retries_uuid(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.backend.services import avatar_media
+
+    fixed = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    queued = iter(
+        [
+            fixed,
+            UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"),
+            UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"),
+            UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2"),
+        ]
+    )
+    original_uuid4 = avatar_media.uuid4
+    original_link = avatar_media.os.link
+    original_replace = avatar_media.os.replace
+    original_unlink = avatar_media.os.unlink
+    original_open = avatar_media.os.open
+    attacker = b"boundary attacker must survive"
+    attacked = False
+
+    def controlled_uuid4():
+        return next(queued, original_uuid4())
+
+    def install_attacker(destination, directory_fd) -> None:
+        nonlocal attacked
+        if attacked or os.fspath(destination) != f"{fixed}.webp":
+            return
+        attacked = True
+        try:
+            original_unlink(destination, dir_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        descriptor = original_open(
+            destination,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            os.write(descriptor, attacker)
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+
+    def boundary_replace(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        install_attacker(destination, dst_dir_fd)
+        return original_replace(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    def boundary_link(
+        source,
+        destination,
+        *,
+        src_dir_fd=None,
+        dst_dir_fd=None,
+        follow_symlinks=True,
+    ):
+        install_attacker(destination, dst_dir_fd)
+        return original_link(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+            follow_symlinks=follow_symlinks,
+        )
+
+    monkeypatch.setattr(avatar_media, "uuid4", controlled_uuid4)
+    monkeypatch.setattr(avatar_media.os, "replace", boundary_replace)
+    monkeypatch.setattr(avatar_media.os, "link", boundary_link)
+
+    stored = avatar_media.store_avatar(
+        db_session,
+        _direct_upload(_image_bytes("PNG"), "image/png"),
+        media_root=MEDIA_ROOT,
+        now=CAPTURED_NOW,
+    )
+
+    assert attacked is True
+    assert stored.id != str(fixed)
+    assert (MEDIA_ROOT / f"{fixed}.webp").read_bytes() == attacker
+    loaded = avatar_media.load_avatar(db_session, stored.id, media_root=MEDIA_ROOT)
+    assert loaded.media.id == stored.id
+    assert [row.id for row in db_session.scalars(select(models.AvatarMedia)).all()] == [
+        stored.id
+    ]
+
+
+def test_cleanup_boundary_exchange_never_unlinks_a_foreign_inode(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.backend.services import avatar_media
+
+    fixed = UUID("cccccccc-cccc-4ccc-8ccc-cccccccccccc")
+    queued = iter([fixed, UUID("cccccccc-cccc-4ccc-8ccc-ccccccccccc1")])
+    original_uuid4 = avatar_media.uuid4
+    original_open = avatar_media.os.open
+    original_unlink = avatar_media.os.unlink
+    original_rename = avatar_media.os.rename
+    attacker = b"foreign inode must not be deleted"
+    exchanged = False
+
+    def controlled_uuid4():
+        return next(queued, original_uuid4())
+
+    def exchange(directory_fd: int) -> None:
+        nonlocal exchanged
+        if exchanged:
+            return
+        exchanged = True
+        original_rename(
+            f"{fixed}.webp",
+            "owned-but-unreachable.webp",
+            src_dir_fd=directory_fd,
+            dst_dir_fd=directory_fd,
+        )
+        descriptor = original_open(
+            f"{fixed}.webp",
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+            dir_fd=directory_fd,
+        )
+        try:
+            os.write(descriptor, attacker)
+        finally:
+            os.close(descriptor)
+
+    def boundary_unlink(path, *, dir_fd=None):
+        if os.fspath(path) == f"{fixed}.webp" and dir_fd is not None:
+            exchange(dir_fd)
+        return original_unlink(path, dir_fd=dir_fd)
+
+    def boundary_rename(source, destination, *, src_dir_fd=None, dst_dir_fd=None):
+        if os.fspath(source) == f"{fixed}.webp" and src_dir_fd is not None:
+            exchange(src_dir_fd)
+        return original_rename(
+            source,
+            destination,
+            src_dir_fd=src_dir_fd,
+            dst_dir_fd=dst_dir_fd,
+        )
+
+    def fail_commit() -> None:
+        raise OSError("synthetic database failure")
+
+    monkeypatch.setattr(avatar_media, "uuid4", controlled_uuid4)
+    monkeypatch.setattr(avatar_media.os, "unlink", boundary_unlink)
+    monkeypatch.setattr(avatar_media.os, "rename", boundary_rename)
+    monkeypatch.setattr(db_session, "commit", fail_commit)
+
+    with pytest.raises(APIError) as error:
+        avatar_media.store_avatar(
+            db_session,
+            _direct_upload(_image_bytes("PNG"), "image/png"),
+            media_root=MEDIA_ROOT,
+            now=CAPTURED_NOW,
+        )
+
+    assert error.value.code == "AVATAR_STORAGE_UNAVAILABLE"
+    assert exchanged is True
+    assert (MEDIA_ROOT / f"{fixed}.webp").read_bytes() == attacker
+    assert (MEDIA_ROOT / "owned-but-unreachable.webp").is_file()
+    assert db_session.scalar(select(func.count(models.AvatarMedia.id))) == 0
+
+
+@pytest.mark.parametrize("failure_stage", ["fstat", "fdopen"])
+def test_temporary_descriptor_failures_close_fd_and_leave_no_dangerous_name(
+    db_session,
+    monkeypatch,
+    failure_stage,
+) -> None:
+    from app.backend.services import avatar_media
+
+    captured_fds: list[int] = []
+    original_open = avatar_media.os.open
+    original_fstat = avatar_media.os.fstat
+    original_fdopen = avatar_media.os.fdopen
+    failed = False
+
+    def recording_open(path, flags, mode=0o777, *, dir_fd=None):
+        descriptor = original_open(path, flags, mode, dir_fd=dir_fd)
+        if os.fspath(path).startswith(".avatar-"):
+            captured_fds.append(descriptor)
+        return descriptor
+
+    def failing_fstat(descriptor):
+        nonlocal failed
+        if failure_stage == "fstat" and descriptor in captured_fds and not failed:
+            failed = True
+            raise OSError("synthetic temporary fstat failure")
+        return original_fstat(descriptor)
+
+    def failing_fdopen(descriptor, *args, **kwargs):
+        nonlocal failed
+        if failure_stage == "fdopen" and descriptor in captured_fds and not failed:
+            failed = True
+            raise OSError("synthetic temporary fdopen failure")
+        return original_fdopen(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(avatar_media.os, "open", recording_open)
+    monkeypatch.setattr(avatar_media.os, "fstat", failing_fstat)
+    monkeypatch.setattr(avatar_media.os, "fdopen", failing_fdopen)
+
+    with pytest.raises(APIError) as error:
+        avatar_media.store_avatar(
+            db_session,
+            _direct_upload(_image_bytes("PNG"), "image/png"),
+            media_root=MEDIA_ROOT,
+            now=CAPTURED_NOW,
+        )
+
+    assert error.value.code == "AVATAR_STORAGE_UNAVAILABLE"
+    assert failed is True
+    assert len(captured_fds) == 1
+    with pytest.raises(OSError):
+        original_fstat(captured_fds[0])
+    assert all(path.name.startswith(".") for path in _stored_files())
+    if failure_stage == "fdopen":
+        assert _stored_files() == []
+    assert db_session.scalar(select(func.count(models.AvatarMedia.id))) == 0
 
 
 def test_public_get_is_exact_webp_with_cache_nosniff_etag_and_no_auth(client) -> None:
@@ -733,7 +1051,10 @@ def test_public_head_conditional_get_and_unsupported_range_have_explicit_contrac
 
     conditional = client.get(
         uploaded["url"],
-        headers={"If-None-Match": head.headers["etag"]},
+        headers={
+            "If-None-Match": head.headers["etag"],
+            "Range": "bytes=0-0",
+        },
     )
     assert conditional.status_code == 304
     assert conditional.content == b""
@@ -743,6 +1064,12 @@ def test_public_head_conditional_get_and_unsupported_range_have_explicit_contrac
 
     ranged = client.get(uploaded["url"], headers={"Range": "bytes=0-0"})
     _assert_error(ranged, status=416, code="AVATAR_RANGE_UNSUPPORTED")
+
+    missing_with_range = client.get(
+        "/api/media/avatars/11111111-1111-4111-8111-111111111111",
+        headers={"Range": "bytes=0-0"},
+    )
+    _assert_error(missing_with_range, status=404, code="AVATAR_NOT_FOUND")
 
 
 def test_missing_row_missing_file_symlink_and_path_escape_fail_closed(
@@ -855,12 +1182,21 @@ def test_store_holds_trusted_parent_fd_when_root_parent_is_swapped_to_symlink(
 
     assert swapped is True
     assert list(outside_root.iterdir()) == []
-    assert (moved_parent / "avatars" / stored.file_name).is_file()
+    stored_path = moved_parent / "avatars" / stored.file_name
+    assert stored_path.is_file()
+    expected = stored_path.read_bytes()
+
+    loaded = avatar_media.load_avatar(db_session, stored.id, media_root=media_root)
+
+    assert loaded.content == expected
+    avatar_media.close_pinned_media_roots()
+    with pytest.raises(APIError) as error:
+        avatar_media.load_avatar(db_session, stored.id, media_root=media_root)
+    assert error.value.code == "AVATAR_NOT_FOUND"
 
 
 def test_load_holds_trusted_parent_fd_when_root_parent_is_swapped_to_symlink(
     db_session,
-    monkeypatch,
     tmp_path,
 ) -> None:
     from app.backend.services import avatar_media
@@ -880,24 +1216,33 @@ def test_load_holds_trusted_parent_fd_when_root_parent_is_swapped_to_symlink(
     outside_root = outside_parent / "avatars"
     outside_root.mkdir(parents=True)
     (outside_root / stored.file_name).write_bytes(b"x" * len(expected))
-    original_open = avatar_media.os.open
-    swapped = False
-
-    def swapping_open(path, flags, mode=0o777, *, dir_fd=None):
-        nonlocal swapped
-        path_text = os.fspath(path)
-        if not swapped and (path_text == os.fspath(media_root) or path_text == "avatars"):
-            safe_parent.rename(moved_parent)
-            safe_parent.symlink_to(outside_parent, target_is_directory=True)
-            swapped = True
-        return original_open(path, flags, mode, dir_fd=dir_fd)
-
-    monkeypatch.setattr(avatar_media.os, "open", swapping_open)
+    safe_parent.rename(moved_parent)
+    safe_parent.symlink_to(outside_parent, target_is_directory=True)
 
     loaded = avatar_media.load_avatar(db_session, stored.id, media_root=media_root)
 
-    assert swapped is True
     assert loaded.content == expected
+    assert (outside_root / stored.file_name).read_bytes() != loaded.content
+
+
+def test_pinned_root_reset_closes_every_held_descriptor(db_session) -> None:
+    from app.backend.services import avatar_media
+
+    avatar_media.store_avatar(
+        db_session,
+        _direct_upload(_image_bytes("PNG"), "image/png"),
+        media_root=MEDIA_ROOT,
+        now=CAPTURED_NOW,
+    )
+    descriptors = [pinned.fd for pinned in avatar_media._PINNED_ROOTS.values()]
+    assert len(descriptors) == 1
+
+    avatar_media.close_pinned_media_roots()
+
+    assert avatar_media._PINNED_ROOTS == {}
+    for descriptor in descriptors:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
 
 
 @pytest.mark.parametrize(
@@ -993,33 +1338,23 @@ def test_concurrent_fixed_uuid_collision_never_overwrites_or_deletes_winner(
             fixed,
             UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1"),
             UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2"),
+            UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa3"),
         ],
         "avatar-b": [
             fixed,
             UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1"),
             UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2"),
+            UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb3"),
         ],
     }
     state = local()
-    id_barrier = Barrier(2)
-    exists_barrier = Barrier(2)
-    original_exists = Path.exists
 
     def controlled_uuid4():
         index = getattr(state, "uuid_index", 0)
         state.uuid_index = index + 1
-        if index == 0:
-            id_barrier.wait(timeout=2)
         return sequences[state.thread_name][index]
 
-    def synchronized_exists(path: Path) -> bool:
-        result = original_exists(path)
-        if path.name == f"{fixed}.webp":
-            exists_barrier.wait(timeout=2)
-        return result
-
     monkeypatch.setattr(avatar_media, "uuid4", controlled_uuid4)
-    monkeypatch.setattr(Path, "exists", synchronized_exists)
     results: list[str] = []
     errors: list[BaseException] = []
     result_lock = Lock()

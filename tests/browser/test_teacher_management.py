@@ -95,31 +95,18 @@ def test_child_create_retries_lost_response_with_one_resource(
     teacher_browser,
     viewport,
 ):
-    rows = []
     attempts = []
-    ledger = {}
+    upstream_acks = []
 
     def children(route):
         if route.request.method == "POST":
             request_id = route.request.headers["x-request-id"]
             body = json.loads(route.request.post_data)
             attempts.append((request_id, body))
-            stored = ledger.get(request_id)
-            if stored is None:
-                ack = {
-                    "id": 17,
-                    "name": body["name"],
-                    "nickname": body["nickname"],
-                    "avatar": body["avatar"],
-                    "active": True,
-                }
-                rows.append({
-                    **ack,
-                    "deactivated_at": None,
-                    "future_roster_entries": 0,
-                    "has_active_conversation": False,
-                })
-                ledger[request_id] = (body, ack)
+            upstream = route.fetch()
+            upstream_acks.append((upstream.status, upstream.json()))
+            if len(attempts) == 1:
+                assert upstream.status == 200
                 route.fulfill(
                     status=503,
                     content_type="application/json",
@@ -132,18 +119,9 @@ def test_child_create_retries_lost_response_with_one_resource(
                     }}),
                 )
                 return
-            assert stored[0] == body
-            route.fulfill(
-                status=200,
-                content_type="application/json",
-                body=json.dumps(stored[1], ensure_ascii=False),
-            )
+            route.fulfill(response=upstream)
             return
-        route.fulfill(
-            status=200,
-            content_type="application/json",
-            body=json.dumps(rows, ensure_ascii=False),
-        )
+        route.fallback()
 
     context = teacher_browser.new_context()
     page = context.new_page()
@@ -155,6 +133,17 @@ def test_child_create_retries_lost_response_with_one_resource(
         wait_until="domcontentloaded",
     )
     setup(page)
+    page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
+
+    def real_children():
+        return page.evaluate("""async () => {
+          const response = await fetch('/api/children?include_inactive=true');
+          return { status: response.status, body: await response.json() };
+        }""")
+
+    before = real_children()
+    assert before["status"] == 200
+    baseline_rows = before["body"]
 
     page.get_by_role("button", name="添加幼儿", exact=True).click()
     dialog = page.get_by_role("dialog", name="新增幼儿", exact=True)
@@ -168,14 +157,21 @@ def test_child_create_retries_lost_response_with_one_resource(
     dialog.get_by_text("保存失败，表单内容已保留，请重试。", exact=True).wait_for()
     assert name.input_value() == "  丢响应幼儿  "
     assert nickname.input_value() == "  只创建一次  "
-    assert len(rows) == 1
+    committed = real_children()
+    assert committed["status"] == 200
+    committed_rows = committed["body"]
+    assert len(committed_rows) == len(baseline_rows) + 1
+    assert [row["name"] for row in committed_rows if row["name"] == "丢响应幼儿"] == [
+        "丢响应幼儿"
+    ]
 
     save.click()
     dialog.wait_for(state="detached")
 
-    assert len(rows) == 1
     assert len(attempts) == 2
     assert attempts[0] == attempts[1]
+    assert upstream_acks[0] == upstream_acks[1]
+    assert upstream_acks[0][0] == 200
     assert re.fullmatch(
         r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
         attempts[0][0],
@@ -185,6 +181,13 @@ def test_child_create_retries_lost_response_with_one_resource(
         "nickname": "只创建一次",
         "avatar": None,
     }
+    rows_after_retry = real_children()
+    assert rows_after_retry["status"] == 200
+    final_rows = rows_after_retry["body"]
+    assert len(final_rows) == len(baseline_rows) + 1
+    assert [row["name"] for row in final_rows if row["name"] == "丢响应幼儿"] == [
+        "丢响应幼儿"
+    ]
     page.get_by_role("button", name="编辑：只创建一次", exact=True).wait_for()
 
 

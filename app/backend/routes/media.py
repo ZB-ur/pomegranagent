@@ -95,27 +95,39 @@ async def upload_avatar(
         if len(items) != 1 or items[0][0] != "file" or not isinstance(items[0][1], UploadFile):
             raise APIError(422, "AVATAR_INVALID", "头像上传请求无效")
         upload = items[0][1]
-        row = await run_in_threadpool(
-            store_avatar,
+        return await run_in_threadpool(
+            _store_avatar_response,
             db,
             upload,
             media_root=SETTINGS.media_root,
             now=BUSINESS_CLOCK.utc_now(),
-        )
-        return schemas.AvatarMediaResponse(
-            id=UUID(row.id),
-            url=f"/api/media/avatars/{row.id}",
-            mime_type="image/webp",
-            width=row.width,
-            height=row.height,
-            size_bytes=row.size_bytes,
-            sha256=row.sha256,
         )
     finally:
         try:
             await form.close()
         except Exception:
             pass
+
+
+def _store_avatar_response(
+    db: Session,
+    upload: UploadFile,
+    *,
+    media_root,
+    now,
+) -> schemas.AvatarMediaResponse:
+    """Store and materialize the strict DTO inside the worker thread."""
+
+    stored = store_avatar(db, upload, media_root=media_root, now=now)
+    return schemas.AvatarMediaResponse(
+        id=UUID(stored.id),
+        url=f"/api/media/avatars/{stored.id}",
+        mime_type=stored.mime_type,
+        width=stored.width,
+        height=stored.height,
+        size_bytes=stored.size_bytes,
+        sha256=stored.sha256,
+    )
 
 
 def _avatar_headers(blob) -> dict[str, str]:
@@ -142,12 +154,12 @@ def _avatar_response(
     *,
     head_only: bool,
 ) -> Response:
-    if request.headers.getlist("range"):
-        raise APIError(416, "AVATAR_RANGE_UNSUPPORTED", "不支持头像分段读取")
     blob = load_avatar(db, media_id, media_root=SETTINGS.media_root)
     headers = _avatar_headers(blob)
     if _matches_if_none_match(request, headers["ETag"]):
         return Response(status_code=304, headers=headers)
+    if request.headers.getlist("range"):
+        raise APIError(416, "AVATAR_RANGE_UNSUPPORTED", "不支持头像分段读取")
     if head_only:
         headers["Content-Length"] = str(blob.media.size_bytes)
         return Response(
