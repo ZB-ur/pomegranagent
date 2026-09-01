@@ -6,6 +6,7 @@ import {
   createReportRoutes,
   parseGrowth,
   parseHistoryPage,
+  reportStatusCopy,
 } from '../../../app/frontend/teacher/views/reports.mjs';
 
 
@@ -89,4 +90,11 @@ test('history parser enforces exact page and canonical item union', () => {
     { items: [item], next_before_id: 43 },
     { items: [item], next_before_id: null, extra: true },
   ]) assert.throws(() => parseHistoryPage(value), TypeError);
+});
+
+
+test('report status copy localizes every canonical history enum', () => {
+  assert.deepEqual(['pending','processing','succeeded','failed'].map(value => reportStatusCopy('analysis', value)), ['等待分析','分析中','分析完成','分析失败']);
+  assert.deepEqual(['pending','draft','confirmed','unavailable'].map(value => reportStatusCopy('review', value)), ['等待审阅','审阅草稿','审阅完成','暂不可审阅']);
+  assert.throws(() => reportStatusCopy('analysis', 'unknown'), TypeError);
 });

@@ -976,9 +976,29 @@ textarea { min-height: 46px; width: 100%; }
 .growth-data-series { border-top: 1px solid var(--teacher-border-subtle); display: grid; gap: 6px; min-width: 0; padding-top: 12px; }
 .growth-data-series h3 { font-size: 14px; }
 .growth-data-series p { color: var(--teacher-text-secondary); line-height: 1.7; min-width: 0; overflow-wrap: anywhere; }
+.report-hero-eyebrow { color: var(--teacher-action-primary); font-size: 12px; font-weight: 700; }
+.search-filter { align-items: end; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) auto; }
+.search-filter .teacher-field { min-width: 0; }
+.search-filter button { padding-left: 18px; padding-right: 18px; }
 .report-history { display: grid; gap: 12px; min-width: 0; }
-.report-history-row { display: grid; gap: 8px; }
-.report-history-row a, .report-load-more { align-items: center; display: inline-flex; min-height: 44px; min-width: 44px; width: fit-content; }
+.report-history-row { align-items: center; display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr) auto auto; min-width: 0; }
+.report-history-copy { display: grid; gap: 4px; min-width: 0; }
+.report-history-copy h2 { font-size: 17px; line-height: 1.35; margin: 0; overflow-wrap: anywhere; }
+.report-history-child { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
+.report-history-meta { color: var(--teacher-text-secondary); font-size: 13px; min-width: 0; overflow-wrap: anywhere; }
+.report-history-statuses { display: flex; flex-wrap: wrap; gap: 8px; }
+.report-status-tag { align-items: center; border-radius: 999px; display: inline-flex; min-height: 30px; padding: 4px 10px; }
+.report-status-tag[data-status-value="pending"], .report-status-tag[data-status-value="draft"] { background: var(--teacher-status-warning); }
+.report-status-tag[data-status-value="processing"] { background: var(--teacher-status-info); }
+.report-status-tag[data-status-value="succeeded"], .report-status-tag[data-status-value="confirmed"] { background: var(--teacher-status-success); }
+.report-status-tag[data-status-value="failed"] { background: var(--teacher-status-danger); color: var(--teacher-status-danger-text); }
+.report-status-tag[data-status-value="unavailable"] { background: var(--teacher-surface-soft); color: var(--teacher-text-secondary); }
+.report-review-link, .report-load-more, .search-filter button { min-height: 44px; min-width: 44px; }
+.report-review-link { align-items: center; border: 1px solid var(--teacher-border-subtle); border-radius: 10px; display: inline-flex; justify-content: center; padding: 8px 12px; text-align: center; text-decoration: none; }
+.report-pagination { align-items: center; display: flex; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.report-page-number { font-weight: 700; }
+.report-results-summary { color: var(--teacher-text-secondary); min-width: 0; overflow-wrap: anywhere; }
+.report-load-more { margin-left: auto; }
 .management-view dialog:not(.management-dialog) { border: 0; border-radius: 14px; margin: auto; max-width: min(520px, calc(100vw - 32px)); padding: 22px; }
 .management-view dialog:not(.management-dialog)::backdrop { background: rgba(36, 53, 43, .42); }
 .management-view dialog:not(.management-dialog) button { margin: 14px 10px 0 0; }
@@ -1009,6 +1029,8 @@ h1[tabindex="-1"]:focus-visible, h2[tabindex="-1"]:focus-visible {
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .reports-view { gap: 12px; }
   .report-hero { grid-template-columns: minmax(0, 1fr); }
+  .report-history-row { grid-template-columns: minmax(0, 1fr) auto; }
+  .report-review-link { grid-column: 1 / -1; width: 100%; }
   .management-hero { gap: 16px; }
   .management-copy h1 { font-size: 25px; }
   .management-row-actions { max-width: 190px; }

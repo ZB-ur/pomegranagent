@@ -14,6 +14,16 @@ CHILDREN = [
 ]
 
 
+def history_item(identifier=42):
+    return {
+        "id": identifier,
+        "child": {"id": 8, "name": "历史幼儿", "nickname": None, "avatar": None},
+        "date": "2026-08-23", "completed_at": "2026-08-23T09:00:00Z",
+        "status": "ended", "end_reason": "complete", "message_count": 4, "round": 2,
+        "analysis_status": "succeeded", "review_status": "confirmed", "revision": 3,
+    }
+
+
 def setup(page):
     page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
     page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
@@ -311,33 +321,167 @@ def test_history_filter_pagination_and_review_anchor_are_canonical(teacher_brows
 
     def history(route):
         history_urls.append(route.request.url)
-        query = parse_qs(urlsplit(route.request.url).query)
-        identifier = 42 if "before_id" not in query else 41
         route.fulfill(status=200, content_type="application/json", body=json.dumps({
-            "items": [{
-                "id": identifier,
-                "child": {"id": 8, "name": "历史幼儿", "nickname": None, "avatar": None},
-                "date": "2026-08-23", "completed_at": "2026-08-23T09:00:00Z",
-                "status": "ended", "end_reason": "complete", "message_count": 4, "round": 2,
-                "analysis_status": "succeeded", "review_status": "confirmed", "revision": 3,
-            }],
-            "next_before_id": 42 if identifier == 42 else None,
+            "items": [history_item()],
+            "next_before_id": 42,
         }, ensure_ascii=False))
     page.route(f"{teacher_browser.server.base_url}/api/conversations/history**", history)
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#search", wait_until="domcontentloaded")
     setup(page)
-    page.get_by_role("heading", name="明细检索", exact=True).wait_for()
+    page.get_by_role("heading", name="查找历史日记", exact=True).wait_for()
+    page.get_by_role("link", name="打开会话 #42 的审阅", exact=True).wait_for()
     assert page_errors == []
+    assert page.locator(".search-hero").get_by_text("明细检索", exact=True).count() == 1
+    assert page.get_by_text("不含关键词、日期范围或排序", exact=True).count() == 1
     assert page.locator("#main label").count() == 1, page.locator("#main").inner_text()
-    page.get_by_label("筛选幼儿", exact=True).select_option("8")
+    selector = page.get_by_label("筛选幼儿", exact=True)
+    assert selector.locator("option").first.inner_text() == "全部幼儿"
+    selector.select_option("8")
+    assert urlsplit(page.url).fragment == "search"
+    old_view = page.locator(".search-view").element_handle()
+    assert old_view is not None
+    page.get_by_role("button", name="查看历史", exact=True).click()
     page.wait_for_url("**/teacher.html#search?child_id=8")
-    link = page.get_by_role("link", name="查看会话 #42", exact=True)
+    page.wait_for_function("oldView => !oldView.isConnected", arg=old_view)
+    page.wait_for_function("() => document.querySelector('#search-child-select')?.value === '8'")
+    link = page.get_by_role("link", name="打开会话 #42 的审阅", exact=True)
+    link.wait_for()
     assert link.get_attribute("href") == "#review?conversation_id=42"
-    page.get_by_role("button", name="加载更多", exact=True).click()
-    page.get_by_role("link", name="查看会话 #41", exact=True).wait_for()
+    row = page.locator(".report-history-row")
+    assert row.get_by_role("heading", name="会话 #42", exact=True).count() == 1
+    assert row.get_by_text("历史幼儿", exact=True).count() == 1
+    assert row.get_by_text("2026-08-23 · 2 轮", exact=True).count() == 1
+    assert row.get_by_text("分析完成", exact=True).count() == 1
+    assert row.get_by_text("审阅完成", exact=True).count() == 1
+    assert "succeeded" not in page.locator("#main").inner_text()
+    assert "confirmed" not in page.locator("#main").inner_text()
+    assert page.get_by_text("第 1 页", exact=True).count() == 1
+    assert page.get_by_text("已显示 1 条 · 还有更多", exact=True).count() == 1
     assert parse_qs(urlsplit(history_urls[-1]).query) == {
-        "limit": ["20"], "child_id": ["8"], "before_id": ["42"]
+        "limit": ["20"], "child_id": ["8"]
     }
+    assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+    assert page.locator("#main button:visible, #main a:visible, #main select:visible").evaluate_all("nodes => nodes.every(node => { const r=node.getBoundingClientRect(); return r.width>=44 && r.height>=44; })")
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_history_append_failure_retains_rows_and_retries_same_cursor(teacher_browser, viewport):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    history_urls = []
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)),
+    )
+
+    def history(route):
+        history_urls.append(route.request.url)
+        if len(history_urls) == 1:
+            body = {"items": [history_item(42)], "next_before_id": 42}
+            route.fulfill(status=200, content_type="application/json", body=json.dumps(body, ensure_ascii=False))
+            return
+        if len(history_urls) == 2:
+            route.fulfill(status=503, content_type="text/plain", body="raw append secret")
+            return
+        body = {"items": [history_item(41)], "next_before_id": None}
+        route.fulfill(status=200, content_type="application/json", body=json.dumps(body, ensure_ascii=False))
+
+    page.route(f"{teacher_browser.server.base_url}/api/conversations/history**", history)
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#search?child_id=8", wait_until="domcontentloaded")
+    setup(page)
+    page.get_by_role("heading", name="会话 #42", exact=True).wait_for()
+    button = page.get_by_role("button", name="加载更多", exact=True)
+    button.click()
+    alert = page.get_by_text("更多历史记录加载失败，已保留当前结果。请重试。", exact=True)
+    alert.wait_for()
+    assert alert.get_attribute("role") == "alert"
+    assert page.get_by_role("heading", name="会话 #42", exact=True).count() == 1
+    assert page.locator(".report-history-row").count() == 1
+    assert "raw append secret" not in page.locator("#main").inner_text()
+    assert button.is_enabled()
+    assert button.evaluate("node => document.activeElement === node")
+    assert page.locator(".search-view").get_attribute("aria-busy") is None
+    assert urlsplit(history_urls[1]).query == "limit=20&child_id=8&before_id=42"
+
+    button.click()
+    page.get_by_role("heading", name="会话 #41", exact=True).wait_for()
+    assert urlsplit(history_urls[2]).query == "limit=20&child_id=8&before_id=42"
+    assert page.locator(".report-history-row").count() == 2
+    assert page.get_by_role("button", name="加载更多", exact=True).count() == 0
+    assert page.get_by_text("第 2 页", exact=True).count() == 1
+    assert page.get_by_text("已显示 2 条 · 已全部加载", exact=True).count() == 1
+    status = page.locator(".search-view .report-status")
+    assert status.inner_text() == ""
+    assert status.get_attribute("role") is None
+    assert status.get_attribute("aria-live") is None
+
+
+def test_history_held_first_page_exposes_busy_loading_then_polite_empty(teacher_browser):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page_errors = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.set_default_timeout(5_000)
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#today", wait_until="domcontentloaded")
+    setup(page)
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
+    page.evaluate("""children => {
+      const original = window.DuckAPI;
+      window.DuckAPI = Object.freeze({
+        ...original,
+        request(path, options) {
+          if (path === '/api/children?include_inactive=true') return Promise.resolve(children);
+          if (path === '/api/conversations/history?limit=20&child_id=8') {
+            return new Promise(resolve => { window.__historyFirstPageResolve = resolve; });
+          }
+          return original.request(path, options);
+        },
+      });
+    }""", CHILDREN)
+    page.evaluate("location.hash = '#search?child_id=8'")
+    page.wait_for_function("() => Boolean(window.__historyFirstPageResolve)")
+    view = page.locator(".search-view")
+    loading = page.get_by_text("正在加载历史记录…", exact=True)
+    assert view.get_attribute("aria-busy") == "true"
+    assert loading.get_attribute("role") == "status"
+    assert loading.get_attribute("aria-live") == "polite"
+
+    page.evaluate("() => window.__historyFirstPageResolve({items: [], next_before_id: null})")
+    empty = page.get_by_text("暂无历史记录", exact=True)
+    empty.wait_for()
+    assert empty.get_attribute("role") == "status"
+    assert empty.get_attribute("aria-live") == "polite"
+    assert view.get_attribute("aria-busy") is None
+    assert page.locator(".report-history-row").count() == 0
+    assert page_errors == []
+
+
+def test_history_invalid_child_alerts_focuses_selector_and_skips_request(teacher_browser):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    history_urls = []
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)),
+    )
+
+    def history(route):
+        history_urls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body='{"items":[],"next_before_id":null}')
+
+    page.route(f"{teacher_browser.server.base_url}/api/conversations/history**", history)
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#search?child_id=999", wait_until="domcontentloaded")
+    setup(page)
+    alert = page.get_by_text("所选幼儿不存在，请重新选择。", exact=True)
+    alert.wait_for()
+    selector = page.get_by_label("筛选幼儿", exact=True)
+    assert alert.get_attribute("role") == "alert"
+    assert selector.evaluate("node => document.activeElement === node")
+    assert page.locator(".search-view").get_attribute("aria-busy") is None
+    assert history_urls == []
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -380,8 +524,9 @@ def test_growth_initial_failure_has_accessible_retry(teacher_browser, viewport):
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("recovery", ["empty", "results"])
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_history_initial_failure_has_accessible_retry(teacher_browser, viewport):
+def test_history_initial_failure_has_accessible_retry(teacher_browser, viewport, recovery):
     context = teacher_browser.new_context()
     page = context.new_page()
     page.set_default_timeout(5_000)
@@ -397,16 +542,31 @@ def test_history_initial_failure_has_accessible_retry(teacher_browser, viewport)
         if len(calls) == 1:
             route.fulfill(status=502, content_type="text/html", body="<h1>raw secret</h1>")
             return
-        route.fulfill(status=200, content_type="application/json", body='{"items":[],"next_before_id":null}')
+        items = [] if recovery == "empty" else [history_item()]
+        route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "items": items, "next_before_id": None,
+        }, ensure_ascii=False))
 
     page.route(f"{teacher_browser.server.base_url}/api/conversations/history**", history)
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#search", wait_until="domcontentloaded")
     setup(page)
     retry = page.get_by_role("button", name="重试历史记录", exact=True)
     retry.wait_for()
+    status = page.locator(".search-view .report-status")
+    assert status.get_attribute("role") == "alert"
     assert "raw secret" not in page.locator("#main").inner_text()
+    assert retry.evaluate("node => document.activeElement === node")
+    assert page.locator(".search-view").get_attribute("aria-busy") is None
     retry.click()
-    page.get_by_text("暂无历史记录", exact=True).wait_for()
+    if recovery == "empty":
+        empty = page.get_by_text("暂无历史记录", exact=True)
+        empty.wait_for()
+        assert empty.get_attribute("role") == "status"
+        assert empty.get_attribute("aria-live") == "polite"
+    else:
+        page.get_by_role("link", name="打开会话 #42 的审阅", exact=True).wait_for()
+        assert status.inner_text() == ""
+        assert status.get_attribute("role") is None
     assert len(calls) == 2
 
 
@@ -497,7 +657,7 @@ def test_search_ignores_abort_insensitive_late_a_after_b(teacher_browser, outcom
     page.evaluate("location.hash = '#search?child_id=7'")
     page.wait_for_function("() => Boolean(window.__lateHistory)")
     page.evaluate("location.hash = '#search?child_id=8'")
-    page.get_by_role("link", name="查看会话 #88", exact=True).wait_for()
+    page.get_by_role("link", name="打开会话 #88 的审阅", exact=True).wait_for()
     page.evaluate("""outcome => {
       if (outcome === 'resolve') window.__lateHistory.resolve({
         items: [window.__historyItem(77, {
@@ -509,7 +669,7 @@ def test_search_ignores_abort_insensitive_late_a_after_b(teacher_browser, outcom
     }""", outcome)
     page.wait_for_timeout(50)
 
-    assert page.get_by_role("link", name="查看会话 #88", exact=True).count() == 1
-    assert page.get_by_role("link", name="查看会话 #77", exact=True).count() == 0
+    assert page.get_by_role("link", name="打开会话 #88 的审阅", exact=True).count() == 1
+    assert page.get_by_role("link", name="打开会话 #77 的审阅", exact=True).count() == 0
     assert "raw secret" not in page.locator("#main").inner_text()
     assert page_errors == []

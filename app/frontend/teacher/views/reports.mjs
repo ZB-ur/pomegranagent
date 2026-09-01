@@ -103,6 +103,17 @@ export function setReportStatus(node, text, role) {
   else node.removeAttribute('aria-live');
 }
 
+const REPORT_STATUS_COPY = Object.freeze({
+  analysis: Object.freeze({ pending: '等待分析', processing: '分析中', succeeded: '分析完成', failed: '分析失败' }),
+  review: Object.freeze({ pending: '等待审阅', draft: '审阅草稿', confirmed: '审阅完成', unavailable: '暂不可审阅' }),
+});
+
+export function reportStatusCopy(kind, value) {
+  const table = REPORT_STATUS_COPY[kind];
+  if (!table || !Object.prototype.hasOwnProperty.call(table, value)) throw invalid();
+  return table[value];
+}
+
 export function parseHistoryPage(value) {
   const page = record(value, ['items', 'next_before_id']);
   const items = array(page.items).map(item => {
@@ -389,87 +400,146 @@ export function createReportRoutes(value) {
 
   const search = context => {
     const scope = scopeFor(context);
-    const view = h('section', { class: 'reports-view' });
-    const controls = h('div', { class: 'card' });
-    const status = h('p', { role: 'status', 'aria-live': 'polite', text: '正在加载历史记录…' });
-    const results = h('div', { class: 'report-history' });
-    view.append(h('h1', { text: '明细检索' }), controls, status, results);
+    const view = h('section', { class: 'reports-view search-view', 'aria-busy': 'true' });
+    const filter = h('form', { class: 'search-filter' });
+    const hero = h('header', { class: 'card report-hero search-hero' },
+      h('div', { class: 'report-hero-copy' },
+        h('p', { class: 'report-hero-eyebrow', text: '明细检索' }),
+        h('h1', { text: '查找历史日记' }),
+        h('p', { class: 'muted', text: '不含关键词、日期范围或排序' })),
+      filter);
+    const status = h('p', { class: 'report-status' });
+    const results = h('div', { class: 'report-history', 'aria-label': '历史日记结果' });
+    const pagination = h('div', { class: 'report-pagination' });
+    setReportStatus(status, '正在加载幼儿…', 'status');
+    view.append(hero, status, results, pagination);
     context.root.replaceChildren(view);
     const raw = context.params.get('child_id');
     const selectedId = raw && /^\d+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;
     let nextBeforeId = null;
+    let loadedPageCount = 0;
+    let renderedItemCount = 0;
     let loadingMore = false;
-    const showRetry = () => {
+    let selectorControl = null;
+
+    filter.addEventListener('submit', event => {
+      event.preventDefault();
+      if (!selectorControl) return;
+      const id = Number(selectorControl.value);
+      navigate(id ? `#search?child_id=${id}` : '#search');
+    });
+
+    const showRetry = token => {
+      if (!scope.alive(token)) return;
       const retry = h('button', { type: 'button', class: 'btn gray', text: '重试历史记录' });
       retry.addEventListener('click', () => void load());
-      status.setAttribute('role', 'alert');
-      status.replaceChildren('历史记录加载失败，请重试。', retry);
+      setReportStatus(status, '历史记录加载失败，请重试。', 'alert');
+      status.append(' ', retry);
+      retry.focus();
     };
 
-    const appendPage = (page, append) => {
-      if (!append) results.replaceChildren();
-      for (const item of page.items) {
-        const row = h('article', { class: 'card report-history-row' });
-        row.append(
-          h('h2', { text: displayName(item.child) }),
-          h('p', { text: `${item.date} · ${item.round} 轮 · ${item.analysis_status} · ${item.review_status}` }),
-          h('a', { href: `#review?conversation_id=${item.id}`, text: `查看会话 #${item.id}` }),
-        );
-        results.append(row);
-      }
-      nextBeforeId = page.next_before_id;
-      const old = view.querySelector('.report-load-more');
-      if (old) old.remove();
+    const rowFor = item => h('article', { class: 'card report-history-row' },
+      h('div', { class: 'report-history-copy' },
+        h('h2', { text: `会话 #${item.id}` }),
+        h('p', { class: 'report-history-child', text: displayName(item.child) }),
+        h('p', { class: 'report-history-meta', text: `${item.date} · ${item.round} 轮` })),
+      h('div', { class: 'report-history-statuses' },
+        h('span', {
+          class: 'report-status-tag', 'data-status-kind': 'analysis', 'data-status-value': item.analysis_status,
+          text: reportStatusCopy('analysis', item.analysis_status),
+        }),
+        h('span', {
+          class: 'report-status-tag', 'data-status-kind': 'review', 'data-status-value': item.review_status,
+          text: reportStatusCopy('review', item.review_status),
+        })),
+      h('a', {
+        class: 'report-review-link', href: `#review?conversation_id=${item.id}`,
+        'aria-label': `打开会话 #${item.id} 的审阅`, text: '打开审阅 →',
+      }));
+
+    const renderPagination = () => {
+      pagination.replaceChildren(
+        h('p', { class: 'report-page-number', text: `第 ${loadedPageCount} 页` }),
+        h('p', {
+          class: 'report-results-summary',
+          text: `已显示 ${renderedItemCount} 条 · ${nextBeforeId === null ? '已全部加载' : '还有更多'}`,
+        }),
+      );
       if (nextBeforeId !== null) {
         const button = h('button', { type: 'button', class: 'btn report-load-more', text: '加载更多' });
         button.addEventListener('click', () => void loadHistory(true, button));
-        view.append(button);
+        pagination.append(button);
       }
-      if (!results.children.length) results.append(h('p', { class: 'card muted', text: '暂无历史记录' }));
     };
-    const loadHistory = async (append = false, button = null) => {
+
+    const commitPage = (page, append) => {
+      if (!append) results.replaceChildren();
+      for (const item of page.items) results.append(rowFor(item));
+      if (append) {
+        loadedPageCount += 1;
+        renderedItemCount += page.items.length;
+      } else {
+        loadedPageCount = 1;
+        renderedItemCount = page.items.length;
+      }
+      nextBeforeId = page.next_before_id;
+      renderPagination();
+      if (renderedItemCount === 0) setReportStatus(status, '暂无历史记录', 'status');
+      else setReportStatus(status, '', null);
+    };
+
+    const loadHistory = async (append = false, button = null, token = scope.next()) => {
       if (loadingMore) return;
+      const requestCursor = append ? nextBeforeId : null;
+      if (append && requestCursor === null) return;
       loadingMore = true;
+      view.setAttribute('aria-busy', 'true');
       if (button) button.disabled = true;
-      const token = scope.next();
+      setReportStatus(status, append ? '正在加载更多历史记录…' : '正在加载历史记录…', 'status');
       try {
         const query = new URLSearchParams({ limit: '20' });
         if (selectedId !== null) query.set('child_id', String(selectedId));
-        if (append && nextBeforeId !== null) query.set('before_id', String(nextBeforeId));
+        if (append) query.set('before_id', String(requestCursor));
         const response = await scope.run(`/api/conversations/history?${query}`, {}, token);
         if (!response.current) return;
-        appendPage(parseHistoryPage(response.result), append);
-        status.setAttribute('role', 'status');
-        status.textContent = '历史记录已加载';
+        const page = parseHistoryPage(response.result);
+        if (!scope.alive(token)) return;
+        commitPage(page, append);
       } catch (_error) {
         if (scope.alive(token)) {
           if (button) {
-            status.setAttribute('role', 'alert');
-            status.textContent = '历史记录加载失败，请重试。';
+            setReportStatus(status, '更多历史记录加载失败，已保留当前结果。请重试。', 'alert');
             button.disabled = false;
-          } else showRetry();
+            button.focus();
+          } else showRetry(token);
         }
-      } finally { loadingMore = false; }
+      } finally {
+        loadingMore = false;
+        if (scope.alive(token)) view.removeAttribute('aria-busy');
+      }
     };
+
     const load = async () => {
       const token = scope.next();
-      status.setAttribute('role', 'status');
-      status.textContent = '正在加载历史记录…';
+      view.setAttribute('aria-busy', 'true');
+      setReportStatus(status, '正在加载幼儿…', 'status');
       try {
         const childResponse = await scope.run('/api/children?include_inactive=true', {}, token);
         if (!childResponse.current) return;
         const children = parseChildren(childResponse.result);
-        const selector = selectorFor(children, selectedId, '筛选幼儿', '全部幼儿', event => {
-          const id = Number(event.target.value);
-          navigate(id ? `#search?child_id=${id}` : '#search');
-        });
-        controls.replaceChildren(selector.field);
+        const selector = selectorFor(children, selectedId, '筛选幼儿', '全部幼儿', () => {});
+        selectorControl = selector.select;
+        filter.replaceChildren(selector.field, h('button', { type: 'submit', class: 'btn', text: '查看历史' }));
         if (selectedId !== null && !children.some(child => child.id === selectedId)) {
-          status.setAttribute('role', 'alert'); status.textContent = '所选幼儿不存在，请重新选择。'; return;
+          setReportStatus(status, '所选幼儿不存在，请重新选择。', 'alert');
+          selector.select.focus();
+          return;
         }
-        await loadHistory(false);
+        await loadHistory(false, null, token);
       } catch (_error) {
-        if (scope.alive(token)) showRetry();
+        showRetry(token);
+      } finally {
+        if (scope.alive(token)) view.removeAttribute('aria-busy');
       }
     };
     void load();
