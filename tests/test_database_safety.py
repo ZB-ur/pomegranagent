@@ -20,8 +20,12 @@ sys.path.insert(0, str(ROOT))
 from app.backend.settings import (
     DATA_DIR,
     DEFAULT_APP_DB_PATH,
+    DEFAULT_LOG_PATH,
+    DEFAULT_MEDIA_ROOT,
+    DEFAULT_TTS_CACHE_PATH,
     RuntimeSettings,
     UnsafeTestDatabaseError,
+    UnsafeTestRuntimePathError,
     assert_safe_test_database_path,
 )
 
@@ -699,6 +703,73 @@ def test_relative_app_db_path_resolves_from_project_root(monkeypatch):
     settings = RuntimeSettings.from_env()
     assert settings.db_path.is_absolute()
     assert settings.db_path.name == "local-demo.db"
+
+
+def test_runtime_settings_resolve_all_relative_app_paths_and_default_timezone():
+    settings = RuntimeSettings.from_env({
+        "APP_DB_MODE": "app",
+        "APP_DB_PATH": "var/local-demo.db",
+        "APP_MEDIA_ROOT": "var/media",
+        "APP_LOG_PATH": "var/logs/app.log",
+        "APP_TTS_CACHE_PATH": "var/tts-cache",
+    })
+
+    assert settings.db_path == (ROOT / "var/local-demo.db").resolve()
+    assert settings.business_timezone == "Asia/Shanghai"
+    assert settings.media_root == (ROOT / "var/media").resolve()
+    assert settings.log_path == (ROOT / "var/logs/app.log").resolve()
+    assert settings.tts_cache_path == (ROOT / "var/tts-cache").resolve()
+
+
+def test_runtime_settings_reject_invalid_timezone_without_echoing_the_value():
+    secret_value = "Not/AZone-secret-configuration"
+
+    with pytest.raises(RuntimeError) as captured:
+        RuntimeSettings.from_env({
+            "APP_DB_MODE": "app",
+            "APP_BUSINESS_TIMEZONE": secret_value,
+        })
+
+    assert "APP_BUSINESS_TIMEZONE" in str(captured.value)
+    assert secret_value not in str(captured.value)
+
+
+def test_test_mode_derives_every_runtime_path_beside_its_disposable_database(tmp_path: Path):
+    database = (tmp_path / "runtime" / "pytest.db").resolve()
+
+    settings = RuntimeSettings.from_env({
+        "APP_DB_MODE": "test",
+        "APP_DB_PATH": str(database),
+    })
+
+    assert settings.db_path == database
+    assert settings.media_root == database.parent / "media"
+    assert settings.log_path == database.parent / "app.log"
+    assert settings.tts_cache_path == database.parent / "tts-cache"
+
+
+@pytest.mark.parametrize(
+    ("environment_name", "unsafe_path"),
+    [
+        ("APP_MEDIA_ROOT", DEFAULT_MEDIA_ROOT),
+        ("APP_MEDIA_ROOT", DEFAULT_MEDIA_ROOT / "nested"),
+        ("APP_LOG_PATH", DEFAULT_LOG_PATH),
+        ("APP_LOG_PATH", DEFAULT_LOG_PATH / "nested"),
+        ("APP_TTS_CACHE_PATH", DEFAULT_TTS_CACHE_PATH),
+        ("APP_TTS_CACHE_PATH", DEFAULT_TTS_CACHE_PATH / "nested"),
+    ],
+)
+def test_test_mode_rejects_real_runtime_resource_paths(
+    environment_name: str,
+    unsafe_path: Path,
+    tmp_path: Path,
+):
+    with pytest.raises(UnsafeTestRuntimePathError, match="unsafe test runtime path"):
+        RuntimeSettings.from_env({
+            "APP_DB_MODE": "test",
+            "APP_DB_PATH": str(tmp_path / "pytest.db"),
+            environment_name: str(unsafe_path),
+        })
 
 
 @pytest.mark.parametrize("candidate", [DEFAULT_APP_DB_PATH, DATA_DIR / "pytest.db"])

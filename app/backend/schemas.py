@@ -1,9 +1,9 @@
 """Pydantic 请求/响应模型。"""
 from datetime import date, datetime
-from typing import Annotated, Literal, TypeAlias
+from typing import Annotated, Literal, Self, TypeAlias
 from uuid import UUID
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class VersionResponse(BaseModel):
@@ -142,6 +142,18 @@ ReviewQueue: TypeAlias = Literal["pending", "processing", "failed"]
 ReviewStatus: TypeAlias = Literal["pending", "draft", "confirmed", "unavailable"]
 FeedingCategory: TypeAlias = Literal["喂食", "清洁", "观察", "其它"]
 PositiveInt = Annotated[int, Field(gt=0)]
+CanonicalAvatarURL = Annotated[
+    str,
+    Field(
+        pattern=(
+            r"^/api/media/avatars/"
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
+    ),
+]
+MonthString = Annotated[str, Field(pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$")]
+HistorySort: TypeAlias = Literal["completed_desc", "completed_asc"]
 
 
 class MutableRequestModel(BaseModel):
@@ -154,6 +166,167 @@ class StrictResponseModel(BaseModel):
     """Base for frozen public response shapes; unknown output is a contract bug."""
 
     model_config = ConfigDict(extra="forbid")
+
+
+class RuntimeContextResponse(StrictResponseModel):
+    timezone: str
+    business_date: date
+    week_start: date
+    week_end_exclusive: date
+
+
+class ChildMutationRequest(MutableRequestModel):
+    name: str = Field(min_length=1, max_length=64)
+    nickname: str | None = Field(default=None, min_length=1, max_length=64)
+    avatar: CanonicalAvatarURL | None = None
+
+    @field_validator("name", "nickname", "avatar", mode="before")
+    @classmethod
+    def normalize_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class DuckMutationRequest(MutableRequestModel):
+    name: str = Field(min_length=1, max_length=64)
+    avatar: CanonicalAvatarURL | None = None
+    status: str | None = Field(default=None, min_length=1, max_length=255)
+    note: str | None = Field(default=None, min_length=1, max_length=2000)
+
+    @field_validator("name", "avatar", "status", "note", mode="before")
+    @classmethod
+    def normalize_text(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+
+class AvatarMediaResponse(StrictResponseModel):
+    id: UUID
+    url: CanonicalAvatarURL
+    mime_type: Literal["image/webp"]
+    width: PositiveInt
+    height: PositiveInt
+    size_bytes: PositiveInt
+    sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
+class MonthlyRosterEntryRequest(MutableRequestModel):
+    date: date
+    child_ids: list[PositiveInt] = Field(min_length=2, max_length=2)
+
+    @field_validator("child_ids")
+    @classmethod
+    def require_distinct_children(cls, value: list[int]) -> list[int]:
+        if len(set(value)) != 2:
+            raise ValueError("child_ids must contain two distinct child IDs")
+        return value
+
+
+class MonthlyRosterRequest(MutableRequestModel):
+    request_id: UUID
+    month: MonthString
+    cycle: str = Field(min_length=1, max_length=64)
+    entries: list[MonthlyRosterEntryRequest] = Field(min_length=1, max_length=31)
+    replace_existing: bool = False
+
+    @field_validator("month")
+    @classmethod
+    def require_calendar_month(cls, value: str) -> str:
+        try:
+            date.fromisoformat(f"{value}-01")
+        except ValueError:
+            raise ValueError("month must be a valid YYYY-MM calendar month") from None
+        return value
+
+    @field_validator("cycle", mode="before")
+    @classmethod
+    def normalize_cycle(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @model_validator(mode="after")
+    def require_unique_dates_in_month(self) -> Self:
+        entry_dates = [entry.date for entry in self.entries]
+        if len(entry_dates) != len(set(entry_dates)):
+            raise ValueError("entries must contain unique dates")
+        if any(entry_date.strftime("%Y-%m") != self.month for entry_date in entry_dates):
+            raise ValueError("every entry date must belong to month")
+        return self
+
+
+class MonthlyRosterScheduleItem(StrictResponseModel):
+    date: date
+    cycle: str = Field(min_length=1, max_length=64)
+    child_ids: list[PositiveInt] = Field(min_length=2, max_length=2)
+
+    @field_validator("child_ids")
+    @classmethod
+    def require_distinct_children(cls, value: list[int]) -> list[int]:
+        if len(set(value)) != 2:
+            raise ValueError("child_ids must contain two distinct child IDs")
+        return value
+
+
+class MonthlyRosterResponse(StrictResponseModel):
+    request_id: UUID
+    month: MonthString
+    schedule: list[MonthlyRosterScheduleItem]
+    replayed: bool
+
+
+class WeeklyReportResponse(StrictResponseModel):
+    timezone: str
+    week_start: date
+    week_end_exclusive: date
+    completed_conversations: int = Field(ge=0)
+    participating_children: int = Field(ge=0)
+    confirmed_reviews: int = Field(ge=0)
+    failed_analyses: int = Field(ge=0)
+    pending_reviews_total: int = Field(ge=0)
+
+
+class ConversationSearchRequest(MutableRequestModel):
+    child_id: PositiveInt | None = None
+    date_from: date | None = None
+    date_to: date | None = None
+    analysis_status: list[AnalysisJobStatus] = Field(default_factory=list)
+    review_status: list[ReviewStatus] = Field(default_factory=list)
+    end_reason: list[ConversationEndReason] = Field(default_factory=list)
+    keyword: str | None = Field(default=None, min_length=1, max_length=100)
+    sort: HistorySort = "completed_desc"
+    limit: int = Field(default=20, ge=1, le=50)
+    cursor: str | None = Field(
+        default=None,
+        min_length=1,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
+
+    @field_validator("keyword", mode="before")
+    @classmethod
+    def normalize_keyword(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
+    @field_validator("analysis_status", "review_status", "end_reason")
+    @classmethod
+    def require_unique_filter_values(cls, value: list[str]) -> list[str]:
+        if len(value) != len(set(value)):
+            raise ValueError("status filters must contain unique values")
+        return value
+
+    @model_validator(mode="after")
+    def require_valid_inclusive_date_range(self) -> Self:
+        if self.date_from is None or self.date_to is None:
+            return self
+        if self.date_from > self.date_to:
+            raise ValueError("date_from must be before or equal to date_to")
+        if (self.date_to - self.date_from).days > 365:
+            raise ValueError("inclusive date range cannot exceed 366 days")
+        return self
 
 
 class RosterTodayChild(StrictResponseModel):
@@ -257,6 +430,15 @@ class ConversationHistoryItem(StrictResponseModel):
 class ConversationHistoryPage(StrictResponseModel):
     items: list[ConversationHistoryItem]
     next_before_id: PositiveInt | None = None
+
+
+class ConversationSearchPage(StrictResponseModel):
+    items: list[ConversationHistoryItem]
+    next_cursor: str | None = Field(
+        default=None,
+        min_length=1,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    )
 
 
 class AnalysisError(StrictResponseModel):

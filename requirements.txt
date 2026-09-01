@@ -8,6 +8,10 @@ fastapi>=0.110
 uvicorn[standard]>=0.29
 sqlalchemy>=2.0
 pydantic>=2.6
+alembic>=1.13,<2.0
+Pillow>=10.3,<13.0
+python-multipart>=0.0.9,<1.0
+tzdata>=2024.1,<2027.0
 
 # 语音合成（Edge-TTS 神经语音）
 edge-tts>=6.1
