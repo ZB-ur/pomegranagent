@@ -142,6 +142,57 @@ def test_growth_long_history_keeps_all_points_with_bounded_non_overlapping_date_
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_growth_ten_date_history_avoids_rounded_middle_tick_collision(teacher_browser, viewport):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    points = [
+        {"date": "2026-08-01", "score": 1}, {"date": "2026-08-02", "score": 2},
+        {"date": "2026-08-03", "score": 3}, {"date": "2026-08-04", "score": 4},
+        {"date": "2026-08-05", "score": 5}, {"date": "2026-08-06", "score": 1},
+        {"date": "2026-08-07", "score": 2}, {"date": "2026-08-08", "score": 3},
+        {"date": "2026-08-09", "score": 4}, {"date": "2026-08-10", "score": 5},
+    ]
+    expected_chronology = (
+        "2026-08-01 1 分；2026-08-02 2 分；2026-08-03 3 分；2026-08-04 4 分；"
+        "2026-08-05 5 分；2026-08-06 1 分；2026-08-07 2 分；2026-08-08 3 分；"
+        "2026-08-09 4 分；2026-08-10 5 分"
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/analysis/growth?child_id=7",
+        lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({
+            "child_id": 7,
+            "dimensions": [{"key": "language", "name": "语言表达能力", "points": points}],
+        }, ensure_ascii=False)),
+    )
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#growth?child_id=7", wait_until="domcontentloaded")
+    setup(page)
+    chronology = page.locator(".growth-data-series p")
+    chronology.wait_for()
+    assert chronology.inner_text() == expected_chronology
+    assert page.locator(".report-chart circle").count() == 10
+
+    svg_box = page.locator(".report-chart svg").bounding_box()
+    tick_boxes = page.locator(".report-chart-date").evaluate_all("""nodes => nodes.map(node => {
+      const rect = node.getBoundingClientRect();
+      return {left: rect.left, right: rect.right, text: node.textContent};
+    })""")
+    assert svg_box is not None
+    assert tick_boxes[0]["text"] == "2026-08-01"
+    assert tick_boxes[-1]["text"] == "2026-08-10"
+    svg_left = svg_box["x"]
+    svg_right = svg_box["x"] + svg_box["width"]
+    assert all(tick["left"] >= svg_left - 0.5 for tick in tick_boxes), tick_boxes
+    assert all(tick["right"] <= svg_right + 0.5 for tick in tick_boxes), tick_boxes
+    assert all(left["right"] <= right["left"] for left, right in zip(tick_boxes, tick_boxes[1:])), tick_boxes
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_growth_unselected_is_visible_non_live_and_skips_growth_request(teacher_browser, viewport):
     context = teacher_browser.new_context()
     page = context.new_page()

@@ -255,12 +255,22 @@ export function createReportRoutes(value) {
       label.textContent = String(score);
       svg.append(gridLine, label);
     }
-    const maximumDateTicks = 6;
-    const dateTicks = result.dates.length <= maximumDateTicks
-      ? result.dates
-      : Array.from({ length: maximumDateTicks }, (_item, index) => (
-        result.dates[Math.round(index * (result.dates.length - 1) / (maximumDateTicks - 1))]
-      ));
+    const minimumDateTickSpacing = 96;
+    const dateTicks = [];
+    if (result.dates.length) {
+      const firstDate = result.dates[0];
+      const lastDate = result.dates.at(-1);
+      const lastX = pointX(lastDate);
+      let previousX = pointX(firstDate);
+      dateTicks.push(firstDate);
+      for (const date of result.dates.slice(1, -1)) {
+        const x = pointX(date);
+        if (x - previousX < minimumDateTickSpacing || lastX - x < minimumDateTickSpacing) continue;
+        dateTicks.push(date);
+        previousX = x;
+      }
+      if (lastDate !== firstDate) dateTicks.push(lastDate);
+    }
     for (const date of dateTicks) {
       const label = document.createElementNS(namespace, 'text');
       label.setAttribute('x', String(pointX(date)));
