@@ -7,15 +7,17 @@ import { createDirtyGuard } from './dirty-guard.mjs';
 
 const main = document.getElementById('main');
 const nav = document.getElementById('nav');
+const topbarTitle = document.querySelector('.teacher-topbar-title');
+const topbarActions = document.querySelector('.teacher-topbar-actions');
 const reviewDirtyGuard = createDirtyGuard({ window, document });
 const teacherRouteManifest = [
-  { route: 'today' },
-  { route: 'children' },
-  { route: 'ducks' },
-  { route: 'roster' },
-  { route: 'review' },
-  { route: 'growth' },
-  { route: 'search' },
+  { route: 'today', title: '今日任务' },
+  { route: 'children', title: '幼儿管理' },
+  { route: 'ducks', title: '小鸭管理' },
+  { route: 'roster', title: '值日排班' },
+  { route: 'review', title: '值日审阅' },
+  { route: 'growth', title: '能力成长曲线' },
+  { route: 'search', title: '明细检索' },
 ];
 let runtimeReady = false;
 let teacherAuthenticated = false;
@@ -44,6 +46,10 @@ function clearTeacherPin() {
   currentPinInput = null;
 }
 
+function setTeacherTopbarTitle(title = '安全设置') {
+  topbarTitle.textContent = title;
+}
+
 function updateTeacherNavigation() {
   const enabled = runtimeReady && teacherAuthenticated;
   if (!enabled) {
@@ -56,13 +62,21 @@ function updateTeacherNavigation() {
 }
 
 function renderTeacherLocked(message) {
+  setTeacherTopbarTitle();
   main.replaceChildren();
-  const card = h('section', { class: 'card', role: 'status' });
+  const view = h('section', { class: 'teacher-auth-view' });
+  const card = h('section', { class: 'card teacher-auth-card', role: 'status' });
   card.append(h('h2', null, '教师端已锁定'), h('p', { class: 'muted' }, message));
-  main.append(card);
+  view.append(card);
+  main.append(view);
 }
 
 function setLockFeedback(message) {
+  if (!message) {
+    if (lockFeedback) lockFeedback.remove();
+    lockFeedback = null;
+    return;
+  }
   if (!lockFeedback) {
     lockFeedback = h('p', {
       id: 'teacher-lock-feedback',
@@ -70,7 +84,7 @@ function setLockFeedback(message) {
       role: 'alert',
       'aria-live': 'assertive',
     });
-    document.querySelector('aside').append(lockFeedback);
+    topbarActions.prepend(lockFeedback);
   }
   lockFeedback.textContent = message;
 }
@@ -79,11 +93,25 @@ function ensureLockButton() {
   if (lockButton) return;
   lockButton = h('button', { class: 'btn gray teacher-lock-button', type: 'button' }, '立即锁定');
   lockButton.addEventListener('click', lockTeacherPage);
-  document.querySelector('aside').append(lockButton);
+  topbarActions.append(lockButton);
+}
+
+function removeLockButton() {
+  if (!lockButton) return;
+  lockButton.remove();
+  lockButton = null;
 }
 
 function authenticationErrorCopy(error) {
   return error && error.code === 'PIN_INVALID' ? 'PIN 不正确' : '暂时无法完成教师验证，请稍后重试。';
+}
+
+function withTeacherRouteTitle(title, loader) {
+  if (typeof loader !== 'function') return loader;
+  return context => {
+    setTeacherTopbarTitle(title);
+    return loader(context);
+  };
 }
 
 function startTeacherRouter() {
@@ -112,11 +140,11 @@ function startTeacherRouter() {
       createAbortController: () => new AbortController(),
       dirtyGuard: reviewDirtyGuard,
     });
-    const routes = Object.fromEntries(teacherRouteManifest.map(({ route }) => [
+    const routes = Object.fromEntries(teacherRouteManifest.map(({ route, title }) => [
       route,
-      route === 'today' ? today
+      withTeacherRouteTitle(title, route === 'today' ? today
         : route === 'review' ? review
-          : managementRoutes[route] || reportRoutes[route],
+          : managementRoutes[route] || reportRoutes[route]),
     ]));
     teacherRouter = createTeacherRouter({
       window,
@@ -157,9 +185,33 @@ async function unlockTeacherPage() {
 
   teacherAuthenticated = false;
   updateTeacherNavigation();
+  removeLockButton();
+  setLockFeedback('');
+  setTeacherTopbarTitle();
   return new Promise(resolve => {
     main.replaceChildren();
-    const form = h('form', { class: 'card' });
+    const view = h('section', {
+      class: 'teacher-auth-view',
+      'aria-labelledby': 'teacher-auth-title',
+    });
+    const intro = h('div', { class: 'teacher-auth-intro' });
+    intro.append(
+      h('p', { class: 'teacher-auth-eyebrow' }, auth.configured ? '教师端安全验证' : '首次使用 · 教师端安全设置'),
+      h('h2', { id: 'teacher-auth-title' }, auth.configured ? '教师端已锁定' : '首次设置教师 PIN'),
+      h(
+        'p',
+        { class: 'teacher-auth-description' },
+        auth.configured
+          ? '输入教师 PIN 后继续。验证只在本机当前浏览器会话生效。'
+          : '这个 PIN 只用于保护教师端。幼儿端不会看到，也不会保存到页面内容中。',
+      ),
+    );
+    const form = h('form', { class: 'card teacher-auth-card' });
+    const formHeader = h('div', { class: 'teacher-auth-card-header' });
+    formHeader.append(
+      h('p', { class: 'teacher-auth-card-title' }, auth.configured ? '输入 4–6 位数字 PIN' : '设置 4–6 位数字 PIN'),
+      h('span', { class: 'teacher-auth-local-badge' }, '仅本机验证'),
+    );
     const inputId = 'teacher-pin';
     const label = h('label', { for: inputId }, auth.configured ? '教师 PIN' : '设置教师 PIN');
     const input = h('input', {
@@ -173,14 +225,25 @@ async function unlockTeacherPage() {
       required: 'required',
     });
     currentPinInput = input;
-    const feedback = h('p', { role: 'alert', 'aria-live': 'assertive' });
-    const submit = h('button', { class: 'btn', type: 'submit' }, auth.configured ? '解锁' : '设置并解锁');
-    form.append(
-      h('h2', null, auth.configured ? '教师端已锁定' : '首次设置教师 PIN'),
+    const field = h('div', { class: 'teacher-auth-field' });
+    field.append(
       label,
       input,
-      submit,
+      h('p', { class: 'teacher-auth-hint' }, '使用容易记住、但不易被幼儿猜到的数字'),
+    );
+    const privacy = h('div', { class: 'teacher-auth-privacy' });
+    privacy.append(
+      h('span', { class: 'teacher-auth-privacy-icon', 'aria-hidden': 'true' }, 'i'),
+      h('p', null, '系统不会在界面、注释或演示数据中显示真实 PIN。'),
+    );
+    const feedback = h('p', { class: 'teacher-auth-feedback', role: 'alert', 'aria-live': 'assertive' });
+    const submit = h('button', { class: 'btn', type: 'submit' }, auth.configured ? '解锁' : '设置并解锁');
+    form.append(
+      formHeader,
+      field,
+      privacy,
       feedback,
+      submit,
     );
     form.addEventListener('submit', async event => {
       event.preventDefault();
@@ -202,7 +265,18 @@ async function unlockTeacherPage() {
         input.focus();
       }
     });
-    main.append(form);
+    view.append(
+      intro,
+      form,
+      h(
+        'p',
+        { class: 'teacher-auth-footer' },
+        auth.configured
+          ? '解锁后将返回当前任务；关闭浏览器后需要重新验证。'
+          : '设置完成后将进入今日任务；所有业务导航会在解锁后可用。',
+      ),
+    );
+    main.append(view);
     input.focus();
   });
 }
@@ -213,6 +287,8 @@ function handleTeacherBootstrapFailure(_error) {
   teacherRouter = null;
   teacherAuthenticated = false;
   updateTeacherNavigation();
+  removeLockButton();
+  setLockFeedback('');
   renderTeacherLocked('教师端暂不可用，请稍后重试。');
 }
 
@@ -234,8 +310,7 @@ async function lockTeacherPage() {
   teacherRouter = null;
   teacherAuthenticated = false;
   updateTeacherNavigation();
-  button.remove();
-  if (lockButton === button) lockButton = null;
+  removeLockButton();
   renderTeacherLocked('教师端已锁定，重新输入 PIN 后可继续。');
   try {
     await unlockTeacherPage();

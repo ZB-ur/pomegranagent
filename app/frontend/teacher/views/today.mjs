@@ -185,14 +185,18 @@ function localDateLabel(now) {
   }
 }
 
-function createPanel(document, key, title, loadingCopy) {
+function createPanel(document, key, title, subtitle, loadingCopy, tone) {
   const status = createElement(document, 'p', {
-    class: 'today-panel-status muted', role: 'status', 'aria-live': 'polite',
+    class: 'today-panel-status today-status-badge muted', role: 'status', 'aria-live': 'polite',
   }, loadingCopy);
   const body = createElement(document, 'div', { class: 'today-panel-body' });
+  const heading = createElement(document, 'div', { class: 'today-panel-heading' },
+    createElement(document, 'h2', null, title),
+    createElement(document, 'p', { class: 'today-panel-subtitle muted' }, subtitle));
+  const header = createElement(document, 'header', { class: 'today-panel-header' }, heading, status);
   const panel = createElement(document, 'section', {
-    class: 'card today-panel', 'data-today-panel': key, 'aria-busy': 'true',
-  }, createElement(document, 'h2', null, title), status, body);
+    class: 'card today-panel', 'data-today-panel': key, 'data-tone': tone, 'aria-busy': 'true',
+  }, header, body);
   return { panel, status, body };
 }
 
@@ -256,7 +260,7 @@ function formatCompletedTime(value) {
 
 function queueRowView(state, queue, row) {
   const name = displayName(row.child);
-  const container = createElement(state.document, 'article', { class: 'today-queue-row' });
+  const container = createElement(state.document, 'article', { class: 'today-panel-row today-queue-row' });
   const label = queue === 'pending'
     ? createElement(state.document, 'a', {
       class: 'today-review-link', href: `#review?conversation_id=${row.id}`,
@@ -267,7 +271,8 @@ function queueRowView(state, queue, row) {
   const details = createElement(state.document, 'p', { class: 'muted today-row-details' },
     `完成于 ${formatCompletedTime(row.completed_at)} · `, conversation,
     ` · ${row.round} 轮 · ${queueStatusLabel(queue)}`);
-  container.append(label, details);
+  const tag = createElement(state.document, 'span', { class: 'today-row-tag' }, queueStatusLabel(queue));
+  container.append(label, details, tag);
   if (queue === 'failed') {
     const action = createElement(state.document, 'button', {
       class: 'btn gray today-analysis-retry', type: 'button',
@@ -293,9 +298,11 @@ function setPanelRows(state, key, rows) {
   const list = createElement(state.document, 'div', { class: 'today-list' });
   if (key === 'roster') {
     for (const row of rows) {
-      list.append(createElement(state.document, 'a', {
-        class: 'today-roster-link', href: '#roster',
-      }, displayName(row)));
+      list.append(createElement(state.document, 'article', { class: 'today-panel-row today-roster-row' },
+        createElement(state.document, 'a', {
+          class: 'today-roster-link', href: '#roster',
+        }, displayName(row)),
+        createElement(state.document, 'span', { class: 'today-row-tag' }, '值日')));
     }
   } else {
     for (const row of rows) list.append(queueRowView(state, key, row));
@@ -311,22 +318,58 @@ export function createTodayRoute(dependencies) {
     const headerDate = localDateLabel(validated.now);
     if (!isCurrent() || signal.aborted) return undefined;
     const shell = createElement(validated.document, 'div', { class: 'view active today-view' });
-    const header = createElement(validated.document, 'header', { class: 'today-header' },
+    const hero = createElement(validated.document, 'header', { class: 'today-header today-hero' },
       createElement(validated.document, 'p', { class: 'today-eyebrow' }, '教师工作台'),
-      createElement(validated.document, 'h1', null, '今日任务'),
+      createElement(validated.document, 'h1', { 'aria-label': '今日任务' },
+        createElement(validated.document, 'span', {
+          class: 'teacher-sr-only', 'aria-hidden': 'true',
+        }, '今日任务'),
+        createElement(validated.document, 'span', null, '今天的工作，一眼看清')),
       createElement(validated.document, 'p', { class: 'today-date muted' }, headerDate),
+      createElement(validated.document, 'p', { class: 'today-hero-description muted' }, '每个面板独立加载与恢复，不让一个失败拖住整页。'),
       createElement(validated.document, 'p', { class: 'today-auth' }, '已解锁 · 仅本次浏览器会话'));
-    const roster = createPanel(validated.document, 'roster', '今日值日生', '正在加载今日排班…');
+    const roster = createPanel(
+      validated.document,
+      'roster',
+      '今日值日生',
+      '两名值日幼儿',
+      '正在加载今日排班…',
+      'success',
+    );
     const startConversation = createElement(validated.document, 'a', {
       class: 'btn today-start-link', href: '/index.html', target: '_blank', rel: 'noopener',
     }, '开始幼儿对话');
-    const pending = createPanel(validated.document, 'pending', '待审阅', '正在加载待审阅会话…');
-    const processing = createPanel(validated.document, 'processing', '分析中', '正在加载分析中会话…');
-    const failed = createPanel(validated.document, 'failed', '分析失败', '正在加载分析失败会话…');
-    const auxiliary = createElement(validated.document, 'section', { class: 'card today-panel today-auxiliary' },
+    roster.panel.append(startConversation);
+    const pending = createPanel(
+      validated.document,
+      'pending',
+      '待审阅',
+      '需要老师确认的会话',
+      '正在加载待审阅会话…',
+      'warning',
+    );
+    const processing = createPanel(
+      validated.document,
+      'processing',
+      '分析中',
+      '后台正在整理内容',
+      '正在加载分析中会话…',
+      'info',
+    );
+    const failed = createPanel(
+      validated.document,
+      'failed',
+      '分析失败',
+      '原会话仍安全保留',
+      '正在加载分析失败会话…',
+      'danger',
+    );
+    const grid = createElement(validated.document, 'div', { class: 'today-panel-grid' },
+      roster.panel, pending.panel, processing.panel, failed.panel);
+    const auxiliary = createElement(validated.document, 'section', { class: 'card today-panel today-auxiliary today-metrics-strip' },
       createElement(validated.document, 'h2', null, '辅助指标'),
       createElement(validated.document, 'p', { class: 'muted' }, '本周指标暂不可用'));
-    shell.append(header, roster.panel, startConversation, pending.panel, processing.panel, failed.panel, auxiliary);
+    shell.append(hero, grid, auxiliary);
     if (!isCurrent() || signal.aborted) return undefined;
     root.replaceChildren(shell);
 

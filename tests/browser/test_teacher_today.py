@@ -273,9 +273,12 @@ def test_teacher_today_uses_the_approved_hero_and_two_column_panel_grid(
 
     hero_box = hero.bounding_box()
     grid_box = grid.bounding_box()
-    assert hero_box is not None and grid_box is not None
+    metrics_box = page.locator(".today-metrics-strip").bounding_box()
+    assert hero_box is not None and grid_box is not None and metrics_box is not None
     assert hero_box["y"] + hero_box["height"] <= grid_box["y"]
     assert grid_box["width"] >= hero_box["width"] * 0.95
+    assert grid_box["y"] + grid_box["height"] <= metrics_box["y"]
+    assert metrics_box["height"] <= 64
     assert page.get_by_text("本周指标暂不可用", exact=True).count() == 1
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"

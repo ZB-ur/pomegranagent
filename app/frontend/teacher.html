@@ -9,9 +9,15 @@
 </head>
 <body>
 <a class="skip-link" href="#main">跳到主要内容</a>
-<div class="layout">
-  <aside>
-    <div class="logo"><img class="teacher-logo" src="/assets/duck-front-logo.png" alt="鸭鸭日记本">鸭鸭日记本</div>
+<div class="layout teacher-shell">
+  <aside class="teacher-sidebar">
+    <div class="teacher-brand">
+      <img class="teacher-logo" src="/assets/duck-front-logo.png" alt="">
+      <span class="teacher-brand-copy">
+        <span class="teacher-brand-name">鸭鸭日记本</span>
+        <span class="teacher-brand-context">教师端</span>
+      </span>
+    </div>
     <nav class="nav" id="nav" aria-busy="true">
       <button data-v="today" class="active" disabled>今日任务</button>
       <button data-v="children" disabled>幼儿管理</button>
@@ -21,8 +27,15 @@
       <button data-v="growth" disabled>能力成长曲线</button>
       <button data-v="search" disabled>明细检索</button>
     </nav>
+    <p class="teacher-sidebar-note">仅限教师使用</p>
   </aside>
-  <main id="main" tabindex="-1"></main>
+  <div class="teacher-stage">
+    <header class="teacher-topbar">
+      <p class="teacher-topbar-title">安全设置</p>
+      <div class="teacher-topbar-actions"></div>
+    </header>
+    <main id="main" tabindex="-1"></main>
+  </div>
 </div>
 <script src="/shared/api.js"></script>
 <script src="/shared/auth.js"></script>
