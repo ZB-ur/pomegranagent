@@ -195,6 +195,7 @@ def test_teacher_route_inventory_has_the_session_dependency():
         ("PATCH", "/api/conversations/{}/logs"),
         ("GET", "/api/analysis/growth"),
         ("GET", "/api/analysis/overview"),
+        ("POST", "/api/media/avatars"),
     }
     expected_methods = {
         "/api/auth/status": {"GET"},
@@ -234,6 +235,9 @@ def test_teacher_route_inventory_has_the_session_dependency():
         "/api/tts": {"GET"},
         "/api/analysis/growth": {"GET"},
         "/api/analysis/overview": {"GET"},
+        "/api/runtime/context": {"GET"},
+        "/api/media/avatars": {"POST"},
+        "/api/media/avatars/{}": {"GET"},
     }
 
     effective_routes = _effective_routes(app.router.routes)
@@ -258,6 +262,8 @@ def test_teacher_route_inventory_has_the_session_dependency():
         ("POST", "/api/conversations/{}/complete"),
         ("POST", "/api/chat"),
         ("POST", "/api/conversations/{}/finalize"),
+        ("GET", "/api/runtime/context"),
+        ("GET", "/api/media/avatars/{}"),
     }:
         route = next(
             route
@@ -294,6 +300,11 @@ def test_teacher_routes_require_session_and_child_surface_remains_public(client)
     assert client.get("/api/health").status_code == 200
     assert client.get("/version.json").status_code == 200
     assert client.get("/api/roster/today").status_code == 200
+    missing_avatar = client.get(
+        "/api/media/avatars/11111111-1111-4111-8111-111111111111"
+    )
+    assert missing_avatar.status_code == 404
+    assert missing_avatar.json()["error"]["code"] == "AVATAR_NOT_FOUND"
     unknown_chat = client.post("/api/chat", json={"request_id": str(uuid4()), "child_id": 99999, "text": "你好"})
     assert unknown_chat.status_code == 404
     assert unknown_chat.json()["error"]["code"] == "CHILD_NOT_FOUND"
@@ -301,3 +312,25 @@ def test_teacher_routes_require_session_and_child_surface_remains_public(client)
     assert finalize.status_code == 410
     assert finalize.json()["error"]["code"] == "LEGACY_ENDPOINT_REMOVED"
     assert client.get("/api/tts", params={"text": ""}).status_code == 400
+
+
+def test_avatar_upload_authentication_precedes_multipart_validation(client):
+    response = client.post(
+        "/api/media/avatars",
+        content=b"not multipart",
+        headers={
+            "Content-Type": "multipart/form-data; boundary=broken",
+            "Content-Length": str(6 * 1024 * 1024),
+            "X-Request-ID": "avatar-auth-first",
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.headers["x-request-id"] == "avatar-auth-first"
+    assert response.json()["error"] == {
+        "code": "TEACHER_AUTH_REQUIRED",
+        "message": "请先输入教师 PIN 解锁",
+        "field_errors": {},
+        "retryable": False,
+        "request_id": "avatar-auth-first",
+    }

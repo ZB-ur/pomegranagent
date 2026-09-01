@@ -632,6 +632,34 @@ test('groups empty roster and renders ordered safe local avatar fallbacks with f
   assert.equal(fake.root.textContent.includes('https://example.invalid/avatar.png'), false);
 });
 
+test('renders only canonical same-origin avatar images and falls back on the first image error', () => {
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions(), fake.dom);
+  const canonical = '/api/media/avatars/a30a6409-58b8-48f0-96f0-8ff679bebed7';
+  view.render(snapshotFor('selecting_child', { roster: [
+    { id: 7, name: '小雨', nickname: '雨点', avatar: canonical },
+    { id: 8, name: '外链', nickname: null, avatar: 'https://example.invalid/avatar.png' },
+    { id: 9, name: '脚本', nickname: null, avatar: 'javascript:alert(1)' },
+    { id: 10, name: '数据', nickname: null, avatar: 'data:image/png;base64,AAAA' },
+    { id: 11, name: '破损', nickname: null, avatar: `${canonical}?cache=1` },
+  ] }));
+
+  const cards = findAll(fake.root, node => node.getAttribute?.('class') === 'child-card');
+  const canonicalAvatar = find(cards[0], node => node.getAttribute?.('class') === 'child-card__avatar');
+  const image = find(canonicalAvatar, node => node.tagName === 'IMG');
+  assert.ok(image);
+  assert.equal(image.getAttribute('src'), canonical);
+  assert.equal(image.getAttribute('alt'), '');
+  assert.equal(cards.reduce((count, card) => count + findAll(card, node => node.tagName === 'IMG').length, 0), 1);
+  for (const card of cards.slice(1)) assert.equal(findAll(card, node => node.tagName === 'IMG').length, 0);
+
+  for (const listener of image.listeners.get('error') ?? []) listener({ target: image });
+  assert.equal(findAll(canonicalAvatar, node => node.tagName === 'IMG').length, 0);
+  assert.equal(canonicalAvatar.textContent, '雨');
+  for (const listener of image.listeners.get('error') ?? []) listener({ target: image });
+  assert.equal(canonicalAvatar.textContent, '雨');
+});
+
 test('normalizes one grapheme-visible roster label for native text and avatar fallback', () => {
   const fake = createFakeDOM();
   const view = createChildView(fake.root, actions(), fake.dom);

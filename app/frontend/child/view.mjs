@@ -1,4 +1,5 @@
 import { STATES, assertSnapshot, controlsFor } from './machine.mjs';
+import { renderAvatarImage } from '../shared/avatar.mjs';
 
 const ACTION_KEYS = Object.freeze([
   'onStart',
@@ -441,8 +442,9 @@ export function createChildView(root, actions, dom) {
         token: 'select-child',
         className: 'child-card',
       });
-      const avatar = element('span', { class: 'child-card__avatar', 'aria-hidden': 'true' });
-      appendText(avatar, labelGraphemes[0]);
+      const avatar = renderAvatarImage(dom, rosterChild.avatar, labelGraphemes[0]);
+      setAttribute(avatar, 'class', 'child-card__avatar');
+      setAttribute(avatar, 'aria-hidden', 'true');
       const label = element('span', { class: 'child-card__label' });
       appendText(label, visibleLabel);
       replaceChildren(card, avatar, label);

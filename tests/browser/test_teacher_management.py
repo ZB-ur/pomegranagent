@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 import re
 from urllib.parse import parse_qs, urlsplit
 
@@ -8,8 +9,12 @@ from tests.browser.conftest import is_exact_fixture_url
 
 
 PIN = "1234"
-VIEWPORTS = [{"width": 1024, "height": 768}, {"width": 1440, "height": 900}]
-VIEWPORT_IDS = ["1024x768", "1440x900"]
+VIEWPORTS = [{"width": 1024, "height": 576}, {"width": 1280, "height": 720}]
+VIEWPORT_IDS = ["1024x576", "1280x720"]
+ROOT = Path(__file__).resolve().parents[2]
+OLD_AVATAR = "/api/media/avatars/a30a6409-58b8-48f0-96f0-8ff679bebed7"
+NEW_AVATAR_ID = "b30a6409-58b8-48f0-96f0-8ff679bebed7"
+NEW_AVATAR = f"/api/media/avatars/{NEW_AVATAR_ID}"
 
 
 def open_teacher(teacher_browser, viewport, fragment):
@@ -89,7 +94,7 @@ def test_children_page_owns_create_dialog_instead_of_a_persistent_form(teacher_b
 def test_children_management_is_labeled_strict_and_never_sends_delete(teacher_browser, viewport):
     calls = []
     rows = [{
-        "id": 7, "name": "小雨", "nickname": "雨雨", "avatar": "/media/rain.png",
+        "id": 7, "name": "小雨", "nickname": "雨雨", "avatar": OLD_AVATAR,
         "active": True, "deactivated_at": None, "future_roster_entries": 2,
         "has_active_conversation": False,
     }]
@@ -123,8 +128,8 @@ def test_children_management_is_labeled_strict_and_never_sends_delete(teacher_br
     create_launcher.click()
     create_dialog = page.get_by_role("dialog", name="新增幼儿", exact=True)
     create_dialog.wait_for()
-    create_dialog.get_by_text(re.compile(r"图片上传.*待后续开放")).wait_for()
-    assert create_dialog.locator('input[type="file"]').count() == 0
+    create_dialog.get_by_text(re.compile(r"JPEG.*PNG.*WebP")).wait_for()
+    assert create_dialog.get_by_label("头像图片", exact=True).count() == 1
     create_dialog.get_by_label("幼儿姓名", exact=True).fill("  新幼儿  ")
     create_dialog.get_by_label("小名", exact=True).fill("  小新  ")
     create_dialog.get_by_role(
@@ -140,8 +145,8 @@ def test_children_management_is_labeled_strict_and_never_sends_delete(teacher_br
     edit_dialog.wait_for()
     assert edit_dialog.get_by_label("幼儿姓名", exact=True).input_value() == "小雨"
     assert edit_dialog.get_by_label("小名", exact=True).input_value() == "雨雨"
-    edit_dialog.get_by_text(re.compile(r"图片上传.*待后续开放")).wait_for()
-    assert edit_dialog.locator('input[type="file"]').count() == 0
+    edit_dialog.get_by_text(re.compile(r"JPEG.*PNG.*WebP")).wait_for()
+    assert edit_dialog.get_by_label("头像图片", exact=True).count() == 1
     edit_dialog.get_by_label("幼儿姓名", exact=True).fill("  小雨更新  ")
     edit_dialog.get_by_label("小名", exact=True).fill("")
     edit_dialog.get_by_role("button", name="保存幼儿", exact=True).click()
@@ -157,7 +162,7 @@ def test_children_management_is_labeled_strict_and_never_sends_delete(teacher_br
     assert json.loads(mutations[1][2]) == {
         "name": "小雨更新",
         "nickname": None,
-        "avatar": "/media/rain.png",
+        "avatar": OLD_AVATAR,
     }
     assert "/api/children/7" in mutations[1][1]
     assert any(parse_qs(urlsplit(call[1]).query) == {"include_inactive": ["true"]} for call in calls)
@@ -173,7 +178,7 @@ def test_ducks_create_and_edit_use_page_owned_dialogs_and_preserve_dto(
     rows = [{
         "id": 9,
         "name": "小黄",
-        "avatar": "/media/duck.png",
+        "avatar": OLD_AVATAR,
         "status": "活泼",
         "note": "喜欢晒太阳",
         "active": True,
@@ -222,8 +227,8 @@ def test_ducks_create_and_edit_use_page_owned_dialogs_and_preserve_dto(
     create_dialog = page.get_by_role("dialog", name="新增小鸭", exact=True)
     create_dialog.wait_for()
     assert create_dialog.evaluate("node => node.tagName === 'DIALOG'")
-    create_dialog.get_by_text(re.compile(r"图片上传.*待后续开放")).wait_for()
-    assert create_dialog.locator('input[type="file"]').count() == 0
+    create_dialog.get_by_text(re.compile(r"JPEG.*PNG.*WebP")).wait_for()
+    assert create_dialog.get_by_label("头像图片", exact=True).count() == 1
     page.keyboard.press("Escape")
     create_dialog.wait_for(state="detached")
     assert create_launcher.evaluate("button => document.activeElement === button")
@@ -246,7 +251,7 @@ def test_ducks_create_and_edit_use_page_owned_dialogs_and_preserve_dto(
     assert edit_dialog.get_by_label("小鸭名字", exact=True).input_value() == "小黄"
     assert edit_dialog.get_by_label("状态", exact=True).input_value() == "活泼"
     assert edit_dialog.get_by_label("备注", exact=True).input_value() == "喜欢晒太阳"
-    assert edit_dialog.locator('input[type="file"]').count() == 0
+    assert edit_dialog.get_by_label("头像图片", exact=True).count() == 1
     edit_dialog.get_by_label("状态", exact=True).fill("  休息中  ")
     edit_dialog.get_by_label("备注", exact=True).fill("")
     edit_dialog.get_by_role("button", name="保存小鸭", exact=True).click()
@@ -265,7 +270,7 @@ def test_ducks_create_and_edit_use_page_owned_dialogs_and_preserve_dto(
     }
     assert json.loads(mutations[1][2]) == {
         "name": "小黄",
-        "avatar": "/media/duck.png",
+        "avatar": OLD_AVATAR,
         "status": "休息中",
         "note": None,
     }
@@ -275,6 +280,204 @@ def test_ducks_create_and_edit_use_page_owned_dialogs_and_preserve_dto(
         for call in calls
     )
     assert all(call[0] != "DELETE" for call in calls)
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_avatar_preview_upload_retry_save_and_remove_are_ordered_and_retained(
+    teacher_browser,
+    viewport,
+):
+    row = {
+        "id": 7,
+        "name": "小雨",
+        "nickname": "雨雨",
+        "avatar": OLD_AVATAR,
+        "active": True,
+        "deactivated_at": None,
+        "future_roster_entries": 2,
+        "has_active_conversation": False,
+    }
+    calls = []
+    upload_request_ids = []
+    resource_attempts = 0
+
+    def children(route):
+        nonlocal resource_attempts
+        if route.request.method == "PUT":
+            body = json.loads(route.request.post_data)
+            calls.append(("resource", body, route.request.headers["x-request-id"]))
+            resource_attempts += 1
+            if resource_attempts == 1:
+                route.fulfill(
+                    status=503,
+                    content_type="application/json",
+                    body=json.dumps({"error": {
+                        "code": "RESOURCE_WRITE_UNAVAILABLE",
+                        "message": "private resource detail",
+                        "field_errors": {},
+                        "retryable": True,
+                        "request_id": "server-resource-request",
+                    }}),
+                )
+                return
+            row.update({
+                "name": body["name"],
+                "nickname": body["nickname"],
+                "avatar": body["avatar"],
+            })
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "id": 7,
+                    "name": row["name"],
+                    "nickname": row["nickname"],
+                    "avatar": row["avatar"],
+                    "active": True,
+                }, ensure_ascii=False),
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([row], ensure_ascii=False),
+        )
+
+    def upload(route):
+        calls.append(("upload", route.request.headers.get("content-type"), None))
+        upload_request_ids.append(route.request.headers["x-request-id"])
+        assert route.request.post_data_buffer is not None
+        assert b"avatar.png" in route.request.post_data_buffer
+        if len(upload_request_ids) == 1:
+            route.fulfill(
+                status=503,
+                content_type="application/json",
+                body=json.dumps({"error": {
+                    "code": "AVATAR_STORAGE_UNAVAILABLE",
+                    "message": "private storage detail",
+                    "field_errors": {},
+                    "retryable": True,
+                    "request_id": "server-request",
+                }}),
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "id": NEW_AVATAR_ID,
+                "url": NEW_AVATAR,
+                "mime_type": "image/webp",
+                "width": 128,
+                "height": 128,
+                "size_bytes": 4096,
+                "sha256": "ab" * 32,
+            }),
+        )
+
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    page.add_init_script("""
+      (() => {
+        const create = URL.createObjectURL.bind(URL);
+        const revoke = URL.revokeObjectURL.bind(URL);
+        window.__avatarObjectURLs = { created: [], revoked: [] };
+        URL.createObjectURL = value => {
+          const url = create(value);
+          window.__avatarObjectURLs.created.push(url);
+          return url;
+        };
+        URL.revokeObjectURL = url => {
+          window.__avatarObjectURLs.revoked.push(url);
+          return revoke(url);
+        };
+      })();
+    """)
+    page.route(f"{teacher_browser.server.base_url}/api/children**", children)
+    page.route(f"{teacher_browser.server.base_url}/api/media/avatars", upload)
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#children",
+        wait_until="domcontentloaded",
+    )
+    setup(page)
+
+    launcher = page.get_by_role("button", name="编辑：雨雨", exact=True)
+    launcher.click()
+    dialog = page.get_by_role("dialog", name="修改幼儿：雨雨", exact=True)
+    name = dialog.get_by_label("幼儿姓名", exact=True)
+    file_input = dialog.get_by_label("头像图片", exact=True)
+    name.fill("  小雨更新  ")
+    file_input.set_input_files({
+        "name": "avatar.png",
+        "mimeType": "image/png",
+        "buffer": (ROOT / "app/frontend/assets/duck-front-128.png").read_bytes(),
+    })
+    preview = dialog.locator("[data-avatar-preview] img")
+    preview.wait_for()
+    assert preview.get_attribute("alt") == ""
+    assert preview.get_attribute("src").startswith("blob:")
+    geometry = dialog.evaluate("""
+      node => {
+        const preview = node.querySelector('[data-avatar-preview]').getBoundingClientRect();
+        const controls = node.querySelector('.management-avatar-controls').getBoundingClientRect();
+        const bounds = node.getBoundingClientRect();
+        return {
+          overlap: !(preview.right <= controls.left || controls.right <= preview.left ||
+            preview.bottom <= controls.top || controls.bottom <= preview.top),
+          top: bounds.top,
+          bottom: bounds.bottom,
+          viewport: innerHeight,
+        };
+      }
+    """)
+    assert geometry["overlap"] is False
+    assert geometry["top"] >= 0
+    assert geometry["bottom"] <= geometry["viewport"]
+
+    save = dialog.get_by_role("button", name="保存幼儿", exact=True)
+    save.click()
+    dialog.get_by_text("头像上传失败，表单内容已保留，请重试。", exact=True).wait_for()
+    assert name.input_value() == "  小雨更新  "
+    assert file_input.input_value().endswith("avatar.png")
+    assert [call[0] for call in calls] == ["upload"]
+    assert "private storage detail" not in dialog.inner_text()
+
+    save.click()
+    dialog.get_by_text("保存失败，表单内容已保留，请重试。", exact=True).wait_for()
+    assert name.input_value() == "  小雨更新  "
+    assert file_input.input_value().endswith("avatar.png")
+    assert row["avatar"] == OLD_AVATAR
+    assert [call[0] for call in calls] == ["upload", "upload", "resource"]
+    assert "private resource detail" not in dialog.inner_text()
+
+    save.click()
+    dialog.wait_for(state="detached")
+    assert [call[0] for call in calls] == ["upload", "upload", "resource", "resource"]
+    assert upload_request_ids[0] == upload_request_ids[1]
+    assert all(call[2] == upload_request_ids[0] for call in calls if call[0] == "resource")
+    assert calls[-1][1] == {
+        "name": "小雨更新",
+        "nickname": "雨雨",
+        "avatar": NEW_AVATAR,
+    }
+    object_urls = page.evaluate("window.__avatarObjectURLs")
+    assert len(object_urls["created"]) == 1
+    assert object_urls["revoked"] == object_urls["created"]
+
+    page.get_by_role("button", name="编辑：雨雨", exact=True).click()
+    remove_dialog = page.get_by_role("dialog", name="修改幼儿：雨雨", exact=True)
+    remove_dialog.get_by_role("button", name="移除头像", exact=True).click()
+    assert remove_dialog.locator("[data-avatar-preview] img").count() == 0
+    remove_dialog.get_by_role("button", name="保存幼儿", exact=True).click()
+    remove_dialog.wait_for(state="detached")
+    assert len(upload_request_ids) == 2
+    assert calls[-1][0] == "resource"
+    assert calls[-1][1]["avatar"] is None
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )

@@ -1,5 +1,9 @@
+import { renderAvatarImage } from '../../shared/avatar.mjs';
+
 const CHILD_KEYS = ['id', 'name', 'nickname', 'avatar', 'active', 'deactivated_at', 'future_roster_entries', 'has_active_conversation'];
 const DUCK_KEYS = ['id', 'name', 'avatar', 'status', 'note', 'active', 'deactivated_at', 'historical_feeding_log_count'];
+const CANONICAL_AVATAR = /^\/api\/media\/avatars\/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+const CANONICAL_V4_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
 function invalid(cause) {
   return new TypeError('Invalid teacher management data.', cause === undefined ? undefined : { cause });
@@ -54,6 +58,10 @@ function optionalString(value, maximum) {
   return value === null || (typeof value === 'string' && value.length <= maximum);
 }
 
+function optionalAvatar(value) {
+  return value === null || (typeof value === 'string' && CANONICAL_AVATAR.test(value));
+}
+
 function dateString(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
   const [year, month, day] = value.split('-').map(Number);
@@ -91,7 +99,7 @@ export function parseChildren(value) {
   const rows = array(value).map(item => {
     const row = record(item, CHILD_KEYS);
     if (!positive(row.id) || typeof row.name !== 'string' || !row.name.trim() || row.name.length > 64 ||
-        !optionalString(row.nickname, 64) || !optionalString(row.avatar, 255) || typeof row.active !== 'boolean' ||
+        !optionalString(row.nickname, 64) || !optionalAvatar(row.avatar) || typeof row.active !== 'boolean' ||
         !(row.deactivated_at === null || timestamp(row.deactivated_at)) || !nonnegative(row.future_roster_entries) ||
         typeof row.has_active_conversation !== 'boolean') throw invalid();
     return row;
@@ -104,7 +112,7 @@ export function parseDucks(value) {
   const rows = array(value).map(item => {
     const row = record(item, DUCK_KEYS);
     if (!positive(row.id) || typeof row.name !== 'string' || !row.name.trim() || row.name.length > 64 ||
-        !optionalString(row.avatar, 255) || !optionalString(row.status, 255) || !optionalString(row.note, 2000) ||
+        !optionalAvatar(row.avatar) || !optionalString(row.status, 255) || !optionalString(row.note, 2000) ||
         typeof row.active !== 'boolean' || !(row.deactivated_at === null || timestamp(row.deactivated_at)) ||
         !nonnegative(row.historical_feeding_log_count)) throw invalid();
     return row;
@@ -124,6 +132,17 @@ export function validateDuckAck(value, expected) {
   const row = record(value, ['id', 'name', 'avatar', 'status', 'note']);
   if (!positive(row.id) || (expected.expectedId !== null && row.id !== expected.expectedId) || row.name !== expected.name || row.avatar !== expected.avatar ||
       row.status !== expected.status || row.note !== expected.note) throw invalid();
+  return row;
+}
+
+export function validateAvatarMediaAck(value) {
+  const row = record(value, ['id', 'url', 'mime_type', 'width', 'height', 'size_bytes', 'sha256']);
+  if (typeof row.id !== 'string' || !CANONICAL_V4_UUID.test(row.id) ||
+      row.url !== `/api/media/avatars/${row.id}` || !CANONICAL_AVATAR.test(row.url) ||
+      row.mime_type !== 'image/webp' || !positive(row.width) || row.width > 1024 ||
+      !positive(row.height) || row.height > 1024 || !positive(row.size_bytes) ||
+      row.size_bytes > 5 * 1024 * 1024 || typeof row.sha256 !== 'string' ||
+      !/^[0-9a-f]{64}$/.test(row.sha256)) throw invalid();
   return row;
 }
 
@@ -245,6 +264,7 @@ export function createManagementRoutes(dependencies) {
     let undoState = null;
     let disposed = false;
     const dialogs = new Set();
+    const dialogCleanups = new Map();
     const view = h('section', { class: `management-view${isChild ? '' : ' ducks-workspace'}` });
     const hero = h('header', { class: 'management-hero' });
     const heroCopy = h('div', { class: 'management-copy' },
@@ -286,6 +306,9 @@ export function createManagementRoutes(dependencies) {
 
     const forgetDialog = dialog => {
       dialogs.delete(dialog);
+      const cleanup = dialogCleanups.get(dialog);
+      dialogCleanups.delete(dialog);
+      if (cleanup) cleanup();
       if (dialog.isConnected) dialog.remove();
     };
     const closeDialog = (dialog, focusTarget = null) => {
@@ -304,8 +327,9 @@ export function createManagementRoutes(dependencies) {
     };
 
     const renderAvatar = item => {
-      const avatar = h('span', { class: 'management-avatar', 'aria-hidden': 'true' });
-      avatar.textContent = avatarFallback(item);
+      const avatar = renderAvatarImage(document, item.avatar, avatarFallback(item));
+      avatar.setAttribute('class', 'management-avatar');
+      avatar.setAttribute('aria-hidden', 'true');
       return avatar;
     };
 
@@ -435,12 +459,27 @@ export function createManagementRoutes(dependencies) {
       const noteInput = isChild ? null : h('textarea', { maxlength: '2000' });
       if (noteInput && editing) noteInput.value = item.note || '';
       const previewItem = editing ? item : { name: noun, nickname: null, avatar: null };
+      const preview = h('div', {
+        class: 'management-avatar-preview', 'data-avatar-preview': '', 'aria-hidden': 'true',
+      });
+      const fileInput = h('input', {
+        type: 'file', accept: 'image/jpeg,image/png,image/webp',
+      });
+      const removeAvatar = h('button', {
+        type: 'button', class: 'btn gray', text: '移除头像',
+      });
+      const avatarNote = h('p', {
+        class: 'management-capability-note',
+        text: '支持 JPEG、PNG、WebP；将安全转换为最长边 1024 像素的 WebP。',
+      });
+      const avatarControls = h('div', { class: 'management-avatar-controls' },
+        field('头像图片', fileInput),
+        removeAvatar,
+      );
       const avatarField = h('section', { class: 'management-avatar-field', 'aria-label': '头像设置' },
-        h('div', { class: 'management-avatar-placeholder' }, renderAvatar(previewItem)),
-        h('p', {
-          class: 'management-capability-note',
-          text: editing && item.avatar ? '当前头像将保持不变。图片上传待后续开放。' : '图片上传待后续开放。',
-        }),
+        preview,
+        avatarControls,
+        avatarNote,
       );
       const dialogStatus = h('p', {
         role: 'status', 'aria-live': 'polite', class: 'management-dialog-status',
@@ -467,38 +506,140 @@ export function createManagementRoutes(dependencies) {
 
       const setFormBusy = busy => {
         for (const control of dialog.querySelectorAll('input, textarea, button')) control.disabled = busy;
+        if (!busy && !editing && !fileInput.files?.length) removeAvatar.disabled = true;
       };
       const fail = copy => {
         dialogStatus.setAttribute('role', 'alert');
         dialogStatus.textContent = copy || fixedFailure;
       };
+      let selectedFile = null;
+      let shouldRemoveAvatar = false;
+      let previewURL = null;
+      let retainedSubmission = null;
+      const releasePreviewURL = () => {
+        if (previewURL === null) return;
+        try { globalThis.URL.revokeObjectURL(previewURL); } catch (_error) {}
+        previewURL = null;
+      };
+      const localPreview = url => {
+        const shell = h('span', { class: 'management-avatar', 'aria-hidden': 'true' });
+        const fallback = h('span', { class: 'avatar-fallback', text: avatarFallback(previewItem) });
+        const image = h('img', { src: url, alt: '', decoding: 'async', draggable: 'false' });
+        fallback.hidden = true;
+        let failed = false;
+        image.addEventListener('error', () => {
+          if (failed) return;
+          failed = true;
+          fallback.hidden = false;
+          shell.replaceChildren(fallback);
+        }, { once: true });
+        shell.append(image, fallback);
+        return shell;
+      };
+      const renderPreview = () => {
+        if (previewURL !== null) preview.replaceChildren(localPreview(previewURL));
+        else if (shouldRemoveAvatar) preview.replaceChildren(renderAvatar({ ...previewItem, avatar: null }));
+        else preview.replaceChildren(renderAvatar(previewItem));
+      };
+      const invalidateSubmission = () => { retainedSubmission = null; };
+      dialogCleanups.set(dialog, releasePreviewURL);
+      renderPreview();
+      removeAvatar.disabled = !editing;
+      fileInput.addEventListener('change', () => {
+        invalidateSubmission();
+        releasePreviewURL();
+        const next = fileInput.files?.[0] || null;
+        selectedFile = next;
+        shouldRemoveAvatar = false;
+        avatarNote.textContent = '支持 JPEG、PNG、WebP；将安全转换为最长边 1024 像素的 WebP。';
+        if (next !== null) {
+          try {
+            previewURL = globalThis.URL.createObjectURL(next);
+          } catch (_error) {
+            selectedFile = null;
+            fileInput.value = '';
+            fail('无法预览所选图片，请重新选择。');
+          }
+        }
+        removeAvatar.disabled = selectedFile === null && !editing;
+        renderPreview();
+      });
+      removeAvatar.addEventListener('click', () => {
+        invalidateSubmission();
+        releasePreviewURL();
+        selectedFile = null;
+        fileInput.value = '';
+        shouldRemoveAvatar = true;
+        removeAvatar.disabled = true;
+        avatarNote.textContent = '已选择移除头像，保存后生效。';
+        renderPreview();
+      });
+      form.addEventListener('input', event => {
+        if (event.target !== fileInput) invalidateSubmission();
+      });
+      form.addEventListener('change', event => {
+        if (event.target !== fileInput) invalidateSubmission();
+      });
       cancel.addEventListener('click', () => closeDialog(dialog, launcher));
       form.addEventListener('submit', event => {
         event.preventDefault();
         if (mutation || !form.reportValidity()) return;
-        const normalized = isChild ? {
+        const fields = isChild ? {
           name: nameInput.value.trim(),
           nickname: secondInput.value.trim() || null,
-          avatar: editing ? item.avatar : null,
         } : {
           name: nameInput.value.trim(),
-          avatar: editing ? item.avatar : null,
           status: secondInput.value.trim() || null,
           note: noteInput.value.trim() || null,
         };
-        if (!normalized.name) {
+        if (!fields.name) {
           nameInput.setAttribute('aria-invalid', 'true');
           nameInput.focus();
           return;
         }
         nameInput.removeAttribute('aria-invalid');
+        const signature = JSON.stringify({
+          fields,
+          avatarMode: shouldRemoveAvatar ? 'remove' : selectedFile === null ? 'keep' : 'upload',
+          originalAvatar: editing ? item.avatar : null,
+        });
+        const snapshot = retainedSubmission !== null && retainedSubmission.signature === signature &&
+          retainedSubmission.file === selectedFile
+          ? retainedSubmission
+          : {
+            signature,
+            fields,
+            file: selectedFile,
+            removeAvatar: shouldRemoveAvatar,
+            requestId: createRequestId(),
+            uploadedAvatar: null,
+          };
+        if (!uuid(snapshot.requestId)) throw invalid();
+        retainedSubmission = snapshot;
         mutation = 'form';
         setFormBusy(true);
         void (async () => {
           let restoreFocus = false;
+          let phase = snapshot.file !== null && snapshot.uploadedAvatar === null ? 'upload' : 'resource';
           try {
+            if (snapshot.file !== null && snapshot.uploadedAvatar === null) {
+              const uploadBody = new FormData();
+              uploadBody.append('file', snapshot.file, snapshot.file.name);
+              const upload = await scope.run('/api/media/avatars', {
+                method: 'POST', body: uploadBody, requestId: snapshot.requestId,
+              });
+              if (!upload.current) return;
+              snapshot.uploadedAvatar = validateAvatarMediaAck(upload.result).url;
+            }
+            phase = 'resource';
+            const normalized = {
+              ...snapshot.fields,
+              avatar: snapshot.removeAvatar
+                ? null
+                : snapshot.uploadedAvatar || (editing ? item.avatar : null),
+            };
             const response = await scope.run(`/api/${isChild ? 'children' : 'ducks'}${editing ? `/${item.id}` : ''}`, {
-              method: editing ? 'PUT' : 'POST', body: normalized,
+              method: editing ? 'PUT' : 'POST', body: normalized, requestId: snapshot.requestId,
             });
             if (!response.current) return;
             const ack = isChild
@@ -510,12 +651,15 @@ export function createManagementRoutes(dependencies) {
               : validateDuckAck(response.result, { expectedId: editing ? item.id : null, ...normalized });
             await reload();
             if (!scope.alive()) return;
+            retainedSubmission = null;
             showSuccess('已保存');
             const nextEdit = list.querySelector(`[data-edit-id="${ack.id}"]`);
             closeDialog(dialog, nextEdit || add);
           } catch (_error) {
             if (scope.alive()) {
-              fail();
+              fail(phase === 'upload'
+                ? '头像上传失败，表单内容已保留，请重试。'
+                : '保存失败，表单内容已保留，请重试。');
               restoreFocus = true;
             }
           } finally {
@@ -600,10 +744,13 @@ export function createManagementRoutes(dependencies) {
       dismissUndo(undoState);
       scope.cleanup();
       for (const dialog of dialogs) {
+        const cleanup = dialogCleanups.get(dialog);
+        if (cleanup) cleanup();
         if (dialog.open) dialog.close();
         if (dialog.isConnected) dialog.remove();
       }
       dialogs.clear();
+      dialogCleanups.clear();
     } };
   };
 

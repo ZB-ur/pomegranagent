@@ -1,6 +1,7 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import importlib.util
+from io import BytesIO
 import os
 from pathlib import Path
 import re
@@ -9,6 +10,7 @@ import subprocess
 from types import SimpleNamespace
 
 import pytest
+from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -678,21 +680,31 @@ def test_empty_roster_is_honest_and_has_no_cards(child_page, viewport):
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-@pytest.mark.parametrize("roster_mode", ["empty", "two_cards"])
+@pytest.mark.parametrize("roster_mode", ["empty", "avatar_cards"])
 def test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping(
     child_page,
     viewport,
     roster_mode,
 ):
+    canonical_avatar = "/api/media/avatars/a30a6409-58b8-48f0-96f0-8ff679bebed7"
     roster = [] if roster_mode == "empty" else [
         {"id": 1, "name": "测试幼儿", "nickname": "   ", "avatar": "javascript:alert(1)"},
         {
             "id": 2,
             "name": "小林",
             "nickname": "\ufe0f\u034f",
-            "avatar": "https://example.invalid/avatar.png",
+            "avatar": canonical_avatar,
         },
     ]
+    if roster_mode != "empty":
+        encoded = BytesIO()
+        with Image.open(ROOT / "app/frontend/assets/duck-front-128.png") as source:
+            source.convert("RGB").save(encoded, format="WEBP")
+        child_page.fulfill_bytes(
+            f"**{canonical_avatar}",
+            encoded.getvalue(),
+            content_type="image/webp",
+        )
     prepare_child_page(child_page, viewport, roster=roster)
     page = child_page.page
     panel = page.locator(".child-roster-panel")
@@ -711,11 +723,16 @@ def test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping(
             assert card.locator(".child-card__label").inner_text() == expected_label
             assert card.get_attribute("aria-label") is None
             assert page.get_by_role("button", name=expected_label, exact=True).count() == 1
-        assert cards.locator("img").count() == 0
+        assert cards.nth(0).locator("img").count() == 0
+        image = cards.nth(1).locator(".child-card__avatar img")
+        image.wait_for()
+        assert image.get_attribute("src") == canonical_avatar
+        assert image.get_attribute("alt") == ""
+        image.dispatch_event("error")
+        assert cards.nth(1).locator("img").count() == 0
         assert cards.locator(".child-card__avatar").all_inner_texts() == ["测", "小"]
         body = page.locator("body").inner_text()
         assert "javascript:alert(1)" not in body
-        assert "https://example.invalid/avatar.png" not in body
 
     measured = page.evaluate(
         """

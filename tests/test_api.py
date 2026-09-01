@@ -1,10 +1,14 @@
 """Foundation-fixture integration coverage for the frozen backend API."""
+from datetime import datetime
+from hashlib import sha256
+from io import BytesIO
 from uuid import uuid4
+from PIL import Image
 from sqlalchemy import select
 
 from app.backend import ai_engine, models
 from app.backend.analysis_worker import AnalysisWorker
-from app.backend.database import SessionLocal
+from app.backend.database import SETTINGS, SessionLocal
 
 
 CHILD_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000011"
@@ -14,6 +18,32 @@ DUCK_AVATAR = "/api/media/avatars/00000000-0000-4000-8000-000000000012"
 def unlock_teacher(client) -> None:
     response = client.post("/api/auth/setup", json={"pin": "1234"})
     assert response.status_code == 200
+
+
+def _materialize_avatar(db_session, avatar_url: str) -> None:
+    """Create a matching regular WebP and AvatarMedia row for a canonical URL."""
+
+    media_id = avatar_url.rsplit("/", 1)[-1]
+    output = BytesIO()
+    Image.new("RGB", (2, 2), (244, 184, 66)).save(output, format="WEBP")
+    data = output.getvalue()
+    SETTINGS.media_root.mkdir(parents=True, exist_ok=True)
+    file_name = f"{media_id}.webp"
+    path = SETTINGS.media_root / file_name
+    if path.is_symlink():
+        path.unlink()
+    path.write_bytes(data)
+    db_session.add(models.AvatarMedia(
+        id=media_id,
+        file_name=file_name,
+        mime_type="image/webp",
+        width=2,
+        height=2,
+        size_bytes=len(data),
+        sha256=sha256(data).hexdigest(),
+        created_at=datetime(2026, 9, 2, 8, 0),
+    ))
+    db_session.commit()
 
 
 def _mock_chat_reply(**_kwargs):
@@ -122,7 +152,8 @@ def test_dimensions_seeded(client):
     assert {item["key"] for item in response.json()} == {"language", "empathy", "diligence"}
 
 
-def test_child_crud_list_smoke(client):
+def test_child_crud_list_smoke(client, db_session):
+    _materialize_avatar(db_session, CHILD_AVATAR)
     unlock_teacher(client)
     created = client.post("/api/children", json={
         "name": "  王小明  ",
@@ -155,7 +186,8 @@ def test_child_crud_list_smoke(client):
     }
 
 
-def test_duck_crud_list_smoke(client):
+def test_duck_crud_list_smoke(client, db_session):
+    _materialize_avatar(db_session, DUCK_AVATAR)
     unlock_teacher(client)
     created = client.post("/api/ducks", json={
         "name": "  小黄  ",

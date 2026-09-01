@@ -7,6 +7,7 @@ import {
   parseDucks,
   parseRosterRows,
   validateArchive,
+  validateAvatarMediaAck,
   validateChildAck,
   validateDeactivationAck,
   validateDuckAck,
@@ -23,6 +24,8 @@ const duck = {
   id: 8, name: '小黄', avatar: null, status: '健康', note: null, active: true,
   deactivated_at: null, historical_feeding_log_count: 3,
 };
+const avatarId = 'a30a6409-58b8-48f0-96f0-8ff679bebed7';
+const avatarUrl = `/api/media/avatars/${avatarId}`;
 
 
 test('management dependencies are exact own data and trap safe', () => {
@@ -62,25 +65,48 @@ test('enriched child and duck lists reject extra malformed or accessor data', ()
 
 test('create and edit acknowledgements must match normalized submitted identity', () => {
   assert.deepEqual(validateChildAck(
-    { id: 7, name: '小雨', nickname: null, avatar: 'rain.png', active: true },
-    { expectedId: 7, name: '小雨', nickname: null, avatar: 'rain.png', active: true },
-  ), { id: 7, name: '小雨', nickname: null, avatar: 'rain.png', active: true });
+    { id: 7, name: '小雨', nickname: null, avatar: avatarUrl, active: true },
+    { expectedId: 7, name: '小雨', nickname: null, avatar: avatarUrl, active: true },
+  ), { id: 7, name: '小雨', nickname: null, avatar: avatarUrl, active: true });
   assert.deepEqual(validateDuckAck(
     { id: 8, name: '小黄', avatar: null, status: '健康', note: null },
     { expectedId: 8, name: '小黄', avatar: null, status: '健康', note: null },
   ).id, 8);
   assert.throws(() => validateChildAck(
-    { id: 7, name: '别人', nickname: null, avatar: 'rain.png', active: true },
-    { expectedId: 7, name: '小雨', nickname: null, avatar: 'rain.png', active: true },
+    { id: 7, name: '别人', nickname: null, avatar: avatarUrl, active: true },
+    { expectedId: 7, name: '小雨', nickname: null, avatar: avatarUrl, active: true },
   ), TypeError);
   assert.throws(() => validateChildAck(
-    { id: 7, name: '小雨', nickname: null, avatar: 'rain.png', active: false },
-    { expectedId: 7, name: '小雨', nickname: null, avatar: 'rain.png', active: true },
+    { id: 7, name: '小雨', nickname: null, avatar: avatarUrl, active: false },
+    { expectedId: 7, name: '小雨', nickname: null, avatar: avatarUrl, active: true },
   ), TypeError);
   assert.throws(() => validateDuckAck(
     { id: 8, name: '小黄', avatar: null, status: '健康', note: null, extra: true },
     { expectedId: 8, name: '小黄', avatar: null, status: '健康', note: null },
   ), TypeError);
+});
+
+
+test('avatar upload acknowledgement is exact canonical and self-consistent', () => {
+  const response = {
+    id: avatarId,
+    url: avatarUrl,
+    mime_type: 'image/webp',
+    width: 1024,
+    height: 640,
+    size_bytes: 42_000,
+    sha256: 'ab'.repeat(32),
+  };
+  assert.deepEqual(validateAvatarMediaAck(response), response);
+  for (const invalid of [
+    { ...response, extra: true },
+    { ...response, url: '/api/media/avatars/b30a6409-58b8-48f0-96f0-8ff679bebed7' },
+    { ...response, id: avatarId.toUpperCase() },
+    { ...response, mime_type: 'image/png' },
+    { ...response, width: 0 },
+    { ...response, height: 1025 },
+    { ...response, sha256: 'AB'.repeat(32) },
+  ]) assert.throws(() => validateAvatarMediaAck(invalid), TypeError);
 });
 
 

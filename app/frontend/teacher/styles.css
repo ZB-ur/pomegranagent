@@ -865,9 +865,23 @@ textarea { min-height: 46px; width: 100%; }
   border-radius: 12px;
   display: grid;
   gap: 10px;
+  grid-template-columns: 84px minmax(0, 1fr);
   padding: 14px;
 }
-.management-avatar-placeholder { align-items: center; display: flex; gap: 12px; min-width: 0; }
+.management-avatar-preview {
+  align-items: center;
+  display: flex;
+  grid-row: 1 / span 2;
+  justify-content: center;
+  min-height: 76px;
+  min-width: 0;
+}
+.management-avatar-preview .management-avatar { height: 72px; width: 72px; }
+.management-avatar-controls { align-items: end; display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }
+.management-avatar-controls .teacher-field { flex: 1 1 230px; min-width: 0; }
+.management-avatar-controls input[type="file"] { max-width: 100%; width: 100%; }
+.management-avatar-controls .btn { flex: 0 0 auto; }
+.management-avatar-field .management-capability-note { margin: 0; }
 .management-capability-note, .roster-capability {
   background: var(--teacher-status-warning);
   border-radius: 10px;

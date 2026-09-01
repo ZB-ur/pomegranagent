@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date, datetime, timedelta, timezone
+from hashlib import sha256
+from io import BytesIO
 import re
 from threading import Event, Thread, current_thread
 from types import SimpleNamespace
@@ -10,12 +12,13 @@ from uuid import uuid4
 from zoneinfo import ZoneInfo
 
 import pytest
+from PIL import Image
 from sqlalchemy import event, func, select
 from sqlalchemy.exc import IntegrityError, OperationalError
 
 from app.backend import models, schemas
 from app.backend.api_errors import APIError
-from app.backend.database import SessionLocal, engine
+from app.backend.database import SETTINGS, SessionLocal, engine
 from app.backend.routes import resources as resource_routes
 from app.backend.services.chat import build_chat_context, claim_chat_request
 from app.backend.services.deactivation import set_child_active
@@ -35,6 +38,32 @@ CANONICAL_AVATAR_MESSAGE = (
 def _unlock(client) -> None:
     response = client.post("/api/auth/setup", json={"pin": "1234"})
     assert response.status_code == 200
+
+
+def _materialize_avatar(db_session, avatar_url: str) -> None:
+    """Create the row-backed regular WebP required by Task 5 references."""
+
+    media_id = avatar_url.rsplit("/", 1)[-1]
+    output = BytesIO()
+    Image.new("RGB", (2, 2), (244, 184, 66)).save(output, format="WEBP")
+    data = output.getvalue()
+    SETTINGS.media_root.mkdir(parents=True, exist_ok=True)
+    file_name = f"{media_id}.webp"
+    path = SETTINGS.media_root / file_name
+    if path.is_symlink():
+        path.unlink()
+    path.write_bytes(data)
+    db_session.add(models.AvatarMedia(
+        id=media_id,
+        file_name=file_name,
+        mime_type="image/webp",
+        width=2,
+        height=2,
+        size_bytes=len(data),
+        sha256=sha256(data).hexdigest(),
+        created_at=datetime(2026, 9, 2, 8, 0),
+    ))
+    db_session.commit()
 
 
 def _error(response, *, status: int, code: str) -> dict:
@@ -1170,7 +1199,9 @@ def test_resource_mutations_reject_blank_and_over_limit_text_without_writes(
 
 
 def test_resource_mutations_accept_exact_maximum_lengths_and_force_active_creation(client, db_session):
-    """Boundary-valid public fields survive normalization without requiring Task 5 media rows."""
+    """Boundary-valid public fields survive normalization with real media references."""
+    _materialize_avatar(db_session, CHILD_AVATAR)
+    _materialize_avatar(db_session, DUCK_AVATAR)
     _unlock(client)
     child_name = "儿" * 64
     child_nickname = "名" * 64
@@ -1225,6 +1256,7 @@ def test_resource_updates_preserve_deactivation_state_and_return_exact_public_sh
     db_session.commit()
     child_id = child.id
     duck_id = duck.id
+    _materialize_avatar(db_session, UPDATED_AVATAR)
     _unlock(client)
 
     child_response = client.put(f"/api/children/{child_id}", json={

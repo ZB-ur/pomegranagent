@@ -17,6 +17,7 @@ from ..services.deactivation import (
     set_child_active,
     set_duck_active,
 )
+from ..services.avatar_media import validate_avatar_reference
 
 
 router = APIRouter()
@@ -42,6 +43,7 @@ def create_child(
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> models.Child:
+    validate_avatar_reference(db, payload.avatar, media_root=SETTINGS.media_root)
     child = models.Child(**payload.model_dump(), active=True, deactivated_at=None)
     db.add(child)
     db.commit()
@@ -56,6 +58,7 @@ def update_child(
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> models.Child:
+    validate_avatar_reference(db, payload.avatar, media_root=SETTINGS.media_root)
     child = db.get(models.Child, child_id)
     if child is None:
         raise APIError(404, "CHILD_NOT_FOUND", "幼儿不存在")
@@ -128,6 +131,7 @@ def create_duck(
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> models.Duck:
+    validate_avatar_reference(db, payload.avatar, media_root=SETTINGS.media_root)
     duck = models.Duck(**payload.model_dump(), active=True, deactivated_at=None)
     db.add(duck)
     db.commit()
@@ -142,6 +146,7 @@ def update_duck(
     db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
 ) -> models.Duck:
+    validate_avatar_reference(db, payload.avatar, media_root=SETTINGS.media_root)
     duck = db.get(models.Duck, duck_id)
     if duck is None:
         raise APIError(404, "DUCK_NOT_FOUND", "小鸭不存在")

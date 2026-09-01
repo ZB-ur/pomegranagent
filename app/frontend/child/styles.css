@@ -260,6 +260,20 @@ body {
   line-height: 32px;
 }
 
+#child-app .child-card__avatar img {
+  block-size: 100%;
+  border-radius: 50%;
+  inline-size: 100%;
+  object-fit: cover;
+}
+
+#child-app .child-card__avatar .avatar-fallback {
+  display: grid;
+  block-size: 100%;
+  inline-size: 100%;
+  place-items: center;
+}
+
 #child-app .child-card__label {
   min-inline-size: 0;
   overflow-wrap: anywhere;
