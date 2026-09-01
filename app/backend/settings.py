@@ -36,11 +36,17 @@ def assert_safe_test_database_path(
     *,
     app_path: Path = DEFAULT_APP_DB_PATH,
     data_dir: Path = DATA_DIR,
+    log_path: Path = DEFAULT_LOG_PATH,
 ) -> Path:
     resolved = candidate.expanduser().resolve()
     formal_app = app_path.expanduser().resolve()
     formal_data = data_dir.expanduser().resolve()
-    if resolved == formal_app or resolved.is_relative_to(formal_data):
+    formal_log_root = log_path.expanduser().resolve().parent
+    if (
+        resolved == formal_app
+        or resolved.is_relative_to(formal_data)
+        or resolved.is_relative_to(formal_log_root)
+    ):
         raise UnsafeTestDatabaseError(f"unsafe test database path: {resolved}")
     return resolved
 

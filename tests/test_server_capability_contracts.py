@@ -11,6 +11,85 @@ from app.backend import schemas
 REQUEST_ID = UUID("11111111-1111-4111-8111-111111111111")
 MEDIA_ID = UUID("6d8b0000-0000-4000-8000-000000000001")
 MEDIA_URL = f"/api/media/avatars/{MEDIA_ID}"
+PUBLIC_AVATAR_RESPONSE_CASES = [
+    pytest.param(
+        schemas.ChildOut,
+        {"id": 1, "name": "小明"},
+        {
+            "name": "小明",
+            "nickname": None,
+            "avatar": None,
+            "active": True,
+            "id": 1,
+        },
+        id="child-out",
+    ),
+    pytest.param(
+        schemas.DuckOut,
+        {"id": 2, "name": "小黄"},
+        {
+            "name": "小黄",
+            "avatar": None,
+            "status": None,
+            "note": None,
+            "id": 2,
+        },
+        id="duck-out",
+    ),
+    pytest.param(
+        schemas.RosterTodayChild,
+        {"id": 3, "name": "小雨"},
+        {"id": 3, "name": "小雨", "nickname": None, "avatar": None},
+        id="roster-today-child",
+    ),
+    pytest.param(
+        schemas.ChildIdentity,
+        {"id": 4, "name": "小北"},
+        {"id": 4, "name": "小北", "nickname": None, "avatar": None},
+        id="child-identity",
+    ),
+    pytest.param(
+        schemas.TeacherChildOut,
+        {
+            "id": 5,
+            "name": "小南",
+            "active": True,
+            "future_roster_entries": 0,
+            "has_active_conversation": False,
+        },
+        {
+            "id": 5,
+            "name": "小南",
+            "nickname": None,
+            "avatar": None,
+            "active": True,
+            "deactivated_at": None,
+            "future_roster_entries": 0,
+            "has_active_conversation": False,
+        },
+        id="teacher-child-out",
+    ),
+    pytest.param(
+        schemas.TeacherDuckOut,
+        {
+            "id": 6,
+            "name": "小绿",
+            "active": True,
+            "historical_feeding_log_count": 0,
+        },
+        {
+            "id": 6,
+            "name": "小绿",
+            "avatar": None,
+            "status": None,
+            "note": None,
+            "active": True,
+            "deactivated_at": None,
+            "historical_feeding_log_count": 0,
+        },
+        id="teacher-duck-out",
+    ),
+]
 
 
 def test_runtime_context_response_has_the_exact_calendar_shape():
@@ -111,6 +190,41 @@ def test_avatar_media_response_has_the_exact_processed_image_shape():
     }
 
 
+@pytest.mark.parametrize(
+    ("response_model", "base_payload", "expected_null_payload"),
+    PUBLIC_AVATAR_RESPONSE_CASES,
+)
+def test_public_avatar_responses_preserve_shape_for_null_and_canonical_urls(
+    response_model,
+    base_payload,
+    expected_null_payload,
+):
+    null_payload = response_model.model_validate({**base_payload, "avatar": None})
+    canonical_payload = response_model.model_validate({
+        **base_payload,
+        "avatar": MEDIA_URL,
+    })
+
+    assert null_payload.model_dump() == expected_null_payload
+    assert canonical_payload.model_dump() == {
+        **expected_null_payload,
+        "avatar": MEDIA_URL,
+    }
+
+
+@pytest.mark.parametrize(
+    ("response_model", "base_payload", "_expected_null_payload"),
+    PUBLIC_AVATAR_RESPONSE_CASES,
+)
+def test_public_avatar_responses_reject_noncanonical_legacy_values(
+    response_model,
+    base_payload,
+    _expected_null_payload,
+):
+    with pytest.raises(ValidationError):
+        response_model.model_validate({**base_payload, "avatar": "legacy-avatar.png"})
+
+
 def test_monthly_roster_entry_requires_two_distinct_positive_children():
     payload = schemas.MonthlyRosterEntryRequest(
         date="2026-09-03",
@@ -202,7 +316,12 @@ def test_monthly_roster_response_has_the_exact_sorted_snapshot_shape():
                 "date": "2026-09-03",
                 "cycle": "2026-09月值日",
                 "child_ids": [1, 4],
-            }
+            },
+            {
+                "date": "2026-09-08",
+                "cycle": "2026-09月值日",
+                "child_ids": [2, 5],
+            },
         ],
         replayed=False,
     )
@@ -215,10 +334,77 @@ def test_monthly_roster_response_has_the_exact_sorted_snapshot_shape():
                 "date": date(2026, 9, 3),
                 "cycle": "2026-09月值日",
                 "child_ids": [1, 4],
-            }
+            },
+            {
+                "date": date(2026, 9, 8),
+                "cycle": "2026-09月值日",
+                "child_ids": [2, 5],
+            },
         ],
         "replayed": False,
     }
+
+
+@pytest.mark.parametrize(
+    "schedule",
+    [
+        [],
+        [
+            {
+                "date": "2026-09-01",
+                "cycle": "九月值日",
+                "child_ids": [1, 2],
+            }
+        ]
+        * 32,
+    ],
+)
+def test_monthly_roster_response_requires_one_to_thirty_one_items(schedule):
+    with pytest.raises(ValidationError):
+        schemas.MonthlyRosterResponse(
+            request_id=REQUEST_ID,
+            month="2026-09",
+            schedule=schedule,
+            replayed=False,
+        )
+
+
+def test_monthly_roster_response_rejects_duplicate_schedule_dates():
+    with pytest.raises(ValidationError):
+        schemas.MonthlyRosterResponse(
+            request_id=REQUEST_ID,
+            month="2026-09",
+            schedule=[
+                {"date": "2026-09-03", "cycle": "九月值日", "child_ids": [1, 2]},
+                {"date": "2026-09-03", "cycle": "九月值日", "child_ids": [3, 4]},
+            ],
+            replayed=False,
+        )
+
+
+def test_monthly_roster_response_rejects_dates_outside_response_month():
+    with pytest.raises(ValidationError):
+        schemas.MonthlyRosterResponse(
+            request_id=REQUEST_ID,
+            month="2026-09",
+            schedule=[
+                {"date": "2026-10-01", "cycle": "九月值日", "child_ids": [1, 2]},
+            ],
+            replayed=False,
+        )
+
+
+def test_monthly_roster_response_requires_ascending_schedule_dates():
+    with pytest.raises(ValidationError):
+        schemas.MonthlyRosterResponse(
+            request_id=REQUEST_ID,
+            month="2026-09",
+            schedule=[
+                {"date": "2026-09-08", "cycle": "九月值日", "child_ids": [1, 2]},
+                {"date": "2026-09-03", "cycle": "九月值日", "child_ids": [3, 4]},
+            ],
+            replayed=False,
+        )
 
 
 def test_weekly_report_response_has_the_exact_mixed_week_and_backlog_shape():
@@ -317,3 +503,29 @@ def test_conversation_search_page_is_separate_from_legacy_before_id_page():
         schemas.ConversationSearchPage.model_validate(
             {"items": [], "next_cursor": None, "next_before_id": 7}
         )
+
+
+def test_conversation_search_request_cursor_accepts_the_1024_character_boundary():
+    cursor = "a" * 1024
+
+    payload = schemas.ConversationSearchRequest(cursor=cursor)
+
+    assert payload.cursor == cursor
+
+
+def test_conversation_search_request_cursor_rejects_more_than_1024_characters():
+    with pytest.raises(ValidationError):
+        schemas.ConversationSearchRequest(cursor="a" * 1025)
+
+
+def test_conversation_search_page_cursor_accepts_the_1024_character_boundary():
+    cursor = "a" * 1024
+
+    payload = schemas.ConversationSearchPage(items=[], next_cursor=cursor)
+
+    assert payload.next_cursor == cursor
+
+
+def test_conversation_search_page_cursor_rejects_more_than_1024_characters():
+    with pytest.raises(ValidationError):
+        schemas.ConversationSearchPage(items=[], next_cursor="a" * 1025)

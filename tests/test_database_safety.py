@@ -772,6 +772,28 @@ def test_test_mode_rejects_real_runtime_resource_paths(
         })
 
 
+@pytest.mark.parametrize(
+    "candidate",
+    [
+        DEFAULT_LOG_PATH,
+        DEFAULT_LOG_PATH.parent,
+        DEFAULT_LOG_PATH.parent / "pytest.db",
+    ],
+)
+def test_test_mode_rejects_application_log_paths_as_database(
+    candidate: Path,
+    tmp_path: Path,
+):
+    with pytest.raises(UnsafeTestDatabaseError, match="unsafe test database"):
+        RuntimeSettings.from_env({
+            "APP_DB_MODE": "test",
+            "APP_DB_PATH": str(candidate),
+            "APP_MEDIA_ROOT": str(tmp_path / "media"),
+            "APP_LOG_PATH": str(tmp_path / "app.log"),
+            "APP_TTS_CACHE_PATH": str(tmp_path / "tts-cache"),
+        })
+
+
 @pytest.mark.parametrize("candidate", [DEFAULT_APP_DB_PATH, DATA_DIR / "pytest.db"])
 def test_test_mode_rejects_application_data_paths(candidate: Path):
     with pytest.raises(UnsafeTestDatabaseError, match="unsafe test database"):

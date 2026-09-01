@@ -5,6 +5,17 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+CanonicalAvatarURL = Annotated[
+    str,
+    Field(
+        pattern=(
+            r"^/api/media/avatars/"
+            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+            r"[0-9a-f]{4}-[0-9a-f]{12}$"
+        )
+    ),
+]
+
 
 class VersionResponse(BaseModel):
     release_id: str
@@ -52,6 +63,7 @@ class ChildCreate(ChildBase):
 
 class ChildOut(ChildBase):
     model_config = ConfigDict(from_attributes=True)
+    avatar: CanonicalAvatarURL | None = None
     id: int
 
 
@@ -69,6 +81,7 @@ class DuckCreate(DuckBase):
 
 class DuckOut(DuckBase):
     model_config = ConfigDict(from_attributes=True)
+    avatar: CanonicalAvatarURL | None = None
     id: int
 
 
@@ -142,18 +155,16 @@ ReviewQueue: TypeAlias = Literal["pending", "processing", "failed"]
 ReviewStatus: TypeAlias = Literal["pending", "draft", "confirmed", "unavailable"]
 FeedingCategory: TypeAlias = Literal["喂食", "清洁", "观察", "其它"]
 PositiveInt = Annotated[int, Field(gt=0)]
-CanonicalAvatarURL = Annotated[
-    str,
-    Field(
-        pattern=(
-            r"^/api/media/avatars/"
-            r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
-            r"[0-9a-f]{4}-[0-9a-f]{12}$"
-        )
-    ),
-]
 MonthString = Annotated[str, Field(pattern=r"^[0-9]{4}-(0[1-9]|1[0-2])$")]
 HistorySort: TypeAlias = Literal["completed_desc", "completed_asc"]
+OpaqueCursor = Annotated[
+    str,
+    Field(
+        min_length=1,
+        max_length=1024,
+        pattern=r"^[A-Za-z0-9_-]+$",
+    ),
+]
 
 
 class MutableRequestModel(BaseModel):
@@ -273,8 +284,22 @@ class MonthlyRosterScheduleItem(StrictResponseModel):
 class MonthlyRosterResponse(StrictResponseModel):
     request_id: UUID
     month: MonthString
-    schedule: list[MonthlyRosterScheduleItem]
+    schedule: list[MonthlyRosterScheduleItem] = Field(min_length=1, max_length=31)
     replayed: bool
+
+    @model_validator(mode="after")
+    def require_sorted_unique_dates_in_month(self) -> Self:
+        schedule_dates = [item.date for item in self.schedule]
+        if len(schedule_dates) != len(set(schedule_dates)):
+            raise ValueError("schedule must contain unique dates")
+        if any(
+            schedule_date.strftime("%Y-%m") != self.month
+            for schedule_date in schedule_dates
+        ):
+            raise ValueError("every schedule date must belong to month")
+        if schedule_dates != sorted(schedule_dates):
+            raise ValueError("schedule dates must be sorted in ascending order")
+        return self
 
 
 class WeeklyReportResponse(StrictResponseModel):
@@ -298,11 +323,7 @@ class ConversationSearchRequest(MutableRequestModel):
     keyword: str | None = Field(default=None, min_length=1, max_length=100)
     sort: HistorySort = "completed_desc"
     limit: int = Field(default=20, ge=1, le=50)
-    cursor: str | None = Field(
-        default=None,
-        min_length=1,
-        pattern=r"^[A-Za-z0-9_-]+$",
-    )
+    cursor: OpaqueCursor | None = None
 
     @field_validator("keyword", mode="before")
     @classmethod
@@ -333,7 +354,7 @@ class RosterTodayChild(StrictResponseModel):
     id: PositiveInt
     name: str
     nickname: str | None = None
-    avatar: str | None = None
+    avatar: CanonicalAvatarURL | None = None
 
 
 class RosterListItem(StrictResponseModel):
@@ -395,7 +416,7 @@ class ChildIdentity(StrictResponseModel):
     id: PositiveInt
     name: str
     nickname: str | None = None
-    avatar: str | None = None
+    avatar: CanonicalAvatarURL | None = None
 
 
 class ConversationQueueItem(StrictResponseModel):
@@ -434,11 +455,7 @@ class ConversationHistoryPage(StrictResponseModel):
 
 class ConversationSearchPage(StrictResponseModel):
     items: list[ConversationHistoryItem]
-    next_cursor: str | None = Field(
-        default=None,
-        min_length=1,
-        pattern=r"^[A-Za-z0-9_-]+$",
-    )
+    next_cursor: OpaqueCursor | None = None
 
 
 class AnalysisError(StrictResponseModel):
@@ -660,7 +677,7 @@ class TeacherChildOut(ChildIdentity):
 class TeacherDuckOut(StrictResponseModel):
     id: PositiveInt
     name: str
-    avatar: str | None = None
+    avatar: CanonicalAvatarURL | None = None
     status: str | None = None
     note: str | None = None
     active: bool
