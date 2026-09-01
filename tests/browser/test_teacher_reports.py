@@ -331,8 +331,16 @@ def test_history_filter_pagination_and_review_anchor_are_canonical(teacher_brows
     page.get_by_role("heading", name="查找历史日记", exact=True).wait_for()
     page.get_by_role("link", name="打开会话 #42 的审阅", exact=True).wait_for()
     assert page_errors == []
-    assert page.locator(".search-hero").get_by_text("明细检索", exact=True).count() == 1
-    assert page.get_by_text("不含关键词、日期范围或排序", exact=True).count() == 1
+    hero = page.locator(".search-view > .search-hero")
+    filter_card = page.locator(".search-view > .search-filter.card")
+    history_panel = page.locator(".search-view > .report-history-panel.card")
+    assert hero.count() == 1
+    assert "card" not in (hero.get_attribute("class") or "").split()
+    assert hero.get_by_text("幼儿筛选 · 不含关键词、日期范围或排序", exact=True).count() == 1
+    assert hero.get_by_text("每行保留会话 ID、日期、轮数、分析与审阅状态。", exact=True).count() == 1
+    assert hero.locator("form").count() == 0
+    assert filter_card.count() == 1
+    assert history_panel.count() == 1
     assert page.locator("#main label").count() == 1, page.locator("#main").inner_text()
     selector = page.get_by_label("筛选幼儿", exact=True)
     assert selector.locator("option").first.inner_text() == "全部幼儿"
@@ -347,16 +355,38 @@ def test_history_filter_pagination_and_review_anchor_are_canonical(teacher_brows
     link = page.get_by_role("link", name="打开会话 #42 的审阅", exact=True)
     link.wait_for()
     assert link.get_attribute("href") == "#review?conversation_id=42"
-    row = page.locator(".report-history-row")
+    history_panel = page.locator(".search-view > .report-history-panel.card")
+    assert history_panel.get_by_role("heading", name="历史记录", exact=True).count() == 1
+    page_badge = history_panel.locator(".report-history-panel-header > .report-page-number")
+    assert page_badge.inner_text() == "第 1 页"
+    columns = history_panel.locator(".report-history-columns")
+    for heading in ["会话", "日期", "幼儿 / 轮数", "分析状态", "审阅状态"]:
+        assert columns.get_by_text(heading, exact=True).count() == 1
+    row = history_panel.locator(".report-history > .report-history-row")
+    assert "card" not in (row.get_attribute("class") or "").split()
+    assert row.evaluate("node => getComputedStyle(node).borderTopStyle === 'solid'")
     assert row.get_by_role("heading", name="会话 #42", exact=True).count() == 1
     assert row.get_by_text("历史幼儿", exact=True).count() == 1
-    assert row.get_by_text("2026-08-23 · 2 轮", exact=True).count() == 1
+    assert row.get_by_text("2026-08-23", exact=True).count() == 1
+    assert row.get_by_text("2 轮", exact=True).count() == 1
     assert row.get_by_text("分析完成", exact=True).count() == 1
     assert row.get_by_text("审阅完成", exact=True).count() == 1
     assert "succeeded" not in page.locator("#main").inner_text()
     assert "confirmed" not in page.locator("#main").inner_text()
-    assert page.get_by_text("第 1 页", exact=True).count() == 1
-    assert page.get_by_text("已显示 1 条 · 还有更多", exact=True).count() == 1
+    footer = history_panel.locator(":scope > .report-pagination")
+    assert footer.get_by_text("已显示 1 条 · 还有更多", exact=True).count() == 1
+    assert footer.get_by_role("button", name="加载更多", exact=True).count() == 1
+    assert page.locator(".search-view > .report-pagination").count() == 0
+    hero_box = hero.bounding_box()
+    filter_box = filter_card.bounding_box()
+    panel_box = history_panel.bounding_box()
+    assert hero_box is not None and filter_box is not None and panel_box is not None
+    assert abs(hero_box["x"] - filter_box["x"]) <= 1
+    assert abs(filter_box["x"] - panel_box["x"]) <= 1
+    assert abs(hero_box["width"] - filter_box["width"]) <= 1
+    assert abs(filter_box["width"] - panel_box["width"]) <= 1
+    assert hero_box["y"] + hero_box["height"] <= filter_box["y"] + 1
+    assert filter_box["y"] + filter_box["height"] <= panel_box["y"] + 1
     assert parse_qs(urlsplit(history_urls[-1]).query) == {
         "limit": ["20"], "child_id": ["8"]
     }
@@ -371,6 +401,7 @@ def test_history_append_failure_retains_rows_and_retries_same_cursor(teacher_bro
     page.set_default_timeout(5_000)
     page.set_viewport_size(viewport)
     history_urls = []
+    held_routes = []
     page.route(
         f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
         lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)),
@@ -382,18 +413,31 @@ def test_history_append_failure_retains_rows_and_retries_same_cursor(teacher_bro
             body = {"items": [history_item(42)], "next_before_id": 42}
             route.fulfill(status=200, content_type="application/json", body=json.dumps(body, ensure_ascii=False))
             return
-        if len(history_urls) == 2:
-            route.fulfill(status=503, content_type="text/plain", body="raw append secret")
-            return
-        body = {"items": [history_item(41)], "next_before_id": None}
-        route.fulfill(status=200, content_type="application/json", body=json.dumps(body, ensure_ascii=False))
+        held_routes.append(route)
 
     page.route(f"{teacher_browser.server.base_url}/api/conversations/history**", history)
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#search?child_id=8", wait_until="domcontentloaded")
     setup(page)
     page.get_by_role("heading", name="会话 #42", exact=True).wait_for()
+    panel = page.locator(".report-history-panel")
     button = page.get_by_role("button", name="加载更多", exact=True)
-    button.click()
+    with page.expect_request(lambda request: "before_id=42" in request.url) as append_request:
+        button.click()
+    assert urlsplit(append_request.value.url).query == "limit=20&child_id=8&before_id=42"
+    loading = page.get_by_text("正在加载更多历史记录…", exact=True)
+    loading.wait_for()
+    assert len(held_routes) == 1
+    assert page.get_by_role("heading", name="会话 #42", exact=True).count() == 1
+    assert page.locator(".report-history-row").count() == 1
+    assert button.is_disabled()
+    assert page.locator(".search-view").get_attribute("aria-busy") == "true"
+    assert panel.get_attribute("aria-busy") == "true"
+    assert loading.get_attribute("role") == "status"
+    assert loading.get_attribute("aria-live") == "polite"
+    assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+    assert page.locator("#main button:visible, #main a:visible, #main select:visible").evaluate_all("nodes => nodes.every(node => { const r=node.getBoundingClientRect(); return r.width>=44 && r.height>=44; })")
+
+    held_routes[0].fulfill(status=503, content_type="text/plain", body="raw append secret")
     alert = page.get_by_text("更多历史记录加载失败，已保留当前结果。请重试。", exact=True)
     alert.wait_for()
     assert alert.get_attribute("role") == "alert"
@@ -403,9 +447,16 @@ def test_history_append_failure_retains_rows_and_retries_same_cursor(teacher_bro
     assert button.is_enabled()
     assert button.evaluate("node => document.activeElement === node")
     assert page.locator(".search-view").get_attribute("aria-busy") is None
+    assert panel.get_attribute("aria-busy") is None
     assert urlsplit(history_urls[1]).query == "limit=20&child_id=8&before_id=42"
 
-    button.click()
+    with page.expect_request(lambda request: "before_id=42" in request.url) as retry_request:
+        button.click()
+    page.get_by_text("正在加载更多历史记录…", exact=True).wait_for()
+    assert len(held_routes) == 2
+    assert urlsplit(retry_request.value.url).query == "limit=20&child_id=8&before_id=42"
+    body = {"items": [history_item(41)], "next_before_id": None}
+    held_routes[1].fulfill(status=200, content_type="application/json", body=json.dumps(body, ensure_ascii=False))
     page.get_by_role("heading", name="会话 #41", exact=True).wait_for()
     assert urlsplit(history_urls[2]).query == "limit=20&child_id=8&before_id=42"
     assert page.locator(".report-history-row").count() == 2

@@ -401,18 +401,30 @@ export function createReportRoutes(value) {
   const search = context => {
     const scope = scopeFor(context);
     const view = h('section', { class: 'reports-view search-view', 'aria-busy': 'true' });
-    const filter = h('form', { class: 'search-filter' });
-    const hero = h('header', { class: 'card report-hero search-hero' },
-      h('div', { class: 'report-hero-copy' },
-        h('p', { class: 'report-hero-eyebrow', text: '明细检索' }),
-        h('h1', { text: '查找历史日记' }),
-        h('p', { class: 'muted', text: '不含关键词、日期范围或排序' })),
-      filter);
+    const hero = h('header', { class: 'search-hero' },
+      h('p', { class: 'search-hero-eyebrow', text: '幼儿筛选 · 不含关键词、日期范围或排序' }),
+      h('h1', { text: '查找历史日记' }),
+      h('p', { class: 'muted search-hero-description', text: '每行保留会话 ID、日期、轮数、分析与审阅状态。' }));
+    const filter = h('form', { class: 'card search-filter' });
     const status = h('p', { class: 'report-status' });
     const results = h('div', { class: 'report-history', 'aria-label': '历史日记结果' });
     const pagination = h('div', { class: 'report-pagination' });
+    const pageBadge = h('span', { class: 'report-page-number' });
+    pageBadge.hidden = true;
+    const panelHeader = h('header', { class: 'report-history-panel-header' },
+      h('h2', { id: 'report-history-title', text: '历史记录' }), pageBadge);
+    const columns = h('div', { class: 'report-history-columns', 'aria-hidden': 'true' },
+      h('span', { text: '会话' }),
+      h('span', { text: '日期' }),
+      h('span', { text: '幼儿 / 轮数' }),
+      h('div', { class: 'report-history-column-statuses' },
+        h('span', { text: '分析状态' }), h('span', { text: '审阅状态' })),
+      h('span'));
+    const historyPanel = h('section', {
+      class: 'card report-history-panel', 'aria-labelledby': 'report-history-title', 'aria-busy': 'true',
+    }, panelHeader, columns, results, pagination);
     setReportStatus(status, '正在加载幼儿…', 'status');
-    view.append(hero, status, results, pagination);
+    view.append(hero, filter, status, historyPanel);
     context.root.replaceChildren(view);
     const raw = context.params.get('child_id');
     const selectedId = raw && /^\d+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;
@@ -438,11 +450,12 @@ export function createReportRoutes(value) {
       retry.focus();
     };
 
-    const rowFor = item => h('article', { class: 'card report-history-row' },
-      h('div', { class: 'report-history-copy' },
-        h('h2', { text: `会话 #${item.id}` }),
+    const rowFor = item => h('article', { class: 'report-history-row' },
+      h('h3', { class: 'report-history-id', text: `会话 #${item.id}` }),
+      h('time', { class: 'report-history-date', datetime: item.date, text: item.date }),
+      h('div', { class: 'report-history-child-meta' },
         h('p', { class: 'report-history-child', text: displayName(item.child) }),
-        h('p', { class: 'report-history-meta', text: `${item.date} · ${item.round} 轮` })),
+        h('p', { class: 'report-history-rounds', text: `${item.round} 轮` })),
       h('div', { class: 'report-history-statuses' },
         h('span', {
           class: 'report-status-tag', 'data-status-kind': 'analysis', 'data-status-value': item.analysis_status,
@@ -458,8 +471,9 @@ export function createReportRoutes(value) {
       }));
 
     const renderPagination = () => {
+      pageBadge.hidden = false;
+      pageBadge.textContent = `第 ${loadedPageCount} 页`;
       pagination.replaceChildren(
-        h('p', { class: 'report-page-number', text: `第 ${loadedPageCount} 页` }),
         h('p', {
           class: 'report-results-summary',
           text: `已显示 ${renderedItemCount} 条 · ${nextBeforeId === null ? '已全部加载' : '还有更多'}`,
@@ -494,6 +508,7 @@ export function createReportRoutes(value) {
       if (append && requestCursor === null) return;
       loadingMore = true;
       view.setAttribute('aria-busy', 'true');
+      historyPanel.setAttribute('aria-busy', 'true');
       if (button) button.disabled = true;
       setReportStatus(status, append ? '正在加载更多历史记录…' : '正在加载历史记录…', 'status');
       try {
@@ -515,13 +530,17 @@ export function createReportRoutes(value) {
         }
       } finally {
         loadingMore = false;
-        if (scope.alive(token)) view.removeAttribute('aria-busy');
+        if (scope.alive(token)) {
+          view.removeAttribute('aria-busy');
+          historyPanel.removeAttribute('aria-busy');
+        }
       }
     };
 
     const load = async () => {
       const token = scope.next();
       view.setAttribute('aria-busy', 'true');
+      historyPanel.setAttribute('aria-busy', 'true');
       setReportStatus(status, '正在加载幼儿…', 'status');
       try {
         const childResponse = await scope.run('/api/children?include_inactive=true', {}, token);
@@ -539,7 +558,10 @@ export function createReportRoutes(value) {
       } catch (_error) {
         showRetry(token);
       } finally {
-        if (scope.alive(token)) view.removeAttribute('aria-busy');
+        if (scope.alive(token)) {
+          view.removeAttribute('aria-busy');
+          historyPanel.removeAttribute('aria-busy');
+        }
       }
     };
     void load();
