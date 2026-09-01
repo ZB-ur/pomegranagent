@@ -92,6 +92,41 @@ def test_teacher_locked_bootstrap_makes_only_runtime_and_auth_requests(teacher_b
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_locked_shell_uses_the_approved_brand_topbar_and_auth_regions(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher_page(teacher_browser, viewport)
+    page.get_by_label("设置教师 PIN", exact=True).wait_for()
+
+    brand = page.locator(".teacher-brand")
+    assert brand.count() == 1
+    assert brand.get_by_text("鸭鸭日记本", exact=True).count() == 1
+    assert brand.get_by_text("教师端", exact=True).count() == 1
+    assert brand.locator("img.teacher-logo").count() == 1
+
+    topbar = page.locator(".teacher-topbar")
+    assert topbar.count() == 1
+    assert topbar.get_by_text("安全设置", exact=True).count() == 1
+    assert page.locator(".teacher-auth-view").count() == 1
+    assert page.locator(".teacher-auth-card").count() == 1
+    assert page.get_by_text("仅本机验证", exact=True).count() == 1
+
+    sidebar_box = page.locator(".teacher-sidebar").bounding_box()
+    assert sidebar_box is not None
+    expected_width = 190 if viewport["width"] == 1024 else 220
+    assert abs(sidebar_box["width"] - expected_width) <= 1
+    assert page.locator("#nav button").count() == 7
+    for button in page.locator("#nav button").all():
+        box = button.bounding_box()
+        assert box is not None
+        assert box["height"] >= 44
+        assert button.is_disabled()
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_teacher_first_setup_and_manual_lock_stay_in_the_same_document(teacher_browser, viewport):
     _context, page = open_teacher_page(teacher_browser, viewport)
     page.get_by_role("heading", name="首次设置教师 PIN", exact=True).wait_for()

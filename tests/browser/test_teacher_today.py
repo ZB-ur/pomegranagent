@@ -237,6 +237,52 @@ def test_teacher_today_shows_all_panel_loading_states_before_any_response(teache
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_today_uses_the_approved_hero_and_two_column_panel_grid(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher(teacher_browser, viewport)
+    install_panel_routes(page, teacher_browser, empty_handlers())
+    setup_teacher(page)
+    panel(page, "failed").get_by_text("暂无分析失败会话", exact=True).wait_for()
+
+    topbar = page.locator(".teacher-topbar")
+    assert topbar.count() == 1
+    assert topbar.get_by_text("今日任务", exact=True).count() == 1
+    assert topbar.get_by_role("button", name="立即锁定", exact=True).count() == 1
+
+    hero = page.locator(".today-hero")
+    grid = page.locator(".today-panel-grid")
+    assert hero.count() == 1
+    assert hero.get_by_text("今天的工作，一眼看清", exact=True).count() == 1
+    assert grid.count() == 1
+    assert grid.locator(":scope > [data-today-panel]").count() == 4
+    assert grid.evaluate(
+        "node => getComputedStyle(node).gridTemplateColumns.split(' ').length === 2"
+    )
+
+    tones = {
+        "roster": "success",
+        "pending": "warning",
+        "processing": "info",
+        "failed": "danger",
+    }
+    for key, tone in tones.items():
+        target = panel(page, key)
+        assert target.get_attribute("data-tone") == tone
+        assert target.locator(".today-status-badge").count() == 1
+
+    hero_box = hero.bounding_box()
+    grid_box = grid.bounding_box()
+    assert hero_box is not None and grid_box is not None
+    assert hero_box["y"] + hero_box["height"] <= grid_box["y"]
+    assert grid_box["width"] >= hero_box["width"] * 0.95
+    assert page.get_by_text("本周指标暂不可用", exact=True).count() == 1
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 @pytest.mark.parametrize("key", list(PANEL_PATHS))
 def test_teacher_today_each_panel_has_its_fixed_empty_state(teacher_browser, viewport, key):
     _context, page = open_teacher(teacher_browser, viewport)
