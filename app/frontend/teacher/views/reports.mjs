@@ -75,6 +75,34 @@ export function parseGrowth(value, expectedChildId) {
   return { ...result, dimensions };
 }
 
+export function buildGrowthPresentation(result) {
+  const series = result.dimensions.map(dimension => {
+    const points = [...dimension.points].sort((left, right) => left.date.localeCompare(right.date));
+    const latest = points.at(-1) || null;
+    const recent = points.slice(-5);
+    return {
+      ...dimension, points, latest,
+      recentMean: recent.length ? Number((recent.reduce((sum, point) => sum + point.score, 0) / recent.length).toFixed(1)) : null,
+      differenceFromEarliest: latest ? latest.score - points[0].score : null,
+      chronologicalText: points.length ? points.map(point => `${point.date} ${point.score} 分`).join('；') : '暂无已确认数据',
+    };
+  });
+  const dates = [...new Set(series.flatMap(item => item.points.map(point => point.date)))].sort();
+  return { dates, hasData: series.some(item => item.points.length), series };
+}
+
+export function setReportStatus(node, text, role) {
+  node.textContent = text;
+  if (role === null) {
+    node.removeAttribute('role');
+    node.removeAttribute('aria-live');
+    return;
+  }
+  node.setAttribute('role', role);
+  if (role === 'status') node.setAttribute('aria-live', 'polite');
+  else node.removeAttribute('aria-live');
+}
+
 export function parseHistoryPage(value) {
   const page = record(value, ['items', 'next_before_id']);
   const items = array(page.items).map(item => {
@@ -144,94 +172,199 @@ export function createReportRoutes(value) {
     };
   };
 
-  const selectorFor = (children, selectedId, labelText, onChange) => {
+  const selectorFor = (children, selectedId, labelText, emptyLabel, onChange) => {
     const id = labelText === '选择幼儿' ? 'growth-child-select' : 'search-child-select';
     const select = h('select', { id });
-    select.append(h('option', { value: '', text: '全部幼儿' }));
+    select.append(h('option', { value: '', text: emptyLabel }));
     for (const child of children) select.append(h('option', { value: String(child.id), text: displayName(child) }));
     select.value = selectedId ? String(selectedId) : '';
     select.addEventListener('change', onChange);
-    return h('div', { class: 'teacher-field' }, h('label', { for: id, text: labelText }), select);
+    return {
+      field: h('div', { class: 'teacher-field' }, h('label', { for: id, text: labelText }), select),
+      select,
+    };
   };
 
-  const renderChart = (container, result) => {
-    container.replaceChildren();
-    if (!result.dimensions.some(item => item.points.length)) {
-      container.append(h('p', { class: 'muted', text: '暂无已确认的成长数据' }));
+  const renderGrowth = (summaryStack, workspace, chart, dataPanel, result) => {
+    summaryStack.replaceChildren();
+    chart.replaceChildren();
+    dataPanel.replaceChildren();
+    if (!result.hasData) {
+      summaryStack.hidden = true;
+      workspace.hidden = true;
       return;
     }
+    summaryStack.hidden = false;
+    workspace.hidden = false;
+
+    for (const series of result.series.filter(item => item.latest !== null)) {
+      const difference = series.differenceFromEarliest > 0
+        ? `+${series.differenceFromEarliest}`
+        : String(series.differenceFromEarliest);
+      const metric = (label, value, detail = null) => {
+        const node = h('div', { class: 'growth-summary-metric' },
+          h('span', { class: 'growth-summary-label', text: label }),
+          h('strong', { text: value }));
+        if (detail !== null) node.append(h('small', { text: detail }));
+        return node;
+      };
+      const grid = h('div', { class: 'growth-summary-grid' },
+        metric('最新评分', `${series.latest.score} 分`, series.latest.date),
+        metric('最近 5 次均值', `${series.recentMean} 分`),
+        metric('与最早记录差值', difference, '仅表示数值差，不代表结论'));
+      summaryStack.append(h('article', { class: 'card growth-summary-card' },
+        h('h2', { text: series.name }), grid));
+    }
+
     const namespace = 'http://www.w3.org/2000/svg';
     const svg = document.createElementNS(namespace, 'svg');
     svg.setAttribute('viewBox', '0 0 760 320');
     svg.setAttribute('role', 'img');
-    svg.setAttribute('aria-label', '能力成长曲线');
+    svg.setAttribute('aria-labelledby', 'growth-chart-title growth-chart-description');
+    const svgTitle = document.createElementNS(namespace, 'title');
+    svgTitle.setAttribute('id', 'growth-chart-title');
+    svgTitle.textContent = '能力成长曲线';
+    const svgDescription = document.createElementNS(namespace, 'desc');
+    svgDescription.setAttribute('id', 'growth-chart-description');
+    svgDescription.textContent = '按日期展示各能力维度已确认的 1 到 5 分评分。';
+    svg.append(svgTitle, svgDescription);
+
     const colors = ['#2f80ed', '#16a34a', '#f59e0b', '#8b5cf6', '#ef4444'];
-    result.dimensions.forEach((dimension, dimensionIndex) => {
-      const label = h('p', { class: 'report-legend', text: dimension.name });
-      container.append(label);
-      const points = dimension.points.map((point, index) => ({
-        x: 60 + index * Math.max(1, 640 / Math.max(1, dimension.points.length - 1)),
-        y: 270 - (point.score - 1) * 55,
+    const left = 62;
+    const right = 28;
+    const top = 28;
+    const bottom = 266;
+    const plotWidth = 760 - left - right;
+    const pointX = date => {
+      const index = result.dates.indexOf(date);
+      return result.dates.length === 1 ? left + (plotWidth / 2) : left + (index * plotWidth / (result.dates.length - 1));
+    };
+    const pointY = score => bottom - ((score - 1) * (bottom - top) / 4);
+    for (const score of [5, 4, 3, 2, 1]) {
+      const y = pointY(score);
+      const gridLine = document.createElementNS(namespace, 'line');
+      gridLine.setAttribute('x1', String(left));
+      gridLine.setAttribute('x2', String(left + plotWidth));
+      gridLine.setAttribute('y1', String(y));
+      gridLine.setAttribute('y2', String(y));
+      gridLine.setAttribute('class', 'report-chart-grid-line');
+      const label = document.createElementNS(namespace, 'text');
+      label.setAttribute('x', '42');
+      label.setAttribute('y', String(y + 5));
+      label.setAttribute('data-axis-score', String(score));
+      label.textContent = String(score);
+      svg.append(gridLine, label);
+    }
+    for (const date of result.dates) {
+      const label = document.createElementNS(namespace, 'text');
+      label.setAttribute('x', String(pointX(date)));
+      label.setAttribute('y', '298');
+      label.setAttribute('class', 'report-chart-date');
+      label.textContent = date;
+      svg.append(label);
+    }
+
+    const legend = h('div', { class: 'report-chart-legend', 'aria-label': '图例' });
+    result.series.forEach((series, seriesIndex) => {
+      if (!series.points.length) return;
+      const color = colors[seriesIndex % colors.length];
+      legend.append(h('span', { class: 'report-legend' },
+        h('span', { class: 'report-legend-swatch', 'aria-hidden': 'true', style: `background:${color}` }),
+        h('span', { text: `图例 · ${series.name}` })));
+      const points = series.points.map(point => ({
+        ...point,
+        x: pointX(point.date),
+        y: pointY(point.score),
       }));
       if (points.length) {
         const path = document.createElementNS(namespace, 'path');
         path.setAttribute('d', points.map((point, index) => `${index ? 'L' : 'M'}${point.x},${point.y}`).join(' '));
         path.setAttribute('fill', 'none');
-        path.setAttribute('stroke', colors[dimensionIndex % colors.length]);
+        path.setAttribute('stroke', color);
         path.setAttribute('stroke-width', '3');
         svg.append(path);
       }
-      points.forEach((point, index) => {
+      points.forEach(point => {
         const circle = document.createElementNS(namespace, 'circle');
         circle.setAttribute('cx', String(point.x)); circle.setAttribute('cy', String(point.y)); circle.setAttribute('r', '5');
-        circle.setAttribute('fill', colors[dimensionIndex % colors.length]);
+        circle.setAttribute('fill', color);
         const title = document.createElementNS(namespace, 'title');
-        title.textContent = `${dimension.points[index].date}：${dimension.points[index].score}分`;
+        title.textContent = `${series.name}，${point.date}，${point.score} 分`;
         circle.append(title); svg.append(circle);
       });
     });
-    container.prepend(svg);
+    chart.append(h('h2', { text: '成长曲线' }), legend, svg);
+    dataPanel.append(h('h2', { text: '数据点说明' }));
+    for (const series of result.series) {
+      dataPanel.append(h('section', { class: 'growth-data-series' },
+        h('h3', { text: `${series.name} · 已确认记录` }),
+        h('p', { text: series.chronologicalText })));
+    }
   };
 
   const growth = context => {
     const scope = scopeFor(context);
-    const view = h('section', { class: 'reports-view' });
-    const controls = h('div', { class: 'card' });
-    const status = h('p', { role: 'status', 'aria-live': 'polite', text: '正在加载幼儿…' });
-    const chart = h('div', { class: 'card report-chart' });
-    view.append(h('h1', { text: '能力成长曲线' }), controls, status, chart);
+    const view = h('section', { class: 'reports-view growth-view', 'aria-busy': 'true' });
+    const controls = h('div', { class: 'report-hero-selector' });
+    const hero = h('header', { class: 'card report-hero' },
+      h('div', { class: 'report-hero-copy' },
+        h('h1', { text: '能力成长曲线' }),
+        h('p', { class: 'report-hero-lead', text: '看见变化，不替孩子下结论' }),
+        h('p', { class: 'muted', text: '评分固定为 1–5 分，只呈现已确认的记录。' })),
+      controls);
+    const status = h('p', { class: 'report-status' });
+    const summaryStack = h('div', { class: 'growth-summary-stack' });
+    summaryStack.hidden = true;
+    const chart = h('section', { class: 'card report-chart' });
+    const dataPanel = h('aside', { class: 'card growth-data-panel' });
+    const workspace = h('div', { class: 'growth-workspace' }, chart, dataPanel);
+    workspace.hidden = true;
+    setReportStatus(status, '正在加载幼儿…', 'status');
+    view.append(hero, status, summaryStack, workspace);
     context.root.replaceChildren(view);
     const raw = context.params.get('child_id');
     const selectedId = raw && /^\d+$/.test(raw) && Number(raw) > 0 ? Number(raw) : null;
-    const showRetry = () => {
+    const showRetry = token => {
+      if (!scope.alive(token)) return;
       const retry = h('button', { type: 'button', class: 'btn gray', text: '重试成长数据' });
       retry.addEventListener('click', () => void load());
-      status.setAttribute('role', 'alert');
-      status.replaceChildren('成长数据加载失败，请重试。', retry);
+      setReportStatus(status, '成长数据加载失败，请重试。', 'alert');
+      status.append(' ', retry);
+      retry.focus();
     };
     const load = async () => {
       const token = scope.next();
-      status.setAttribute('role', 'status');
-      status.textContent = '正在加载幼儿…';
+      view.setAttribute('aria-busy', 'true');
+      setReportStatus(status, '正在加载幼儿…', 'status');
       try {
         const childResponse = await scope.run('/api/children?include_inactive=true', {}, token);
         if (!childResponse.current) return;
         const children = parseChildren(childResponse.result);
-        controls.replaceChildren(selectorFor(children, selectedId, '选择幼儿', event => {
+        const selector = selectorFor(children, selectedId, '选择幼儿', '请选择幼儿', event => {
           const id = Number(event.target.value);
           navigate(id ? `#growth?child_id=${id}` : '#growth');
-        }));
-        if (selectedId === null) { status.textContent = '请选择一名幼儿查看成长曲线。'; return; }
-        if (!children.some(child => child.id === selectedId)) { status.setAttribute('role', 'alert'); status.textContent = '所选幼儿不存在，请重新选择。'; return; }
-        status.textContent = '正在加载成长数据…';
+        });
+        controls.replaceChildren(selector.field);
+        if (selectedId === null) {
+          setReportStatus(status, '请选择一名幼儿查看成长曲线。', null);
+          return;
+        }
+        if (!children.some(child => child.id === selectedId)) {
+          setReportStatus(status, '所选幼儿不存在，请重新选择。', 'alert');
+          selector.select.focus();
+          return;
+        }
+        setReportStatus(status, '正在加载成长数据…', 'status');
         const response = await scope.run(`/api/analysis/growth?child_id=${selectedId}`, {}, token);
         if (!response.current) return;
-        const result = parseGrowth(response.result, selectedId);
-        renderChart(chart, result);
-        status.setAttribute('role', 'status');
-        status.textContent = '成长数据已加载';
+        const result = buildGrowthPresentation(parseGrowth(response.result, selectedId));
+        renderGrowth(summaryStack, workspace, chart, dataPanel, result);
+        if (result.hasData) setReportStatus(status, '', null);
+        else setReportStatus(status, '暂无已确认的成长数据', 'status');
       } catch (_error) {
-        if (scope.alive(token)) showRetry();
+        showRetry(token);
+      } finally {
+        if (scope.alive(token)) view.removeAttribute('aria-busy');
       }
     };
     void load();
@@ -310,10 +443,11 @@ export function createReportRoutes(value) {
         const childResponse = await scope.run('/api/children?include_inactive=true', {}, token);
         if (!childResponse.current) return;
         const children = parseChildren(childResponse.result);
-        controls.replaceChildren(selectorFor(children, selectedId, '筛选幼儿', event => {
+        const selector = selectorFor(children, selectedId, '筛选幼儿', '全部幼儿', event => {
           const id = Number(event.target.value);
           navigate(id ? `#search?child_id=${id}` : '#search');
-        }));
+        });
+        controls.replaceChildren(selector.field);
         if (selectedId !== null && !children.some(child => child.id === selectedId)) {
           status.setAttribute('role', 'alert'); status.textContent = '所选幼儿不存在，请重新选择。'; return;
         }

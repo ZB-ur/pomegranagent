@@ -31,19 +31,157 @@ def test_growth_uses_canonical_hash_and_safe_svg_nodes(teacher_browser, viewport
     page.route(f"{teacher_browser.server.base_url}/api/children?include_inactive=true", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)))
     page.route(f"{teacher_browser.server.base_url}/api/analysis/growth?child_id=7", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps({
         "child_id": 7,
-        "dimensions": [{"key": "language", "name": "<script>语言</script>", "points": [{"date": "2026-08-23", "score": 4}]}],
+        "dimensions": [{"key": "language", "name": "<script>语言</script>", "points": [
+            {"date": "2026-08-06", "score": 5},
+            {"date": "2026-08-01", "score": 1},
+            {"date": "2026-08-02", "score": 2},
+            {"date": "2026-08-03", "score": 3},
+            {"date": "2026-08-04", "score": 4},
+            {"date": "2026-08-05", "score": 5},
+        ]}],
     }, ensure_ascii=False)))
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#growth", wait_until="domcontentloaded")
     setup(page)
     page.get_by_role("heading", name="能力成长曲线", exact=True).wait_for()
     assert page_errors == []
     assert page.locator("#main label").count() == 1, page.locator("#main").inner_text()
+    assert page.get_by_text("看见变化，不替孩子下结论", exact=True).count() == 1
     page.get_by_label("选择幼儿", exact=True).select_option("7")
     page.wait_for_url("**/teacher.html#growth?child_id=7")
     page.get_by_text("<script>语言</script>", exact=True).wait_for()
+    chronological = page.get_by_text("2026-08-06 5 分", exact=False)
+    chronological.first.wait_for()
+    assert chronological.count() >= 1
+    assert page.get_by_text("最近 5 次均值", exact=True).count() == 1
+    assert page.get_by_text("与最早记录差值", exact=True).count() == 1
+    summary = page.locator(".growth-summary-stack")
+    assert summary.get_by_text("最新评分", exact=True).count() == 1
+    assert summary.get_by_text("2026-08-06", exact=True).count() == 1
+    assert summary.get_by_text("5 分", exact=True).count() == 1
+    assert summary.get_by_text("3.8 分", exact=True).count() == 1
+    assert summary.get_by_text("+4", exact=True).count() == 1
+    assert summary.get_by_text("仅表示数值差，不代表结论", exact=True).count() == 1
+    assert page.locator(".report-chart [data-axis-score]").evaluate_all("nodes => nodes.map(node => node.textContent)") == ["5", "4", "3", "2", "1"]
     assert page.locator("#main script").count() == 0
     assert page.locator("#main svg").count() == 1
+    assert page.locator(".growth-view").get_attribute("aria-busy") is None
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+    assert page.locator("#main button:visible, #main a:visible, #main select:visible").evaluate_all("nodes => nodes.every(node => { const r=node.getBoundingClientRect(); return r.width>=44 && r.height>=44; })")
+
+    chart_box = page.locator(".report-chart").bounding_box()
+    data_box = page.locator(".growth-data-panel").bounding_box()
+    assert chart_box is not None and data_box is not None
+    if viewport["width"] >= 1280:
+        assert abs(chart_box["y"] - data_box["y"]) <= 1
+        assert chart_box["x"] + chart_box["width"] <= data_box["x"] + 1
+    else:
+        assert chart_box["y"] + chart_box["height"] <= data_box["y"] + 1
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_growth_unselected_is_visible_non_live_and_skips_growth_request(teacher_browser, viewport):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    growth_calls = []
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)),
+    )
+
+    def growth(route):
+        growth_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body='{"child_id":7,"dimensions":[]}')
+
+    page.route(f"{teacher_browser.server.base_url}/api/analysis/growth**", growth)
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#growth", wait_until="domcontentloaded")
+    setup(page)
+    select = page.get_by_label("选择幼儿", exact=True)
+    select.wait_for()
+    status = page.locator(".growth-view .report-status")
+    assert select.locator("option").first.inner_text() == "请选择幼儿"
+    assert status.inner_text() == "请选择一名幼儿查看成长曲线。"
+    assert status.get_attribute("role") is None
+    assert status.get_attribute("aria-live") is None
+    assert page.locator(".growth-view").get_attribute("aria-busy") is None
+    assert page.locator("#main svg").count() == 0
+    assert growth_calls == []
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_growth_invalid_child_alerts_focuses_selector_and_skips_growth_request(teacher_browser, viewport):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    growth_calls = []
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)),
+    )
+
+    def growth(route):
+        growth_calls.append(route.request.url)
+        route.fulfill(status=200, content_type="application/json", body='{"child_id":7,"dimensions":[]}')
+
+    page.route(f"{teacher_browser.server.base_url}/api/analysis/growth**", growth)
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#growth?child_id=999", wait_until="domcontentloaded")
+    setup(page)
+    status = page.get_by_text("所选幼儿不存在，请重新选择。", exact=True)
+    status.wait_for()
+    select = page.get_by_label("选择幼儿", exact=True)
+    assert status.get_attribute("role") == "alert"
+    assert select.evaluate("node => document.activeElement === node")
+    assert page.locator(".growth-view").get_attribute("aria-busy") is None
+    assert growth_calls == []
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_growth_marks_both_loading_phases_busy_then_renders_polite_empty_state(teacher_browser, viewport):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page_errors = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#today", wait_until="domcontentloaded")
+    setup(page)
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
+    page.evaluate("""() => {
+      const original = window.DuckAPI;
+      window.DuckAPI = Object.freeze({
+        ...original,
+        request(path, options) {
+          if (path === '/api/children?include_inactive=true') {
+            return new Promise(resolve => { window.__growthChildrenResolve = resolve; });
+          }
+          if (path === '/api/analysis/growth?child_id=7') {
+            return new Promise(resolve => { window.__growthDataResolve = resolve; });
+          }
+          return original.request(path, options);
+        },
+      });
+    }""")
+    page.evaluate("location.hash = '#growth?child_id=7'")
+    page.wait_for_function("() => Boolean(window.__growthChildrenResolve)")
+    view = page.locator(".growth-view")
+    assert view.get_attribute("aria-busy") == "true"
+    assert page.get_by_text("正在加载幼儿…", exact=True).get_attribute("role") == "status"
+
+    page.evaluate("children => window.__growthChildrenResolve(children)", CHILDREN)
+    page.wait_for_function("() => Boolean(window.__growthDataResolve)")
+    assert view.get_attribute("aria-busy") == "true"
+    assert page.get_by_text("正在加载成长数据…", exact=True).get_attribute("aria-live") == "polite"
+
+    page.evaluate("() => window.__growthDataResolve({child_id: 7, dimensions: []})")
+    empty = page.get_by_text("暂无已确认的成长数据", exact=True)
+    empty.wait_for()
+    assert empty.get_attribute("role") == "status"
+    assert empty.get_attribute("aria-live") == "polite"
+    assert view.get_attribute("aria-busy") is None
+    assert page.locator("#main svg").count() == 0
+    assert page_errors == []
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -115,9 +253,16 @@ def test_growth_initial_failure_has_accessible_retry(teacher_browser, viewport):
     setup(page)
     retry = page.get_by_role("button", name="重试成长数据", exact=True)
     retry.wait_for()
+    status = page.locator(".growth-view .report-status")
+    assert status.get_attribute("role") == "alert"
+    assert status.evaluate("node => node.firstChild?.textContent") == "成长数据加载失败，请重试。"
     assert "raw secret" not in page.locator("#main").inner_text()
+    assert retry.evaluate("node => document.activeElement === node")
     retry.click()
-    page.get_by_text("成长数据已加载", exact=True).wait_for()
+    empty = page.get_by_text("暂无已确认的成长数据", exact=True)
+    empty.wait_for()
+    assert empty.get_attribute("role") == "status"
+    assert page.locator("#main svg").count() == 0
     assert len(calls) == 2
 
 

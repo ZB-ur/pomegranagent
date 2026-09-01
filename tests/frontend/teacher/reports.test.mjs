@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import {
+  buildGrowthPresentation,
   createReportRoutes,
   parseGrowth,
   parseHistoryPage,
@@ -40,6 +41,34 @@ test('growth parser accepts only matching strict nested DTO', () => {
     { child_id: 7, dimensions: [{ key: 'x', name: '语言', points: [{ date: 'bad', score: 4 }] }] },
     { child_id: 7, dimensions: [], extra: true },
   ]) assert.throws(() => parseGrowth(value, 7), TypeError);
+});
+
+
+test('growth presentation sorts and summarizes each dimension independently', () => {
+  const parsed = parseGrowth({
+    child_id: 7,
+    dimensions: [
+      { key: 'language', name: '语言表达能力', points: [
+        { date: '2026-08-06', score: 5 }, { date: '2026-08-01', score: 1 },
+        { date: '2026-08-02', score: 2 }, { date: '2026-08-03', score: 3 },
+        { date: '2026-08-04', score: 4 }, { date: '2026-08-05', score: 5 },
+      ] },
+      { key: 'empathy', name: '同理心', points: [{ date: '2026-08-06', score: 2 }] },
+    ],
+  }, 7);
+  const result = buildGrowthPresentation(parsed);
+  assert.deepEqual(result.dates, ['2026-08-01', '2026-08-02', '2026-08-03', '2026-08-04', '2026-08-05', '2026-08-06']);
+  assert.deepEqual(result.series[0].latest, { date: '2026-08-06', score: 5 });
+  assert.equal(result.series[0].recentMean, 3.8);
+  assert.equal(result.series[0].differenceFromEarliest, 4);
+  assert.equal(result.series[1].recentMean, 2);
+});
+
+
+test('growth presentation reports an all-empty DTO without chart data', () => {
+  const parsed = parseGrowth({ child_id: 7, dimensions: [{ key: 'language', name: '语言表达能力', points: [] }] }, 7);
+  assert.equal(buildGrowthPresentation(parsed).hasData, false);
+  assert.equal(buildGrowthPresentation(parsed).series[0].chronologicalText, '暂无已确认数据');
 });
 
 

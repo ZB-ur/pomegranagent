@@ -703,7 +703,8 @@ textarea { min-height: 46px; width: 100%; }
   }
 }
 
-.management-view, .reports-view { display: grid; gap: 16px; min-width: 0; }
+.management-view { display: grid; gap: 16px; min-width: 0; }
+.reports-view { display: grid; gap: 16px; min-width: 0; }
 .management-view > h1, .reports-view > h1 { font-size: 30px; line-height: 1.25; }
 .management-hero {
   align-items: center;
@@ -931,15 +932,60 @@ textarea { min-height: 46px; width: 100%; }
 .roster-panel-footer h3 { font-size: 15px; margin-bottom: 4px; }
 .roster-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: flex-end; }
 .roster-actions .btn { min-width: 150px; }
-.report-chart { min-width: 0; overflow-x: auto; }
-.report-chart svg { display: block; max-width: 100%; min-width: 620px; }
-.report-legend { font-weight: 600; overflow-wrap: anywhere; }
+.report-hero {
+  align-items: center;
+  display: grid;
+  gap: 20px;
+  grid-template-columns: minmax(0, 1fr) minmax(220px, 320px);
+  min-width: 0;
+}
+.report-hero-copy, .report-hero-selector { min-width: 0; }
+.report-hero-copy { display: grid; gap: 7px; }
+.report-hero-copy h1 { font-size: 26px; line-height: 1.35; overflow-wrap: anywhere; }
+.report-hero-lead { color: var(--teacher-action-primary); font-size: 17px; font-weight: 700; overflow-wrap: anywhere; }
+.report-status { align-items: center; display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; overflow-wrap: anywhere; }
+.report-status:empty { display: none; }
+.growth-summary-stack { display: grid; gap: 12px; min-width: 0; }
+.growth-summary-card { display: grid; gap: 14px; min-width: 0; }
+.growth-summary-card h2, .growth-data-panel h2, .growth-data-series h3 { overflow-wrap: anywhere; }
+.growth-summary-card h2, .growth-data-panel h2, .report-chart h2 { font-size: 18px; line-height: 1.35; }
+.growth-summary-grid { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.growth-summary-metric {
+  background: var(--teacher-surface-soft);
+  border-radius: 12px;
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  padding: 12px;
+}
+.growth-summary-label { color: var(--teacher-text-secondary); font-size: 12px; font-weight: 600; overflow-wrap: anywhere; }
+.growth-summary-metric strong { font-size: 20px; overflow-wrap: anywhere; }
+.growth-summary-metric small { color: var(--teacher-text-secondary); line-height: 1.45; overflow-wrap: anywhere; }
+.growth-workspace { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); min-width: 0; }
+.growth-workspace > * { min-width: 0; }
+.report-chart { display: grid; gap: 12px; min-width: 0; overflow: hidden; }
+.report-chart svg { display: block; height: auto; max-width: 100%; width: 100%; }
+.report-chart text { fill: var(--teacher-text-secondary); font-size: 12px; }
+.report-chart-grid-line { stroke: var(--teacher-border-subtle); stroke-width: 1; }
+.report-chart-date { text-anchor: middle; }
+.report-chart-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; min-width: 0; }
+.report-legend { align-items: center; display: inline-flex; font-weight: 600; gap: 7px; min-width: 0; overflow-wrap: anywhere; }
+.report-legend > span:last-child { min-width: 0; overflow-wrap: anywhere; }
+.report-legend-swatch { border-radius: 999px; flex: 0 0 auto; height: 10px; width: 24px; }
+.growth-data-panel { align-content: start; display: grid; gap: 14px; min-width: 0; }
+.growth-data-series { border-top: 1px solid var(--teacher-border-subtle); display: grid; gap: 6px; min-width: 0; padding-top: 12px; }
+.growth-data-series h3 { font-size: 14px; }
+.growth-data-series p { color: var(--teacher-text-secondary); line-height: 1.7; min-width: 0; overflow-wrap: anywhere; }
 .report-history { display: grid; gap: 12px; min-width: 0; }
 .report-history-row { display: grid; gap: 8px; }
 .report-history-row a, .report-load-more { align-items: center; display: inline-flex; min-height: 44px; min-width: 44px; width: fit-content; }
 .management-view dialog:not(.management-dialog) { border: 0; border-radius: 14px; margin: auto; max-width: min(520px, calc(100vw - 32px)); padding: 22px; }
 .management-view dialog:not(.management-dialog)::backdrop { background: rgba(36, 53, 43, .42); }
 .management-view dialog:not(.management-dialog) button { margin: 14px 10px 0 0; }
+
+@media (min-width: 1280px) {
+  .growth-workspace { grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); }
+}
 
 button, input, select, textarea { min-height: 44px; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible,
@@ -961,6 +1007,8 @@ h1[tabindex="-1"]:focus-visible, h2[tabindex="-1"]:focus-visible {
   .today-panel { min-height: 220px; padding-bottom: 12px; padding-top: 14px; }
   .today-metrics-strip { min-height: 44px; padding-bottom: 8px; padding-top: 8px; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .reports-view { gap: 12px; }
+  .report-hero { grid-template-columns: minmax(0, 1fr); }
   .management-hero { gap: 16px; }
   .management-copy h1 { font-size: 25px; }
   .management-row-actions { max-width: 190px; }
