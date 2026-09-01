@@ -149,13 +149,44 @@ def test_teacher_mismatched_setup_pin_is_local_and_never_calls_setup(
     assert "/api/auth/setup" not in application_paths(
         requests, teacher_browser.server.base_url
     )
-    assert primary.input_value() == PIN
+    assert primary.input_value() == ""
     assert confirmation.input_value() == ""
-    assert confirmation.evaluate("node => document.activeElement === node")
+    assert primary.evaluate("node => document.activeElement === node")
     assert page.get_by_role("button", name="设置并解锁", exact=True).is_enabled()
     assert page.get_by_role("heading", name="今日任务", exact=True).count() == 0
     assert_pin_absent(page, PIN)
     assert_pin_absent(page, "2469")
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_failed_setup_clears_both_pin_inputs_and_uses_safe_copy(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher_page(teacher_browser, viewport)
+    setup_requests = []
+
+    def fail_setup(route):
+        setup_requests.append(route.request.url)
+        route.fulfill(
+            status=500,
+            content_type="application/json",
+            body=json.dumps({"error": {"code": "SETUP_FAILED", "message": "raw-setup-2468"}}),
+        )
+
+    page.route(f"{teacher_browser.server.base_url}/api/auth/setup", fail_setup)
+    primary = page.get_by_label("设置教师 PIN", exact=True)
+    confirmation = page.get_by_label("再次输入教师 PIN", exact=True)
+    primary.fill(PIN)
+    confirmation.fill(PIN)
+    page.get_by_role("button", name="设置并解锁", exact=True).click()
+
+    page.get_by_text("暂时无法完成教师验证，请稍后重试。", exact=True).wait_for()
+    assert len(setup_requests) == 1
+    assert primary.input_value() == ""
+    assert confirmation.input_value() == ""
+    assert primary.evaluate("node => document.activeElement === node")
+    assert "raw-setup-2468" not in page.locator("body").inner_text()
+    assert_pin_absent(page, PIN)
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -356,6 +387,11 @@ def test_teacher_pagehide_clears_pin_and_success_paths_leave_no_pin_material(tea
     confirmation_input = page.get_by_label("再次输入教师 PIN", exact=True)
     setup_input.fill("1357")
     confirmation_input.fill("1357")
+    page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
+    assert setup_input.input_value() == ""
+    assert confirmation_input.input_value() == ""
+    setup_input.fill("8642")
+    confirmation_input.fill("8642")
     page.evaluate("window.dispatchEvent(new PageTransitionEvent('pagehide'))")
     assert setup_input.input_value() == ""
     assert confirmation_input.input_value() == ""

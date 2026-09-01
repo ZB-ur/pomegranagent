@@ -42,9 +42,13 @@ function h(tag, attrs, ...children) {
   return node;
 }
 
-function clearTeacherPin() {
+function wipeTeacherPinValues() {
   if (currentPinInput) currentPinInput.value = '';
   if (currentPinConfirmationInput) currentPinConfirmationInput.value = '';
+}
+
+function releaseTeacherPinInputs() {
+  wipeTeacherPinValues();
   currentPinInput = null;
   currentPinConfirmationInput = null;
 }
@@ -272,16 +276,16 @@ async function unlockTeacherPage() {
       submit.disabled = true;
       feedback.textContent = '';
       if (confirmationInput && input.value !== confirmationInput.value) {
-        confirmationInput.value = '';
+        wipeTeacherPinValues();
         feedback.textContent = '两次输入的 PIN 不一致，请重新确认。';
         submit.disabled = false;
-        confirmationInput.focus();
+        input.focus();
         return;
       }
       try {
         if (auth.configured) await window.DuckAuth.unlock(input.value);
         else await window.DuckAuth.setup(input.value);
-        clearTeacherPin();
+        releaseTeacherPinInputs();
         form.remove();
         teacherAuthenticated = true;
         updateTeacherNavigation();
@@ -292,8 +296,8 @@ async function unlockTeacherPage() {
         feedback.textContent = authenticationErrorCopy(error);
         submit.disabled = false;
         if (confirmationInput) {
-          confirmationInput.value = '';
-          confirmationInput.focus();
+          wipeTeacherPinValues();
+          input.focus();
         } else {
           input.focus();
         }
@@ -339,7 +343,7 @@ async function lockTeacherPage() {
     return;
   }
 
-  clearTeacherPin();
+  releaseTeacherPinInputs();
   if (teacherRouter) teacherRouter.stop();
   teacherRouter = null;
   teacherAuthenticated = false;
@@ -354,5 +358,5 @@ async function lockTeacherPage() {
   }
 }
 
-window.addEventListener('pagehide', clearTeacherPin, { once: false });
+window.addEventListener('pagehide', wipeTeacherPinValues, { once: false });
 bootstrapTeacherPage().catch(handleTeacherBootstrapFailure);
