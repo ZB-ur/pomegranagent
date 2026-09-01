@@ -963,7 +963,7 @@ textarea { min-height: 46px; width: 100%; }
 .growth-summary-metric small { color: var(--teacher-text-secondary); line-height: 1.45; overflow-wrap: anywhere; }
 .growth-workspace { display: grid; gap: 16px; grid-template-columns: minmax(0, 1fr); min-width: 0; }
 .growth-workspace > * { min-width: 0; }
-.report-chart { display: grid; gap: 12px; min-width: 0; overflow: hidden; }
+.report-chart { display: grid; gap: 12px; min-width: 0; }
 .report-chart svg { display: block; height: auto; max-width: 100%; width: 100%; }
 .report-chart text { fill: var(--teacher-text-secondary); font-size: 12px; }
 .report-chart-grid-line { stroke: var(--teacher-border-subtle); stroke-width: 1; }

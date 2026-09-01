@@ -230,8 +230,8 @@ export function createReportRoutes(value) {
     svg.append(svgTitle, svgDescription);
 
     const colors = ['#2f80ed', '#16a34a', '#f59e0b', '#8b5cf6', '#ef4444'];
-    const left = 62;
-    const right = 28;
+    const left = 72;
+    const right = 72;
     const top = 28;
     const bottom = 266;
     const plotWidth = 760 - left - right;
@@ -255,7 +255,13 @@ export function createReportRoutes(value) {
       label.textContent = String(score);
       svg.append(gridLine, label);
     }
-    for (const date of result.dates) {
+    const maximumDateTicks = 6;
+    const dateTicks = result.dates.length <= maximumDateTicks
+      ? result.dates
+      : Array.from({ length: maximumDateTicks }, (_item, index) => (
+        result.dates[Math.round(index * (result.dates.length - 1) / (maximumDateTicks - 1))]
+      ));
+    for (const date of dateTicks) {
       const label = document.createElementNS(namespace, 'text');
       label.setAttribute('x', String(pointX(date)));
       label.setAttribute('y', '298');
