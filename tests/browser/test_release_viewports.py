@@ -205,18 +205,30 @@ def test_release_focus_indicator_meets_three_to_one(
     _keyboard_focus(page, children_nav)
     page.keyboard.press("Enter")
     page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
-    child_heading = page.get_by_role("heading", name="焦点证据", exact=True)
+    child_heading = page.get_by_role("heading", name="幼儿列表", exact=True)
     child_heading.evaluate(
         "node => { node.setAttribute('tabindex', '-1'); node.focus(); }"
     )
     measure("route-h2", child_heading)
 
-    white_panel = page.get_by_label("幼儿姓名", exact=True)
-    _keyboard_focus(page, white_panel)
-    measure("white-panel-control", white_panel)
     primary = page.get_by_role("button", name="添加幼儿", exact=True)
     _keyboard_focus(page, primary)
     measure("primary-blue-button", primary)
+    page.keyboard.press("Enter")
+    create_dialog = page.get_by_role("dialog", name="新增幼儿", exact=True)
+    create_dialog.wait_for()
+    white_panel = create_dialog.get_by_label("幼儿姓名", exact=True)
+    if not white_panel.evaluate("node => document.activeElement === node"):
+        _keyboard_focus(page, white_panel)
+    measure("white-panel-control", white_panel)
+    create_cancel = create_dialog.get_by_role("button", name="取消", exact=True)
+    if not create_cancel.evaluate("node => document.activeElement === node"):
+        _keyboard_focus(page, create_cancel)
+    measure("create-dialog-target", create_cancel)
+    page.keyboard.press("Escape")
+    create_dialog.wait_for(state="detached")
+    measure("create-dialog-return", primary)
+
     launcher = page.get_by_role("button", name="停用：焦点证据", exact=True)
     _keyboard_focus(page, launcher)
     measure("gray-button", launcher)
@@ -233,9 +245,18 @@ def test_release_focus_indicator_meets_three_to_one(
     _keyboard_focus(page, ducks_nav)
     page.keyboard.press("Enter")
     page.get_by_role("heading", name="小鸭管理", exact=True).wait_for()
-    note = page.get_by_label("备注", exact=True)
+    duck_primary = page.get_by_role("button", name="添加小鸭", exact=True)
+    _keyboard_focus(page, duck_primary)
+    measure("duck-primary-button", duck_primary)
+    page.keyboard.press("Enter")
+    duck_dialog = page.get_by_role("dialog", name="新增小鸭", exact=True)
+    duck_dialog.wait_for()
+    note = duck_dialog.get_by_label("备注", exact=True)
     _keyboard_focus(page, note)
     measure("textarea", note)
+    page.keyboard.press("Escape")
+    duck_dialog.wait_for(state="detached")
+    measure("duck-dialog-return", duck_primary)
 
     growth_nav = page.locator('#nav button[data-v="growth"]')
     _keyboard_focus(page, growth_nav)
@@ -253,6 +274,8 @@ def test_release_focus_indicator_meets_three_to_one(
         "route-h2",
         "dialog-target",
         "dialog-return",
+        "create-dialog-target",
+        "create-dialog-return",
             "native-button",
             "link",
             "input",
@@ -261,6 +284,8 @@ def test_release_focus_indicator_meets_three_to_one(
         "textarea",
         "nav-button",
         "primary-blue-button",
+        "duck-primary-button",
+        "duck-dialog-return",
         "gray-button",
         "white-panel-control",
     }
@@ -305,6 +330,161 @@ def test_release_focus_indicator_meets_three_to_one(
     )
 
 
+@pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
+def test_release_roster_max_length_cjk_content_stays_in_bounds_without_overlap(
+    teacher_browser, viewport
+):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    _install_static_routes(page, teacher_browser)
+    long_child_name = "幼" * 64
+    long_cycle = "月" * 64
+    assert len(long_child_name) == 64
+    assert len(long_cycle) == 64
+    children = [
+        {
+            "id": 701,
+            "name": long_child_name,
+            "nickname": None,
+            "avatar": None,
+            "active": True,
+            "deactivated_at": None,
+            "future_roster_entries": 0,
+            "has_active_conversation": False,
+        },
+        {
+            "id": 702,
+            "name": "搭档",
+            "nickname": None,
+            "avatar": None,
+            "active": True,
+            "deactivated_at": None,
+            "future_roster_entries": 0,
+            "has_active_conversation": False,
+        },
+    ]
+    roster = [
+        {"id": 1, "cycle": long_cycle, "date": "2026-09-01", "child_id": 701},
+        {"id": 2, "cycle": long_cycle, "date": "2026-09-01", "child_id": 702},
+    ]
+
+    def children_route(route):
+        _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="GET",
+            path="/api/children",
+            query={"include_inactive": ["true"]},
+        )
+        _fulfill_json(route, children)
+
+    def roster_route(route):
+        _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="GET",
+            path="/api/roster",
+        )
+        _fulfill_json(route, roster)
+
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        children_route,
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/roster",
+        roster_route,
+    )
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#roster",
+        wait_until="domcontentloaded",
+    )
+    page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
+    page.get_by_role("button", name="设置并解锁", exact=True).click()
+    page.get_by_role("heading", name="值日排班", exact=True).wait_for()
+
+    projection_value = f"2026-09-01 · {long_cycle} · {long_child_name}、搭档"
+    preview = page.locator(".roster-preview")
+    row = page.locator(".roster-row")
+    row.wait_for()
+    assert row.count() == 1
+    pill = row.locator(".roster-person").filter(has_text=long_child_name)
+    badge = row.locator(".roster-footer .management-badge")
+    projection = row.locator(".roster-footer .management-row-copy")
+    people = row.locator(".roster-people")
+    footer = row.locator(".roster-footer")
+    assert pill.count() == 1
+    assert badge.inner_text() == long_cycle
+    assert projection.inner_text() == projection_value
+    assert row.get_attribute("aria-label") == projection_value
+
+    def geometry(locator):
+        return locator.evaluate(
+            """node => {
+              const rect = node.getBoundingClientRect();
+              return {
+                left: rect.left,
+                top: rect.top,
+                right: rect.right,
+                bottom: rect.bottom,
+                width: rect.width,
+                height: rect.height,
+                clientWidth: node.clientWidth,
+                clientHeight: node.clientHeight,
+                scrollWidth: node.scrollWidth,
+                scrollHeight: node.scrollHeight,
+              };
+            }"""
+        )
+
+    def assert_inside(inner, outer):
+        assert inner["left"] >= outer["left"] - 1, (inner, outer)
+        assert inner["top"] >= outer["top"] - 1, (inner, outer)
+        assert inner["right"] <= outer["right"] + 1, (inner, outer)
+        assert inner["bottom"] <= outer["bottom"] + 1, (inner, outer)
+
+    def overlaps(first, second):
+        horizontal = min(first["right"], second["right"]) - max(
+            first["left"], second["left"]
+        )
+        vertical = min(first["bottom"], second["bottom"]) - max(
+            first["top"], second["top"]
+        )
+        return horizontal > 0.5 and vertical > 0.5
+
+    boxes = {
+        "preview": geometry(preview),
+        "row": geometry(row),
+        "people": geometry(people),
+        "pill": geometry(pill),
+        "footer": geometry(footer),
+        "badge": geometry(badge),
+        "projection": geometry(projection),
+    }
+    assert_inside(boxes["row"], boxes["preview"])
+    assert_inside(boxes["people"], boxes["row"])
+    assert_inside(boxes["footer"], boxes["row"])
+    assert_inside(boxes["pill"], boxes["people"])
+    assert_inside(boxes["badge"], boxes["footer"])
+    assert_inside(boxes["projection"], boxes["footer"])
+    for name in ("pill", "badge", "projection"):
+        box = boxes[name]
+        assert box["width"] > 0 and box["height"] > 0, boxes
+        assert box["scrollWidth"] <= box["clientWidth"] + 1, boxes
+        assert box["scrollHeight"] <= box["clientHeight"] + 1, boxes
+    assert not overlaps(boxes["pill"], boxes["badge"]), boxes
+    assert not overlaps(boxes["pill"], boxes["projection"]), boxes
+    assert not overlaps(boxes["badge"], boxes["projection"]), boxes
+    assert boxes["row"]["left"] >= 0
+    assert boxes["row"]["right"] <= viewport["width"]
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+
 def _named_child_rows(database: Path, name: str) -> list[tuple[str, str | None]]:
     with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
         return connection.execute(
@@ -345,11 +525,17 @@ def test_release_teacher_action_persists_to_disposable_sqlite(
     page.get_by_role("button", name="设置并解锁", exact=True).click()
     page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
 
-    page.get_by_label("幼儿姓名", exact=True).fill(f"  {evidence_name}  ")
-    page.get_by_label("小名", exact=True).fill("  证据  ")
     action = page.get_by_role("button", name="添加幼儿", exact=True)
     assert action.is_visible()
     action.click()
+    dialog = page.get_by_role("dialog", name="新增幼儿", exact=True)
+    dialog.wait_for()
+    dialog.get_by_label("幼儿姓名", exact=True).fill(f"  {evidence_name}  ")
+    dialog.get_by_label("小名", exact=True).fill("  证据  ")
+    dialog.get_by_role(
+        "button", name=re.compile(r"^(确认)?添加幼儿$")
+    ).click()
+    dialog.wait_for(state="detached")
     page.get_by_text("已保存", exact=True).wait_for()
 
     after_rows = _named_child_rows(database, evidence_name)

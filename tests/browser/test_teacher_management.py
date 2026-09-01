@@ -1,4 +1,5 @@
 import json
+import re
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
@@ -31,11 +32,64 @@ def setup(page):
     page.get_by_role("button", name="设置并解锁", exact=True).click()
 
 
+def test_children_page_owns_create_dialog_instead_of_a_persistent_form(teacher_browser):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size({"width": 1024, "height": 768})
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps([{
+                "id": 7,
+                "name": "小雨",
+                "nickname": "雨雨",
+                "avatar": None,
+                "active": True,
+                "deactivated_at": None,
+                "future_roster_entries": 2,
+                "has_active_conversation": False,
+            }], ensure_ascii=False),
+        ),
+    )
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#children",
+        wait_until="domcontentloaded",
+    )
+    setup(page)
+    page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
+
+    launcher = page.get_by_role("button", name="添加幼儿", exact=True)
+    observed = {
+        "launcher_count": launcher.count(),
+        "persistent_name_fields": page.get_by_label("幼儿姓名", exact=True).count(),
+        "persistent_nickname_fields": page.get_by_label("小名", exact=True).count(),
+    }
+    launcher.click()
+    observed["named_create_dialogs"] = page.get_by_role(
+        "dialog", name="新增幼儿", exact=True
+    ).count()
+
+    assert observed == {
+        "launcher_count": 1,
+        "persistent_name_fields": 0,
+        "persistent_nickname_fields": 0,
+        "named_create_dialogs": 1,
+    }
+    dialog = page.get_by_role("dialog", name="新增幼儿", exact=True)
+    assert dialog.evaluate("node => node.tagName === 'DIALOG'")
+    page.keyboard.press("Escape")
+    dialog.wait_for(state="detached")
+    assert launcher.evaluate("button => document.activeElement === button")
+
+
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_children_management_is_labeled_strict_and_never_sends_delete(teacher_browser, viewport):
     calls = []
     rows = [{
-        "id": 7, "name": "小雨", "nickname": "雨雨", "avatar": None,
+        "id": 7, "name": "小雨", "nickname": "雨雨", "avatar": "/media/rain.png",
         "active": True, "deactivated_at": None, "future_roster_entries": 2,
         "has_active_conversation": False,
     }]
@@ -64,25 +118,166 @@ def test_children_management_is_labeled_strict_and_never_sends_delete(teacher_br
     page.get_by_role("button", name="设置并解锁", exact=True).click()
 
     page.get_by_role("heading", name="幼儿管理", exact=True).wait_for()
-    page.get_by_label("幼儿姓名", exact=True).fill("  新幼儿  ")
-    page.get_by_label("小名", exact=True).fill("  小新  ")
-    page.get_by_role("button", name="添加幼儿", exact=True).click()
+    create_launcher = page.get_by_role("button", name="添加幼儿", exact=True)
+    assert page.get_by_label("幼儿姓名", exact=True).count() == 0
+    create_launcher.click()
+    create_dialog = page.get_by_role("dialog", name="新增幼儿", exact=True)
+    create_dialog.wait_for()
+    create_dialog.get_by_text(re.compile(r"图片上传.*待后续开放")).wait_for()
+    assert create_dialog.locator('input[type="file"]').count() == 0
+    create_dialog.get_by_label("幼儿姓名", exact=True).fill("  新幼儿  ")
+    create_dialog.get_by_label("小名", exact=True).fill("  小新  ")
+    create_dialog.get_by_role(
+        "button", name=re.compile(r"^(确认)?添加幼儿$")
+    ).click()
     page.wait_for_function("() => document.querySelector('[role=status]')?.textContent.includes('已保存')")
+    create_dialog.wait_for(state="detached")
+    assert create_launcher.evaluate("button => document.activeElement === button")
 
-    page.get_by_role("button", name="编辑：雨雨", exact=True).click()
-    page.get_by_label("幼儿姓名", exact=True).fill("  小雨更新  ")
-    page.get_by_label("小名", exact=True).fill("")
-    page.get_by_role("button", name="保存幼儿", exact=True).click()
+    edit_launcher = page.get_by_role("button", name="编辑：雨雨", exact=True)
+    edit_launcher.click()
+    edit_dialog = page.get_by_role("dialog", name="修改幼儿：雨雨", exact=True)
+    edit_dialog.wait_for()
+    assert edit_dialog.get_by_label("幼儿姓名", exact=True).input_value() == "小雨"
+    assert edit_dialog.get_by_label("小名", exact=True).input_value() == "雨雨"
+    edit_dialog.get_by_text(re.compile(r"图片上传.*待后续开放")).wait_for()
+    assert edit_dialog.locator('input[type="file"]').count() == 0
+    edit_dialog.get_by_label("幼儿姓名", exact=True).fill("  小雨更新  ")
+    edit_dialog.get_by_label("小名", exact=True).fill("")
+    edit_dialog.get_by_role("button", name="保存幼儿", exact=True).click()
     page.wait_for_function("() => document.querySelector('[role=status]')?.textContent.includes('已保存')")
+    edit_dialog.wait_for(state="detached")
+    assert page.get_by_role("button", name="编辑：雨雨", exact=True).evaluate(
+        "button => document.activeElement === button"
+    )
 
     mutations = [call for call in calls if call[0] in {"POST", "PUT"}]
     assert len(mutations) == 2
     assert json.loads(mutations[0][2]) == {"name": "新幼儿", "nickname": "小新", "avatar": None}
-    assert json.loads(mutations[1][2]) == {"name": "小雨更新", "nickname": None, "avatar": None}
+    assert json.loads(mutations[1][2]) == {
+        "name": "小雨更新",
+        "nickname": None,
+        "avatar": "/media/rain.png",
+    }
     assert "/api/children/7" in mutations[1][1]
     assert any(parse_qs(urlsplit(call[1]).query) == {"include_inactive": ["true"]} for call in calls)
     assert all(call[0] != "DELETE" for call in calls)
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_ducks_create_and_edit_use_page_owned_dialogs_and_preserve_dto(
+    teacher_browser, viewport
+):
+    calls = []
+    rows = [{
+        "id": 9,
+        "name": "小黄",
+        "avatar": "/media/duck.png",
+        "status": "活泼",
+        "note": "喜欢晒太阳",
+        "active": True,
+        "deactivated_at": None,
+        "historical_feeding_log_count": 3,
+    }]
+
+    def ducks(route):
+        assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
+        calls.append((route.request.method, route.request.url, route.request.post_data))
+        if route.request.method in {"POST", "PUT"}:
+            body = json.loads(route.request.post_data)
+            route.fulfill(
+                status=200,
+                content_type="application/json",
+                body=json.dumps({
+                    "id": 10 if route.request.method == "POST" else 9,
+                    "name": body["name"],
+                    "avatar": body["avatar"],
+                    "status": body["status"],
+                    "note": body["note"],
+                }, ensure_ascii=False),
+            )
+            return
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(rows, ensure_ascii=False),
+        )
+
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    page.route(f"{teacher_browser.server.base_url}/api/ducks**", ducks)
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#ducks",
+        wait_until="domcontentloaded",
+    )
+    setup(page)
+    page.get_by_role("heading", name="小鸭管理", exact=True).wait_for()
+
+    create_launcher = page.get_by_role("button", name="添加小鸭", exact=True)
+    assert page.get_by_label("小鸭名字", exact=True).count() == 0
+    create_launcher.click()
+    create_dialog = page.get_by_role("dialog", name="新增小鸭", exact=True)
+    create_dialog.wait_for()
+    assert create_dialog.evaluate("node => node.tagName === 'DIALOG'")
+    create_dialog.get_by_text(re.compile(r"图片上传.*待后续开放")).wait_for()
+    assert create_dialog.locator('input[type="file"]').count() == 0
+    page.keyboard.press("Escape")
+    create_dialog.wait_for(state="detached")
+    assert create_launcher.evaluate("button => document.activeElement === button")
+
+    create_launcher.click()
+    create_dialog = page.get_by_role("dialog", name="新增小鸭", exact=True)
+    create_dialog.get_by_label("小鸭名字", exact=True).fill("  新小鸭  ")
+    create_dialog.get_by_label("状态", exact=True).fill("  健康  ")
+    create_dialog.get_by_label("备注", exact=True).fill("  第一次记录  ")
+    create_dialog.get_by_role(
+        "button", name=re.compile(r"^(确认)?添加小鸭$")
+    ).click()
+    create_dialog.wait_for(state="detached")
+    assert create_launcher.evaluate("button => document.activeElement === button")
+
+    edit_launcher = page.get_by_role("button", name="编辑：小黄", exact=True)
+    edit_launcher.click()
+    edit_dialog = page.get_by_role("dialog", name="修改小鸭：小黄", exact=True)
+    edit_dialog.wait_for()
+    assert edit_dialog.get_by_label("小鸭名字", exact=True).input_value() == "小黄"
+    assert edit_dialog.get_by_label("状态", exact=True).input_value() == "活泼"
+    assert edit_dialog.get_by_label("备注", exact=True).input_value() == "喜欢晒太阳"
+    assert edit_dialog.locator('input[type="file"]').count() == 0
+    edit_dialog.get_by_label("状态", exact=True).fill("  休息中  ")
+    edit_dialog.get_by_label("备注", exact=True).fill("")
+    edit_dialog.get_by_role("button", name="保存小鸭", exact=True).click()
+    edit_dialog.wait_for(state="detached")
+    assert page.get_by_role("button", name="编辑：小黄", exact=True).evaluate(
+        "button => document.activeElement === button"
+    )
+
+    mutations = [call for call in calls if call[0] in {"POST", "PUT"}]
+    assert len(mutations) == 2
+    assert json.loads(mutations[0][2]) == {
+        "name": "新小鸭",
+        "avatar": None,
+        "status": "健康",
+        "note": "第一次记录",
+    }
+    assert json.loads(mutations[1][2]) == {
+        "name": "小黄",
+        "avatar": "/media/duck.png",
+        "status": "休息中",
+        "note": None,
+    }
+    assert "/api/ducks/9" in mutations[1][1]
+    assert any(
+        parse_qs(urlsplit(call[1]).query) == {"include_inactive": ["true"]}
+        for call in calls
+    )
+    assert all(call[0] != "DELETE" for call in calls)
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -228,6 +423,8 @@ def test_duck_archive_summary_is_text_and_roster_uses_frozen_idempotent_routes(t
     page = context.new_page()
     page.set_default_timeout(5_000)
     page.set_viewport_size(viewport)
+    requests = []
+    page.on("request", lambda request: requests.append(request))
     calls = []
     archive_calls = []
     children = [
@@ -274,17 +471,130 @@ def test_duck_archive_summary_is_text_and_roster_uses_frozen_idempotent_routes(t
 
     page.get_by_role("button", name="值日排班", exact=True).click()
     page.get_by_role("heading", name="值日排班", exact=True).wait_for()
-    page.get_by_label("排班日期", exact=True).fill("2026-08-29")
-    page.get_by_label("手动排班周期", exact=True).fill("2026-W34")
-    page.get_by_label("选择甲", exact=True).check()
-    page.get_by_label("选择乙", exact=True).check()
-    page.get_by_role("button", name="保存当日排班", exact=True).click()
+    page.get_by_text("暂无排班", exact=True).wait_for()
+    batch = page.get_by_role("button", name="录入本月名单", exact=True)
+    pending_copy = page.get_by_text(
+        "按多日期录入本月名单待批量 API 开放后启用；当前可安排单日或自动生成连续工作日。",
+        exact=True,
+    )
+    assert batch.is_disabled()
+    assert pending_copy.count() == 1
+    request_count = len(requests)
+    batch.evaluate(
+        "button => new Promise(resolve => { "
+        "button.click(); requestAnimationFrame(() => resolve()); })"
+    )
+    assert len(requests) == request_count
+    assert page.get_by_label("排班日期", exact=True).count() == 0
+
+    daily_launcher = page.get_by_role("button", name="安排当日", exact=True)
+    daily_launcher.click()
+    daily_dialog = page.get_by_role("dialog", name="安排当日值日", exact=True)
+    daily_dialog.wait_for()
+    assert daily_dialog.evaluate("node => node.tagName === 'DIALOG'")
+    daily_dialog.get_by_label("排班日期", exact=True).fill("2026-08-29")
+    daily_dialog.get_by_label("手动排班周期", exact=True).fill("2026-W34")
+    duty_selects = daily_dialog.locator("select")
+    assert duty_selects.count() == 2
+    duty_selects.nth(0).select_option("7")
+    duty_selects.nth(1).select_option("8")
+    daily_dialog.get_by_role("button", name="保存当日排班", exact=True).click()
+    daily_dialog.wait_for(state="detached")
     page.get_by_text("排班已保存", exact=True).wait_for()
+    assert daily_launcher.evaluate("button => document.activeElement === button")
     assert len(calls) == 1
     assert calls[0].method == "PUT"
     body = json.loads(calls[0].post_data)
     assert set(body) == {"request_id", "cycle", "child_ids"}
     assert calls[0].headers["x-request-id"] == body["request_id"]
+
+
+def test_daily_roster_normalizes_reverse_selected_child_ids_before_validating_ack(
+    teacher_browser,
+):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size({"width": 1024, "height": 768})
+    children = [
+        {
+            "id": 4,
+            "name": "小号幼儿",
+            "nickname": None,
+            "avatar": None,
+            "active": True,
+            "deactivated_at": None,
+            "future_roster_entries": 0,
+            "has_active_conversation": False,
+        },
+        {
+            "id": 9,
+            "name": "大号幼儿",
+            "nickname": None,
+            "avatar": None,
+            "active": True,
+            "deactivated_at": None,
+            "future_roster_entries": 0,
+            "has_active_conversation": False,
+        },
+    ]
+    calls = []
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps(children, ensure_ascii=False),
+        ),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/roster",
+        lambda route: route.fulfill(
+            status=200,
+            content_type="application/json",
+            body="[]",
+        ),
+    )
+
+    def daily(route):
+        body = json.loads(route.request.post_data)
+        calls.append({"body": body, "headers": route.request.headers})
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "request_id": body["request_id"],
+                "date": "2026-09-02",
+                "cycle": "2026-W36",
+                "child_ids": [4, 9],
+                "replayed": False,
+            }),
+        )
+
+    page.route(f"{teacher_browser.server.base_url}/api/roster/2026-09-02", daily)
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#roster",
+        wait_until="domcontentloaded",
+    )
+    setup(page)
+    launcher = page.get_by_role("button", name="安排当日", exact=True)
+    launcher.click()
+    dialog = page.get_by_role("dialog", name="安排当日值日", exact=True)
+    dialog.get_by_label("排班日期", exact=True).fill("2026-09-02")
+    dialog.get_by_label("手动排班周期", exact=True).fill("2026-W36")
+    dialog.get_by_label("值日幼儿 1", exact=True).select_option("9")
+    dialog.get_by_label("值日幼儿 2", exact=True).select_option("4")
+    dialog.get_by_role("button", name="保存当日排班", exact=True).click()
+
+    dialog.wait_for(state="detached")
+    page.get_by_text("排班已保存", exact=True).wait_for()
+    assert page.get_by_text(
+        "排班保存失败，请使用相同内容重试。", exact=True
+    ).count() == 0
+    assert launcher.evaluate("button => document.activeElement === button")
+    assert len(calls) == 1
+    assert calls[0]["body"]["child_ids"] == [4, 9]
+    assert calls[0]["headers"]["x-request-id"] == calls[0]["body"]["request_id"]
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -347,23 +657,40 @@ def test_auto_roster_lock_retry_uuid_and_exact_ack(teacher_browser, viewport):
     page.route(f"{teacher_browser.server.base_url}/api/roster/auto", auto)
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#roster", wait_until="domcontentloaded")
     setup(page)
-    page.get_by_label("自动排班开始日期", exact=True).fill("2026-08-31")
-    page.get_by_label("自动排班天数", exact=True).fill("2")
-    page.get_by_label("自动排班周期", exact=True).fill("2026-W35")
+    assert page.get_by_label("自动排班开始日期", exact=True).count() == 0
+    auto_launcher = page.get_by_role("button", name="自动生成", exact=True)
+    auto_launcher.click()
+    auto_dialog = page.get_by_role("dialog", name="自动生成排班", exact=True)
+    auto_dialog.wait_for()
+    assert auto_dialog.evaluate("node => node.tagName === 'DIALOG'")
+    page.keyboard.press("Escape")
+    auto_dialog.wait_for(state="detached")
+    assert auto_launcher.evaluate("button => document.activeElement === button")
 
-    page.evaluate("""
-      const form = [...document.querySelectorAll('#main form')][1];
+    auto_launcher.click()
+    auto_dialog = page.get_by_role("dialog", name="自动生成排班", exact=True)
+    auto_dialog.get_by_label("自动排班开始日期", exact=True).fill("2026-08-31")
+    auto_dialog.get_by_label("自动排班天数", exact=True).fill("2")
+    auto_dialog.get_by_label("自动排班周期", exact=True).fill("2026-W35")
+
+    auto_dialog.locator("form").evaluate("""form => {
       form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
       form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}));
-    """)
+    }""")
     page.get_by_text("排班保存失败，请使用相同内容重试。", exact=True).wait_for()
     assert len(calls) == 1
 
-    page.get_by_label("自动排班周期", exact=True).fill("2026-W35-new")
-    page.get_by_role("button", name="生成排班", exact=True).click()
-    page.get_by_text("排班保存失败，请使用相同内容重试。", exact=True).wait_for()
-    page.get_by_role("button", name="生成排班", exact=True).click()
+    auto_dialog.get_by_label("自动排班周期", exact=True).fill("2026-W35-new")
+    generate = auto_dialog.get_by_role("button", name="生成排班", exact=True)
+    generate.click()
+    generate_handle = generate.element_handle()
+    assert generate_handle is not None
+    page.wait_for_function("button => !button.disabled", arg=generate_handle)
+    assert len(calls) == 2
+    generate.click()
+    auto_dialog.wait_for(state="detached")
     page.get_by_text("排班已保存", exact=True).wait_for()
+    assert auto_launcher.evaluate("button => document.activeElement === button")
 
     assert len(calls) == 3
     first_id, second_id, third_id = [body["request_id"] for body, _header in calls]

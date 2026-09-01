@@ -199,6 +199,7 @@ export function createManagementRoutes(dependencies) {
   };
   const field = (labelText, input) => h('label', { class: 'teacher-field' }, h('span', { text: labelText }), input);
   const displayName = item => item.nickname || item.name;
+  const avatarFallback = item => Array.from(displayName(item).trim())[0] || '?';
   const fixedFailure = '操作失败，请稍后重试。';
 
   const scopeFor = context => {
@@ -235,37 +236,45 @@ export function createManagementRoutes(dependencies) {
 
   const createResourceRoute = kind => context => {
     const isChild = kind === 'child';
-    const title = isChild ? '幼儿管理' : '小鸭管理';
+    const noun = isChild ? '幼儿' : '小鸭';
+    const title = `${noun}管理`;
     const collectionPath = isChild ? '/api/children?include_inactive=true' : '/api/ducks?include_inactive=true';
     const scope = scopeFor(context);
     let rows = [];
     let mutation = null;
     let undoState = null;
-    const view = h('section', { class: 'management-view' });
-    const heading = h('h1', { text: title });
+    let disposed = false;
+    const dialogs = new Set();
+    const view = h('section', { class: `management-view${isChild ? '' : ' ducks-workspace'}` });
+    const hero = h('header', { class: 'management-hero' });
+    const heroCopy = h('div', { class: 'management-copy' },
+      h('p', { class: 'management-eyebrow', text: isChild ? '班级成员' : '陪伴伙伴' }),
+      h('h1', { text: title }),
+      h('p', {
+        class: 'management-description',
+        text: isChild ? '查看班级幼儿状态，并在独立窗口中完成新增或修改。' : '管理小鸭资料、状态与成长档案。',
+      }),
+    );
+    const add = h('button', { type: 'button', class: 'btn', text: `添加${noun}` });
+    hero.append(heroCopy, h('div', { class: 'management-toolbar' }, add));
     const feedback = h('p', { role: 'status', 'aria-live': 'polite', class: 'management-status' });
+    const listCard = h('section', { class: `card management-list-card${isChild ? '' : ' duck-list-panel'}` });
+    const count = h('span', { class: 'management-count', text: '0 项' });
+    listCard.append(
+      h('header', { class: 'management-list-header' }, h('h2', { text: `${noun}列表` }), count),
+    );
     const list = h('div', { class: 'management-list' });
-    const form = h('form', { class: 'card management-form' });
-    view.append(heading, form, feedback, list);
+    listCard.append(list);
+    view.append(hero, feedback, listCard);
+    const archivePanel = isChild ? null : h('section', {
+      class: 'card duck-archive', 'aria-label': '小鸭成长档案',
+    },
+    h('h2', { text: '小鸭成长档案' }),
+    h('p', { text: '选择一只小鸭查看档案，或生成最新摘要。' }),
+    );
+    if (archivePanel) view.append(archivePanel);
     context.root.replaceChildren(view);
 
-    const nameInput = h('input', { required: '', maxlength: '64', autocomplete: 'off' });
-    const secondInput = h(isChild ? 'input' : 'input', { maxlength: isChild ? '64' : '255', autocomplete: 'off' });
-    const avatarInput = h('input', { maxlength: '255', autocomplete: 'off' });
-    const noteInput = isChild ? null : h('textarea', { maxlength: '2000' });
-    const submit = h('button', { type: 'submit', class: 'btn', text: isChild ? '添加幼儿' : '添加小鸭' });
-    let editingId = null;
-    form.append(
-      field(isChild ? '幼儿姓名' : '小鸭名字', nameInput),
-      field(isChild ? '小名' : '状态', secondInput),
-      field('头像', avatarInput),
-    );
-    if (noteInput) form.append(field('备注', noteInput));
-    form.append(submit);
-
-    const setBusy = busy => {
-      for (const control of form.querySelectorAll('input, textarea, button')) control.disabled = busy;
-    };
     const showFailure = copy => {
       feedback.setAttribute('role', 'alert');
       feedback.textContent = copy || fixedFailure;
@@ -273,6 +282,31 @@ export function createManagementRoutes(dependencies) {
     const showSuccess = copy => {
       feedback.setAttribute('role', 'status');
       feedback.textContent = copy;
+    };
+
+    const forgetDialog = dialog => {
+      dialogs.delete(dialog);
+      if (dialog.isConnected) dialog.remove();
+    };
+    const closeDialog = (dialog, focusTarget = null) => {
+      if (dialog.open) dialog.close();
+      forgetDialog(dialog);
+      if (!disposed && focusTarget?.isConnected) focusTarget.focus();
+    };
+    const mountDialog = (dialog, launcher) => {
+      dialogs.add(dialog);
+      view.append(dialog);
+      dialog.addEventListener('cancel', event => {
+        event.preventDefault();
+        if (!mutation) closeDialog(dialog, launcher);
+      });
+      dialog.showModal();
+    };
+
+    const renderAvatar = item => {
+      const avatar = h('span', { class: 'management-avatar', 'aria-hidden': 'true' });
+      avatar.textContent = avatarFallback(item);
+      return avatar;
     };
 
     const dismissUndo = state => {
@@ -343,19 +377,23 @@ export function createManagementRoutes(dependencies) {
 
     const openStateDialog = (item, launcher) => {
       const name = displayName(item);
-      const dialog = h('dialog', { 'aria-label': `停用${name}` });
+      const dialog = h('dialog', { 'aria-label': `停用${name}`, class: 'management-dialog' });
       const copy = isChild
         ? `停用后不再参与值日展示；${item.future_roster_entries} 条未来排班保留为历史数据，历史记录不会删除。`
         : `停用后仍保留 ${item.historical_feeding_log_count} 条喂养记录和档案，不会删除历史。`;
       const cancel = h('button', { type: 'button', class: 'btn gray', text: '取消' });
       const confirm = h('button', { type: 'button', class: 'btn', text: '确认停用' });
-      dialog.append(h('p', { text: copy }), cancel, confirm);
-      view.append(dialog);
-      const cancelDialog = () => { dialog.close(); dialog.remove(); launcher.focus(); };
-      cancel.addEventListener('click', cancelDialog);
-      dialog.addEventListener('cancel', event => { event.preventDefault(); cancelDialog(); });
-      confirm.addEventListener('click', () => { dialog.close(); dialog.remove(); void changeState(item, false, launcher); });
-      dialog.showModal();
+      dialog.append(
+        h('header', { class: 'management-dialog-header' }, h('h2', { text: `停用${name}` })),
+        h('div', { class: 'management-dialog-body' }, h('p', { text: copy })),
+        h('footer', { class: 'management-dialog-actions' }, cancel, confirm),
+      );
+      cancel.addEventListener('click', () => closeDialog(dialog, launcher));
+      confirm.addEventListener('click', () => {
+        closeDialog(dialog);
+        void changeState(item, false, launcher);
+      });
+      mountDialog(dialog, launcher);
     };
 
     const openArchive = async (item, summarize = false, action = null) => {
@@ -366,11 +404,11 @@ export function createManagementRoutes(dependencies) {
         const response = await scope.run(`/api/ducks/${item.id}/${summarize ? 'summarize' : 'archive'}`, summarize ? { method: 'POST' } : {});
         if (!response.current) return;
         const ack = validateArchive(response.result, item.id, { requireSummary: summarize });
-        const panel = h('section', { class: 'card duck-archive', 'aria-label': `小鸭档案：${item.name}` });
-        panel.append(h('h2', { text: `小鸭档案：${item.name}` }), h('p', { text: ack.summary?.trim() || '暂无档案内容' }));
-        const previous = view.querySelector('.duck-archive');
-        if (previous) previous.remove();
-        view.append(panel);
+        archivePanel.setAttribute('aria-label', `小鸭档案：${item.name}`);
+        archivePanel.replaceChildren(
+          h('h2', { text: `小鸭档案：${item.name}` }),
+          h('p', { text: ack.summary?.trim() || '暂无档案内容' }),
+        );
       } catch (_error) {
         if (scope.alive()) showFailure();
       } finally {
@@ -379,39 +417,168 @@ export function createManagementRoutes(dependencies) {
       }
     };
 
+    const openEditor = (item, launcher) => {
+      if (mutation) return;
+      const editing = item !== null;
+      const visibleName = editing ? displayName(item) : '';
+      const dialogName = editing ? `修改${noun}：${visibleName}` : `新增${noun}`;
+      const dialog = h('dialog', { 'aria-label': dialogName, class: 'management-dialog' });
+      const formId = `management-${kind}-${editing ? item.id : 'new'}-form`;
+      const form = h('form', { class: 'management-form', id: formId });
+      const nameInput = h('input', {
+        required: '', maxlength: '64', autocomplete: 'off', value: editing ? item.name : '',
+      });
+      const secondInput = h('input', {
+        maxlength: isChild ? '64' : '255', autocomplete: 'off',
+        value: editing ? (isChild ? item.nickname || '' : item.status || '') : '',
+      });
+      const noteInput = isChild ? null : h('textarea', { maxlength: '2000' });
+      if (noteInput && editing) noteInput.value = item.note || '';
+      const previewItem = editing ? item : { name: noun, nickname: null, avatar: null };
+      const avatarField = h('section', { class: 'management-avatar-field', 'aria-label': '头像设置' },
+        h('div', { class: 'management-avatar-placeholder' }, renderAvatar(previewItem)),
+        h('p', {
+          class: 'management-capability-note',
+          text: editing && item.avatar ? '当前头像将保持不变。图片上传待后续开放。' : '图片上传待后续开放。',
+        }),
+      );
+      const dialogStatus = h('p', {
+        role: 'status', 'aria-live': 'polite', class: 'management-dialog-status',
+      });
+      const cancel = h('button', { type: 'button', class: 'btn gray', text: '取消' });
+      const submit = h('button', {
+        type: 'submit', form: formId, class: 'btn', text: editing ? `保存${noun}` : `添加${noun}`,
+      });
+      form.append(
+        field(isChild ? '幼儿姓名' : '小鸭名字', nameInput),
+        field(isChild ? '小名' : '状态', secondInput),
+        avatarField,
+      );
+      if (noteInput) form.append(field('备注', noteInput));
+      form.append(dialogStatus);
+      dialog.append(
+        h('header', { class: 'management-dialog-header' },
+          h('p', { class: 'management-eyebrow', text: editing ? '编辑资料' : '添加资料' }),
+          h('h2', { text: dialogName }),
+        ),
+        h('div', { class: 'management-dialog-body' }, form),
+        h('footer', { class: 'management-dialog-actions' }, cancel, submit),
+      );
+
+      const setFormBusy = busy => {
+        for (const control of dialog.querySelectorAll('input, textarea, button')) control.disabled = busy;
+      };
+      const fail = copy => {
+        dialogStatus.setAttribute('role', 'alert');
+        dialogStatus.textContent = copy || fixedFailure;
+      };
+      cancel.addEventListener('click', () => closeDialog(dialog, launcher));
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        if (mutation || !form.reportValidity()) return;
+        const normalized = isChild ? {
+          name: nameInput.value.trim(),
+          nickname: secondInput.value.trim() || null,
+          avatar: editing ? item.avatar : null,
+        } : {
+          name: nameInput.value.trim(),
+          avatar: editing ? item.avatar : null,
+          status: secondInput.value.trim() || null,
+          note: noteInput.value.trim() || null,
+        };
+        if (!normalized.name) {
+          nameInput.setAttribute('aria-invalid', 'true');
+          nameInput.focus();
+          return;
+        }
+        nameInput.removeAttribute('aria-invalid');
+        mutation = 'form';
+        setFormBusy(true);
+        void (async () => {
+          let restoreFocus = false;
+          try {
+            const response = await scope.run(`/api/${isChild ? 'children' : 'ducks'}${editing ? `/${item.id}` : ''}`, {
+              method: editing ? 'PUT' : 'POST', body: normalized,
+            });
+            if (!response.current) return;
+            const ack = isChild
+              ? validateChildAck(response.result, {
+                expectedId: editing ? item.id : null,
+                active: editing ? item.active : true,
+                ...normalized,
+              })
+              : validateDuckAck(response.result, { expectedId: editing ? item.id : null, ...normalized });
+            await reload();
+            if (!scope.alive()) return;
+            showSuccess('已保存');
+            const nextEdit = list.querySelector(`[data-edit-id="${ack.id}"]`);
+            closeDialog(dialog, nextEdit || add);
+          } catch (_error) {
+            if (scope.alive()) {
+              fail();
+              restoreFocus = true;
+            }
+          } finally {
+            mutation = null;
+            if (scope.alive()) {
+              setFormBusy(false);
+              if (restoreFocus && submit.isConnected) submit.focus();
+            }
+          }
+        })();
+      });
+      mountDialog(dialog, launcher);
+      nameInput.focus();
+    };
+
     const render = () => {
       list.replaceChildren();
-      if (!rows.length) { list.append(h('p', { class: 'card muted', text: isChild ? '暂无幼儿' : '暂无小鸭' })); return; }
+      count.textContent = `${rows.length} 项`;
+      if (!rows.length) { list.append(h('p', { class: 'muted', text: `暂无${noun}` })); return; }
       for (const item of rows) {
-        const card = h('article', { class: 'card management-card' });
-        card.append(h('h2', { text: displayName(item) }), h('p', { text: item.active ? '启用中' : '已停用' }));
-        const edit = h('button', { type: 'button', class: 'btn gray', text: `编辑：${displayName(item)}` });
-        edit.addEventListener('click', () => {
-          editingId = item.id;
-          nameInput.value = item.name;
-          secondInput.value = isChild ? item.nickname || '' : item.status || '';
-          avatarInput.value = item.avatar || '';
-          if (noteInput) noteInput.value = item.note || '';
-          submit.textContent = isChild ? '保存幼儿' : '保存小鸭';
-          nameInput.focus();
+        const card = h('article', { class: 'management-row' });
+        const rowCopy = h('div', { class: 'management-row-copy' },
+          h('h3', { text: displayName(item) }),
+          h('p', {
+            class: 'management-row-meta',
+            text: isChild
+              ? `${item.nickname ? `姓名：${item.name} · ` : ''}未来排班 ${item.future_roster_entries} 条`
+              : `${item.status?.trim() || '状态待补充'} · 喂养记录 ${item.historical_feeding_log_count} 条`,
+          }),
+        );
+        const badge = h('span', {
+          class: `management-badge ${item.active ? 'is-active' : 'is-inactive'}`,
+          text: item.active ? '启用中' : '已停用',
         });
+        card.append(h('div', { class: 'management-row-main' }, renderAvatar(item), rowCopy, badge));
+        const actions = h('div', { class: 'management-row-actions' });
+        const edit = h('button', {
+          type: 'button', class: 'btn gray', text: '编辑',
+          'aria-label': `编辑：${displayName(item)}`, 'data-edit-id': String(item.id),
+        });
+        edit.addEventListener('click', () => openEditor(item, edit));
         const stateButton = h('button', {
-          type: 'button', class: 'btn gray',
-          text: item.active ? `停用：${displayName(item)}` : `恢复：${displayName(item)}`,
+          type: 'button', class: 'btn gray', text: item.active ? '停用' : '恢复',
+          'aria-label': item.active ? `停用：${displayName(item)}` : `恢复：${displayName(item)}`,
         });
         if (isChild && item.has_active_conversation) {
           stateButton.disabled = true;
-          card.append(h('p', { class: 'muted', text: '当前有进行中的会话，暂不能停用。' }));
+          rowCopy.append(h('p', { class: 'muted', text: '当前有进行中的会话，暂不能停用。' }));
         }
         stateButton.addEventListener('click', () => item.active ? openStateDialog(item, stateButton) : void changeState(item, true, stateButton));
-        card.append(edit, stateButton);
+        actions.append(edit, stateButton);
         if (!isChild) {
-          const archive = h('button', { type: 'button', class: 'btn gray', text: `查看档案：${item.name}` });
-          const summarize = h('button', { type: 'button', class: 'btn gray', text: `生成档案：${item.name}` });
+          const archive = h('button', {
+            type: 'button', class: 'btn gray', text: '查看档案', 'aria-label': `查看档案：${item.name}`,
+          });
+          const summarize = h('button', {
+            type: 'button', class: 'btn gray', text: '生成档案', 'aria-label': `生成档案：${item.name}`,
+          });
           archive.addEventListener('click', () => void openArchive(item, false, archive));
           summarize.addEventListener('click', () => void openArchive(item, true, summarize));
-          card.append(archive, summarize);
+          actions.append(archive, summarize);
         }
+        card.append(actions);
         list.append(card);
       }
     };
@@ -426,86 +593,91 @@ export function createManagementRoutes(dependencies) {
       } catch (_error) { if (scope.alive(token)) showFailure('列表加载失败，请重试。'); }
     };
 
-    form.addEventListener('submit', event => {
-      event.preventDefault();
-      if (mutation || !form.reportValidity()) return;
-      const normalized = isChild ? {
-        name: nameInput.value.trim(), nickname: secondInput.value.trim() || null, avatar: avatarInput.value.trim() || null,
-      } : {
-        name: nameInput.value.trim(), avatar: avatarInput.value.trim() || null,
-        status: secondInput.value.trim() || null, note: noteInput.value.trim() || null,
-      };
-      if (!normalized.name) { nameInput.setAttribute('aria-invalid', 'true'); nameInput.focus(); return; }
-      mutation = 'form';
-      setBusy(true);
-      void (async () => {
-        try {
-          const response = await scope.run(`/${isChild ? 'api/children' : 'api/ducks'}${editingId ? `/${editingId}` : ''}`, {
-            method: editingId ? 'PUT' : 'POST', body: normalized,
-          });
-          if (!response.current) return;
-          if (isChild) {
-            const existing = editingId === null ? null : rows.find(item => item.id === editingId);
-            if (editingId !== null && !existing) throw invalid();
-            validateChildAck(response.result, {
-              expectedId: editingId,
-              active: existing ? existing.active : true,
-              ...normalized,
-            });
-          }
-          else validateDuckAck(response.result, { expectedId: editingId, ...normalized });
-          editingId = null;
-          form.reset();
-          submit.textContent = isChild ? '添加幼儿' : '添加小鸭';
-          await reload();
-          if (scope.alive()) showSuccess('已保存');
-        } catch (_error) { if (scope.alive()) showFailure(); }
-        finally { mutation = null; if (scope.alive()) setBusy(false); }
-      })();
-    });
+    add.addEventListener('click', () => openEditor(null, add));
     void reload();
-    return { cleanup: () => { dismissUndo(undoState); scope.cleanup(); } };
+    return { cleanup: () => {
+      disposed = true;
+      dismissUndo(undoState);
+      scope.cleanup();
+      for (const dialog of dialogs) {
+        if (dialog.open) dialog.close();
+        if (dialog.isConnected) dialog.remove();
+      }
+      dialogs.clear();
+    } };
   };
 
   const roster = context => {
     const scope = scopeFor(context);
     const view = h('section', { class: 'management-view roster-view' });
-    const status = h('p', { role: 'status', 'aria-live': 'polite' });
-    const manual = h('form', { class: 'card management-form' });
-    const automatic = h('form', { class: 'card management-form' });
-    const rosterList = h('div', { class: 'card management-list' });
-    view.append(h('h1', { text: '值日排班' }), manual, automatic, status, rosterList);
-    context.root.replaceChildren(view);
     let children = [];
     let rows = [];
     let busy = false;
     let retained = null;
+    let disposed = false;
+    const dialogs = new Set();
+    const hero = h('header', { class: 'management-hero' });
+    const heroCopy = h('div', { class: 'management-copy' },
+      h('p', { class: 'management-eyebrow', text: '班级值日' }),
+      h('h1', { text: '值日排班' }),
+      h('p', { class: 'management-description', text: '先查看排班，再按需安排当日搭档或自动生成工作日排班。' }),
+    );
+    const monthlyLauncher = h('button', {
+      type: 'button', class: 'btn gray', text: '录入本月名单', disabled: '',
+      'aria-describedby': 'roster-monthly-capability',
+    });
+    const manualLauncher = h('button', { type: 'button', class: 'btn', text: '安排当日' });
+    const automaticLauncher = h('button', { type: 'button', class: 'btn gray', text: '自动生成' });
+    hero.append(heroCopy, h('div', { class: 'management-toolbar' }, monthlyLauncher));
+    const capability = h('p', {
+      id: 'roster-monthly-capability', class: 'roster-capability',
+      text: '按多日期录入本月名单待批量 API 开放后启用；当前可安排单日或自动生成连续工作日。',
+    });
+    const status = h('p', { role: 'status', 'aria-live': 'polite', class: 'management-status' });
+    const rosterCard = h('section', { class: 'card management-list-card roster-preview' });
+    const rosterCount = h('span', { class: 'management-count', text: '0 天' });
+    const rosterList = h('div', { class: 'management-list' });
+    const rosterPanelFooter = h('footer', { class: 'roster-panel-footer' },
+      h('div', { class: 'management-copy' },
+        h('h3', { text: '临时调班与兜底' }),
+        h('p', { text: '病假等情况可安排当日；没有报名名单时使用自动生成。' }),
+      ),
+      h('div', { class: 'roster-actions' }, manualLauncher, automaticLauncher),
+    );
+    rosterCard.append(
+      h('header', { class: 'management-list-header' }, h('h2', { text: '排班预览' }), rosterCount),
+      rosterList,
+      rosterPanelFooter,
+    );
+    view.append(hero, capability, status, rosterCard);
+    context.root.replaceChildren(view);
 
-    const manualDate = h('input', { type: 'date', required: '' });
-    const manualCycle = h('input', { required: '', maxlength: '64' });
-    const choices = h('fieldset', {}, h('legend', { text: '选择两名值日幼儿' }));
-    const manualButton = h('button', { type: 'submit', class: 'btn', text: '保存当日排班' });
-    manual.append(field('排班日期', manualDate), field('手动排班周期', manualCycle), choices, manualButton);
+    const forgetDialog = dialog => {
+      dialogs.delete(dialog);
+      if (dialog.isConnected) dialog.remove();
+    };
+    const closeDialog = (dialog, launcher, { discardRetry = false } = {}) => {
+      if (discardRetry) retained = null;
+      if (dialog.open) dialog.close();
+      forgetDialog(dialog);
+      if (!disposed && launcher?.isConnected) launcher.focus();
+    };
+    const mountDialog = (dialog, launcher) => {
+      dialogs.add(dialog);
+      view.append(dialog);
+      dialog.addEventListener('cancel', event => {
+        event.preventDefault();
+        if (!busy) closeDialog(dialog, launcher, { discardRetry: true });
+      });
+      dialog.showModal();
+    };
 
-    const startDate = h('input', { type: 'date', required: '' });
-    const days = h('input', { type: 'number', required: '', min: '1', max: '31', value: '5' });
-    const autoCycle = h('input', { required: '', maxlength: '64' });
-    const replace = h('input', { type: 'checkbox' });
-    const autoButton = h('button', { type: 'submit', class: 'btn', text: '生成排班' });
-    automatic.append(field('自动排班开始日期', startDate), field('自动排班天数', days), field('自动排班周期', autoCycle), field('替换已有排班', replace), autoButton);
-
-    const invalidate = () => { retained = null; };
-    for (const form of [manual, automatic]) form.addEventListener('input', invalidate);
     const setBusy = value => {
       busy = value;
-      for (const control of view.querySelectorAll('input, button')) control.disabled = value;
+      for (const control of view.querySelectorAll('input, select, textarea, button')) control.disabled = value;
+      if (!value) monthlyLauncher.disabled = true;
     };
     const render = () => {
-      choices.querySelectorAll('label').forEach(node => node.remove());
-      for (const child of children.filter(item => item.active)) {
-        const checkbox = h('input', { type: 'checkbox', value: String(child.id) });
-        choices.append(field(`选择${displayName(child)}`, checkbox));
-      }
       rosterList.replaceChildren();
       const names = new Map(children.map(child => [child.id, displayName(child)]));
       const grouped = new Map();
@@ -516,8 +688,19 @@ export function createManagementRoutes(dependencies) {
         item.names.push(names.get(row.child_id));
         grouped.set(row.date, item);
       }
+      rosterCount.textContent = `${grouped.size} 天`;
       if (!grouped.size) rosterList.append(h('p', { class: 'muted', text: '暂无排班' }));
-      for (const [date, item] of grouped) rosterList.append(h('p', { text: `${date} · ${item.cycle} · ${item.names.join('、')}` }));
+      for (const [date, item] of [...grouped].sort(([left], [right]) => left.localeCompare(right))) {
+        const projection = `${date} · ${item.cycle} · ${item.names.join('、')}`;
+        rosterList.append(h('article', { class: 'management-row roster-row', 'aria-label': projection },
+          h('div', { class: 'roster-date', text: date }),
+          h('div', { class: 'roster-people' }, ...item.names.map(name => h('span', { class: 'roster-person', text: name }))),
+          h('footer', { class: 'roster-footer' },
+            h('span', { class: 'management-badge is-active', text: item.cycle }),
+            h('p', { class: 'management-row-copy', text: projection }),
+          ),
+        ));
+      }
     };
     const reload = async () => {
       const token = scope.next();
@@ -534,18 +717,17 @@ export function createManagementRoutes(dependencies) {
         if (scope.alive(token)) {
           rows = [];
           children = [];
-          choices.querySelectorAll('label').forEach(node => node.remove());
           rosterList.replaceChildren();
+          rosterCount.textContent = '0 天';
           status.setAttribute('role', 'alert');
           status.textContent = '排班加载失败，请重试。';
         }
       }
     };
 
-    const submitMutation = async (kind, snapshot) => {
+    const submitMutation = async (kind, snapshot, ui) => {
       if (busy) return;
-      const action = kind === 'daily' ? manualButton : autoButton;
-      let restoreFocus = false;
+      let succeeded = false;
       setBusy(true);
       retained = snapshot;
       try {
@@ -561,52 +743,151 @@ export function createManagementRoutes(dependencies) {
         status.setAttribute('role', 'status');
         status.textContent = '排班已保存';
         await reload();
+        succeeded = scope.alive();
       } catch (_error) {
         if (scope.alive()) {
-          status.setAttribute('role', 'alert');
-          status.textContent = '排班保存失败，请使用相同内容重试。';
-          restoreFocus = true;
+          ui.dialogStatus.setAttribute('role', 'alert');
+          ui.dialogStatus.textContent = '排班保存失败，请使用相同内容重试。';
         }
       } finally {
         if (scope.alive()) {
           setBusy(false);
-          if (restoreFocus && action.isConnected) action.focus();
+          if (succeeded) closeDialog(ui.dialog, ui.launcher);
+          else if (ui.submit.isConnected) ui.submit.focus();
         }
       }
     };
-    manual.addEventListener('submit', event => {
-      event.preventDefault();
-      if (!manual.reportValidity()) return;
-      const selected = [...choices.querySelectorAll('input:checked')].map(input => Number(input.value)).sort((a, b) => a - b);
-      const date = manualDate.value;
-      const cycle = manualCycle.value.trim();
-      if (!dateString(date) || !cycle || selected.length !== 2 || selected[0] === selected[1]) {
-        status.setAttribute('role', 'alert'); status.textContent = '请选择有效日期、周期和两名不同幼儿。'; return;
-      }
-      const normalized = { date, cycle, childIds: selected };
-      const snapshot = retained && retained.kind === 'daily' && JSON.stringify(retained.normalized) === JSON.stringify(normalized)
-        ? retained : { kind: 'daily', normalized, requestId: createRequestId(), ...normalized };
-      void submitMutation('daily', snapshot);
+
+    const option = (value, copy, selected = false) => h('option', {
+      value, text: copy, ...(selected ? { selected: '' } : {}),
     });
-    automatic.addEventListener('submit', event => {
-      event.preventDefault();
-      if (!automatic.reportValidity()) return;
-      const normalized = {
-        startDate: startDate.value,
-        days: Number(days.value),
-        cycle: autoCycle.value.trim(),
-        replaceExisting: replace.checked,
-        activeChildIds: children.filter(item => item.active).map(item => item.id).sort((a, b) => a - b),
-      };
-      if (!dateString(normalized.startDate) || !Number.isInteger(normalized.days) || normalized.days < 1 || normalized.days > 31 || !normalized.cycle) {
-        status.setAttribute('role', 'alert'); status.textContent = '请输入有效的自动排班参数。'; return;
-      }
-      const snapshot = retained && retained.kind === 'auto' && JSON.stringify(retained.normalized) === JSON.stringify(normalized)
-        ? retained : { kind: 'auto', normalized, requestId: createRequestId(), ...normalized };
-      void submitMutation('auto', snapshot);
-    });
+    const activeChildren = () => children.filter(item => item.active);
+    const addActiveOptions = select => {
+      select.append(option('', '请选择', true));
+      for (const child of activeChildren()) select.append(option(String(child.id), displayName(child)));
+    };
+
+    const openManual = () => {
+      if (busy) return;
+      retained = null;
+      const dialog = h('dialog', { 'aria-label': '安排当日值日', class: 'management-dialog' });
+      const formId = 'management-roster-daily-form';
+      const form = h('form', { id: formId, class: 'management-form' });
+      const manualDate = h('input', { type: 'date', required: '' });
+      const manualCycle = h('input', { required: '', maxlength: '64', autocomplete: 'off' });
+      const first = h('select', { required: '', 'aria-label': '值日幼儿 1' });
+      const second = h('select', { required: '', 'aria-label': '值日幼儿 2' });
+      addActiveOptions(first);
+      addActiveOptions(second);
+      const dialogStatus = h('p', { role: 'status', 'aria-live': 'polite', class: 'management-dialog-status' });
+      const cancel = h('button', { type: 'button', class: 'btn gray', text: '取消' });
+      const submit = h('button', { type: 'submit', form: formId, class: 'btn', text: '保存当日排班' });
+      form.append(
+        field('排班日期', manualDate),
+        field('手动排班周期', manualCycle),
+        field('值日幼儿 1', first),
+        field('值日幼儿 2', second),
+        dialogStatus,
+      );
+      dialog.append(
+        h('header', { class: 'management-dialog-header' }, h('h2', { text: '安排当日值日' })),
+        h('div', { class: 'management-dialog-body' }, form),
+        h('footer', { class: 'management-dialog-actions' }, cancel, submit),
+      );
+      const invalidate = () => { retained = null; };
+      form.addEventListener('input', invalidate);
+      form.addEventListener('change', invalidate);
+      cancel.addEventListener('click', () => closeDialog(dialog, manualLauncher, { discardRetry: true }));
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        if (busy || !form.reportValidity()) return;
+        const normalized = {
+          date: manualDate.value,
+          cycle: manualCycle.value.trim(),
+          childIds: [Number(first.value), Number(second.value)].sort((left, right) => left - right),
+        };
+        if (!dateString(normalized.date) || !normalized.cycle ||
+            normalized.childIds.some(id => !positive(id)) || normalized.childIds[0] === normalized.childIds[1]) {
+          dialogStatus.setAttribute('role', 'alert');
+          dialogStatus.textContent = '请选择有效日期、周期和两名不同幼儿。';
+          if (normalized.childIds[0] === normalized.childIds[1]) second.focus();
+          else submit.focus();
+          return;
+        }
+        const snapshot = retained && retained.kind === 'daily' && JSON.stringify(retained.normalized) === JSON.stringify(normalized)
+          ? retained : { kind: 'daily', normalized, requestId: createRequestId(), ...normalized };
+        void submitMutation('daily', snapshot, { dialog, launcher: manualLauncher, submit, dialogStatus });
+      });
+      mountDialog(dialog, manualLauncher);
+      manualDate.focus();
+    };
+
+    const openAutomatic = () => {
+      if (busy) return;
+      retained = null;
+      const dialog = h('dialog', { 'aria-label': '自动生成排班', class: 'management-dialog' });
+      const formId = 'management-roster-auto-form';
+      const form = h('form', { id: formId, class: 'management-form' });
+      const startDate = h('input', { type: 'date', required: '' });
+      const days = h('input', { type: 'number', required: '', min: '1', max: '31', value: '5' });
+      const autoCycle = h('input', { required: '', maxlength: '64', autocomplete: 'off' });
+      const replace = h('input', { type: 'checkbox' });
+      const dialogStatus = h('p', { role: 'status', 'aria-live': 'polite', class: 'management-dialog-status' });
+      const cancel = h('button', { type: 'button', class: 'btn gray', text: '取消' });
+      const submit = h('button', { type: 'submit', form: formId, class: 'btn', text: '生成排班' });
+      form.append(
+        field('自动排班开始日期', startDate),
+        field('自动排班天数', days),
+        field('自动排班周期', autoCycle),
+        field('替换已有排班', replace),
+        dialogStatus,
+      );
+      dialog.append(
+        h('header', { class: 'management-dialog-header' }, h('h2', { text: '自动生成排班' })),
+        h('div', { class: 'management-dialog-body' }, form),
+        h('footer', { class: 'management-dialog-actions' }, cancel, submit),
+      );
+      const invalidate = () => { retained = null; };
+      form.addEventListener('input', invalidate);
+      form.addEventListener('change', invalidate);
+      cancel.addEventListener('click', () => closeDialog(dialog, automaticLauncher, { discardRetry: true }));
+      form.addEventListener('submit', event => {
+        event.preventDefault();
+        if (busy || !form.reportValidity()) return;
+        const normalized = {
+          startDate: startDate.value,
+          days: Number(days.value),
+          cycle: autoCycle.value.trim(),
+          replaceExisting: replace.checked,
+          activeChildIds: activeChildren().map(item => item.id).sort((a, b) => a - b),
+        };
+        if (!dateString(normalized.startDate) || !Number.isInteger(normalized.days) ||
+            normalized.days < 1 || normalized.days > 31 || !normalized.cycle || normalized.activeChildIds.length < 2) {
+          dialogStatus.setAttribute('role', 'alert');
+          dialogStatus.textContent = '请输入有效的自动排班参数，并确保至少有两名启用中的幼儿。';
+          submit.focus();
+          return;
+        }
+        const snapshot = retained && retained.kind === 'auto' && JSON.stringify(retained.normalized) === JSON.stringify(normalized)
+          ? retained : { kind: 'auto', normalized, requestId: createRequestId(), ...normalized };
+        void submitMutation('auto', snapshot, { dialog, launcher: automaticLauncher, submit, dialogStatus });
+      });
+      mountDialog(dialog, automaticLauncher);
+      startDate.focus();
+    };
+
+    manualLauncher.addEventListener('click', openManual);
+    automaticLauncher.addEventListener('click', openAutomatic);
     void reload();
-    return { cleanup: scope.cleanup };
+    return { cleanup: () => {
+      disposed = true;
+      scope.cleanup();
+      for (const dialog of dialogs) {
+        if (dialog.open) dialog.close();
+        if (dialog.isConnected) dialog.remove();
+      }
+      dialogs.clear();
+    } };
   };
 
   return {

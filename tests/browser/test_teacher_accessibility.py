@@ -129,6 +129,44 @@ A11Y_ROUTE_CASES = [
         )
     ],
 ]
+MANAGEMENT_DIALOG_CASES = [
+    pytest.param(
+        {
+            "fragment": "children",
+            "heading": "幼儿管理",
+            "settled": "暂无幼儿",
+            "launcher": "添加幼儿",
+            "dialog": "新增幼儿",
+            "viewport": viewport,
+        },
+        id=f"management_children_dialog_{viewport['width']}",
+    )
+    for viewport in (
+        {"width": 1024, "height": 768},
+        {"width": 1440, "height": 900},
+    )
+] + [
+    pytest.param(
+        {
+            "fragment": fragment,
+            "heading": heading,
+            "settled": settled,
+            "launcher": launcher,
+            "dialog": dialog,
+            "viewport": viewport,
+        },
+        id=f"management_{fragment}_{launcher}_{viewport['width']}",
+    )
+    for fragment, heading, settled, launcher, dialog in (
+        ("ducks", "小鸭管理", "暂无小鸭", "添加小鸭", "新增小鸭"),
+        ("roster", "值日排班", "暂无排班", "安排当日", "安排当日值日"),
+        ("roster", "值日排班", "暂无排班", "自动生成", "自动生成排班"),
+    )
+    for viewport in (
+        {"width": 1024, "height": 768},
+        {"width": 1440, "height": 900},
+    )
+]
 PIN_STATE_CASES = [
     pytest.param(
         {
@@ -824,7 +862,7 @@ def test_teacher_authenticated_routes_have_frozen_accessibility_structure(
     )
 
     sized_actions = page.locator(
-        "button:visible:not(:disabled), a[href]:visible:not(.skip-link)"
+        "button:visible, a[href]:visible:not(.skip-link)"
     )
     for index in range(sized_actions.count()):
         box = sized_actions.nth(index).bounding_box()
@@ -851,6 +889,69 @@ def test_teacher_authenticated_routes_have_frozen_accessibility_structure(
         _assert_active_outline(control)
     _assert_reduced_motion_contract(page)
     assert calls != {}
+    assert page_errors == []
+
+
+@pytest.mark.parametrize("case", MANAGEMENT_DIALOG_CASES)
+def test_teacher_management_dialogs_are_modal_keyboard_sized_and_restore_focus(
+    teacher_browser, case
+):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(case["viewport"])
+    page_errors: list[str] = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    _install_static_routes(page, teacher_browser)
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#{case['fragment']}",
+        wait_until="domcontentloaded",
+    )
+    page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
+    page.get_by_role("button", name="设置并解锁", exact=True).click()
+    page.get_by_role("heading", name=case["heading"], exact=True).wait_for()
+    page.get_by_text(case["settled"], exact=True).wait_for()
+
+    launcher = page.get_by_role("button", name=case["launcher"], exact=True)
+    launcher.click()
+    dialog = page.get_by_role("dialog", name=case["dialog"], exact=True)
+    dialog.wait_for()
+    assert dialog.count() == 1
+    assert dialog.evaluate(
+        "node => node.tagName === 'DIALOG' && node.open && node.contains(document.activeElement)"
+    )
+
+    controls = dialog.locator(
+        "input:visible:not(:disabled), select:visible:not(:disabled), "
+        "textarea:visible:not(:disabled), button:visible:not(:disabled)"
+    )
+    assert controls.count() > 0
+    _assert_computed_accessible_names(controls)
+    actions = dialog.locator("button:visible:not(:disabled)")
+    assert actions.count() >= 2
+    for index in range(actions.count()):
+        box = actions.nth(index).bounding_box()
+        assert box is not None
+        assert box["width"] >= 44 and box["height"] >= 44, {
+            "box": box,
+            "html": actions.nth(index).evaluate("node => node.outerHTML"),
+        }
+
+    for _index in range(controls.count() + 2):
+        page.keyboard.press("Tab")
+        assert dialog.evaluate(
+            "node => node.matches(':modal') && "
+            "(node.contains(document.activeElement) || document.activeElement === document.body)"
+        )
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+
+    page.keyboard.press("Escape")
+    dialog.wait_for(state="detached")
+    assert launcher.evaluate("button => document.activeElement === button")
+    _assert_active_outline(launcher)
     assert page_errors == []
 
 

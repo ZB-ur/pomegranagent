@@ -447,34 +447,60 @@ def _activate_resource_action(page, spec: dict, action: str):
     return launcher
 
 
-def _fill_roster_forms(page) -> dict:
-    page.get_by_label("排班日期", exact=True).fill("2026-08-29")
-    page.get_by_label("手动排班周期", exact=True).fill("  2026-W35  ")
-    page.get_by_label("选择甲", exact=True).check()
-    page.get_by_label("选择乙", exact=True).check()
-    page.get_by_label("自动排班开始日期", exact=True).fill("2026-08-31")
-    page.get_by_label("自动排班天数", exact=True).fill("2")
-    page.get_by_label("自动排班周期", exact=True).fill("  2026-W36  ")
-    page.get_by_label("替换已有排班", exact=True).check()
-    return _roster_form_values(page)
+def _open_roster_dialog(page, kind: str):
+    launcher_name = "安排当日" if kind == "daily" else "自动生成"
+    dialog_name = "安排当日值日" if kind == "daily" else "自动生成排班"
+    other_dialog_name = "自动生成排班" if kind == "daily" else "安排当日值日"
+    first_field = "排班日期" if kind == "daily" else "自动排班开始日期"
+    launcher = page.get_by_role("button", name=launcher_name, exact=True)
+    launcher.wait_for()
+    launcher.evaluate("node => { window.__task8RosterLauncher = node; }")
+    launcher.focus()
+    page.keyboard.press("Enter")
+    dialog = page.get_by_role("dialog", name=dialog_name, exact=True)
+    dialog.wait_for()
+    assert page.get_by_role(
+        "dialog", name=other_dialog_name, exact=True
+    ).count() == 0
+    _assert_visible_outline(dialog.get_by_label(first_field, exact=True))
+    return launcher, dialog
 
 
-def _roster_form_values(page) -> dict:
+def _fill_roster_dialog(dialog, kind: str) -> dict:
+    if kind == "daily":
+        dialog.get_by_label("排班日期", exact=True).fill("2026-08-29")
+        dialog.get_by_label("手动排班周期", exact=True).fill("  2026-W35  ")
+        dialog.get_by_label("值日幼儿 1", exact=True).select_option("7")
+        dialog.get_by_label("值日幼儿 2", exact=True).select_option("8")
+    else:
+        dialog.get_by_label("自动排班开始日期", exact=True).fill("2026-08-31")
+        dialog.get_by_label("自动排班天数", exact=True).fill("2")
+        dialog.get_by_label("自动排班周期", exact=True).fill("  2026-W36  ")
+        dialog.get_by_label("替换已有排班", exact=True).check()
+    return _roster_dialog_values(dialog, kind)
+
+
+def _roster_dialog_values(dialog, kind: str) -> dict:
+    if kind == "daily":
+        return {
+            "date": dialog.get_by_label("排班日期", exact=True).input_value(),
+            "cycle": dialog.get_by_label(
+                "手动排班周期", exact=True
+            ).input_value(),
+            "child_1": dialog.get_by_label(
+                "值日幼儿 1", exact=True
+            ).input_value(),
+            "child_2": dialog.get_by_label(
+                "值日幼儿 2", exact=True
+            ).input_value(),
+        }
     return {
-        "daily_date": page.get_by_label("排班日期", exact=True).input_value(),
-        "daily_cycle": page.get_by_label(
-            "手动排班周期", exact=True
-        ).input_value(),
-        "child_7": page.get_by_label("选择甲", exact=True).is_checked(),
-        "child_8": page.get_by_label("选择乙", exact=True).is_checked(),
-        "auto_start": page.get_by_label(
+        "start": dialog.get_by_label(
             "自动排班开始日期", exact=True
         ).input_value(),
-        "auto_days": page.get_by_label("自动排班天数", exact=True).input_value(),
-        "auto_cycle": page.get_by_label(
-            "自动排班周期", exact=True
-        ).input_value(),
-        "replace": page.get_by_label("替换已有排班", exact=True).is_checked(),
+        "days": dialog.get_by_label("自动排班天数", exact=True).input_value(),
+        "cycle": dialog.get_by_label("自动排班周期", exact=True).input_value(),
+        "replace": dialog.get_by_label("替换已有排班", exact=True).is_checked(),
     }
 
 
@@ -1105,13 +1131,14 @@ def test_teacher_roster_settled_faults_preserve_snapshot_and_request_id(
     )
     _unlock_teacher(page, "值日排班")
     page.get_by_text("暂无排班", exact=True).wait_for()
-    original_values = _fill_roster_forms(page)
+    launcher, dialog = _open_roster_dialog(page, case["kind"])
+    original_values = _fill_roster_dialog(dialog, case["kind"])
     action_name = "保存当日排班" if case["kind"] == "daily" else "生成排班"
-    action = page.get_by_role("button", name=action_name, exact=True)
+    action = dialog.get_by_role("button", name=action_name, exact=True)
     action.evaluate("node => { window.__task8RosterAction = node; }")
     action.focus()
     page.keyboard.press("Enter")
-    page.get_by_text(
+    dialog.get_by_text(
         "排班保存失败，请使用相同内容重试。", exact=True
     ).wait_for()
 
@@ -1134,9 +1161,9 @@ def test_teacher_roster_settled_faults_preserve_snapshot_and_request_id(
     )
     assert body == expected_body
     _assert_valid_request_id(body["request_id"])
-    assert _roster_form_values(page) == original_values
-    assert page.locator(".roster-view input, .roster-view button").evaluate_all(
-        "nodes => nodes.every(node => !node.disabled)"
+    assert _roster_dialog_values(dialog, case["kind"]) == original_values
+    assert dialog.locator("input, textarea, select, button").evaluate_all(
+        "nodes => nodes.length > 0 && nodes.every(node => !node.disabled)"
     )
     assert action.evaluate("node => node === window.__task8RosterAction")
     _assert_visible_outline(action)
@@ -1153,6 +1180,7 @@ def test_teacher_roster_settled_faults_preserve_snapshot_and_request_id(
         else "2026-08-31 · 2026-W36 · 甲、乙"
     )
     page.get_by_text(success_projection, exact=True).wait_for()
+    dialog.wait_for(state="detached")
     assert len(mutation_records) == 2
     assert mutation_records[1]["body"] == mutation_records[0]["body"]
     assert mutation_records[1]["request_id"] == mutation_records[0]["request_id"]
@@ -1160,6 +1188,8 @@ def test_teacher_roster_settled_faults_preserve_snapshot_and_request_id(
         "request_id"
     ]
     assert collection_calls == {"roster": 2, "children": 2}
+    assert launcher.evaluate("node => node === window.__task8RosterLauncher")
+    _assert_visible_outline(launcher)
     _assert_raw_secret_absent(page)
     assert page_errors == []
 
@@ -1256,9 +1286,10 @@ def test_teacher_roster_delay_is_single_flight(teacher_browser, case):
         )
         _unlock_teacher(page, "值日排班")
         page.get_by_text("暂无排班", exact=True).wait_for()
-        original_values = _fill_roster_forms(page)
+        launcher, dialog = _open_roster_dialog(page, case["kind"])
+        original_values = _fill_roster_dialog(dialog, case["kind"])
         action_name = "保存当日排班" if case["kind"] == "daily" else "生成排班"
-        action = page.get_by_role("button", name=action_name, exact=True)
+        action = dialog.get_by_role("button", name=action_name, exact=True)
         action.focus()
         page.keyboard.press("Enter")
         page.wait_for_timeout(0)
@@ -1284,14 +1315,14 @@ def test_teacher_roster_delay_is_single_flight(teacher_browser, case):
         )
         assert body == expected_body
         _assert_valid_request_id(original_request_id)
-        assert page.locator(".roster-view form input, .roster-view form button").evaluate_all(
+        assert dialog.locator("input, textarea, select, button").evaluate_all(
             "nodes => nodes.length > 0 && nodes.every(node => node.disabled)"
         )
 
         page.keyboard.press("Enter")
         page.keyboard.press("Space")
-        page.locator(".roster-view form").evaluate_all(
-            "forms => forms.forEach(form => form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true})))"
+        dialog.locator("form").evaluate(
+            "form => form.dispatchEvent(new Event('submit', {bubbles: true, cancelable: true}))"
         )
         page.wait_for_timeout(0)
         assert len(held_routes) == 1
@@ -1300,7 +1331,7 @@ def test_teacher_roster_delay_is_single_flight(teacher_browser, case):
             "body": original_body,
             "request_id": original_request_id,
         }
-        assert _roster_form_values(page) == original_values
+        assert _roster_dialog_values(dialog, case["kind"]) == original_values
         assert collection_calls == {"roster": 1, "children": 1}
         assert page.get_by_text("排班已保存", exact=True).count() == 0
         assert page.get_by_text(
@@ -1334,9 +1365,12 @@ def test_teacher_roster_delay_is_single_flight(teacher_browser, case):
             else "2026-08-31 · 2026-W36 · 甲、乙"
         )
         page.get_by_text(success_projection, exact=True).wait_for()
+        dialog.wait_for(state="detached")
         assert collection_calls == {"roster": 2, "children": 2}
         assert len(mutation_records) == 1
         assert held_routes == []
+        assert launcher.evaluate("node => node === window.__task8RosterLauncher")
+        _assert_visible_outline(launcher)
         assert page_errors == []
     finally:
         for held in tuple(held_routes):

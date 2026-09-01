@@ -507,27 +507,219 @@ textarea { min-height: 46px; width: 100%; }
 
 .management-view, .reports-view { display: grid; gap: 16px; min-width: 0; }
 .management-view > h1, .reports-view > h1 { font-size: 30px; line-height: 1.25; }
-.management-form { display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; }
+.management-hero {
+  align-items: center;
+  display: flex;
+  gap: 24px;
+  justify-content: space-between;
+  min-width: 0;
+}
+.management-copy { display: grid; gap: 4px; min-width: 0; }
+.management-copy h1 { font-size: 26px; line-height: 1.35; margin: 0; overflow-wrap: anywhere; }
+.management-eyebrow { color: var(--teacher-action-primary); font-size: 12px; font-weight: 700; }
+.management-description, .management-row-meta { color: var(--teacher-text-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.management-toolbar { align-items: center; display: flex; flex: 0 0 auto; gap: 10px; }
+.management-toolbar .btn { min-width: 160px; }
+.management-form { display: grid; gap: 14px; grid-template-columns: repeat(2, minmax(0, 1fr)); min-width: 0; }
 .teacher-field { display: grid; gap: 6px; min-width: 0; }
+.teacher-field > span { font-size: 13px; font-weight: 600; }
 .teacher-field > input, .teacher-field > select, .teacher-field > textarea { min-width: 0; width: 100%; }
-.management-form > button, .management-form > fieldset { grid-column: 1 / -1; }
-.management-list { display: grid; gap: 12px; min-width: 0; }
+.management-list, .management-row-copy, .duck-archive { display: grid; gap: 10px; min-width: 0; }
+.management-list-card, .duck-list-panel, .duck-archive, .roster-preview { min-width: 0; padding: 16px; }
+.management-list-header {
+  align-items: center;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  min-width: 0;
+}
+.management-list-header h2, .duck-archive h2, .roster-preview h2 { font-size: 18px; line-height: 1.35; margin: 0; }
+.management-count, .management-badge, .roster-person {
+  align-items: center;
+  border-radius: 999px;
+  display: inline-flex;
+  font-size: 12px;
+  justify-content: center;
+  min-height: 30px;
+  padding: 4px 12px;
+  white-space: nowrap;
+}
+.management-count, .management-badge.is-active { background: var(--teacher-status-success); }
+.management-badge.is-busy { background: var(--teacher-status-warning); }
+.management-badge.is-inactive { background: var(--teacher-surface-soft); }
+.management-row {
+  align-items: center;
+  background: var(--teacher-surface-panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 84px;
+  min-width: 0;
+  padding: 12px;
+}
+.management-row.is-selected { background: var(--teacher-status-info); border: 2px solid var(--teacher-action-primary); padding: 11px; }
+.management-row-main {
+  align-items: center;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: 44px minmax(0, 1fr) auto;
+  min-width: 0;
+}
+.management-avatar {
+  align-items: center;
+  background: var(--teacher-surface-soft);
+  border-radius: 50%;
+  color: var(--teacher-text-primary);
+  display: inline-flex;
+  flex: 0 0 auto;
+  font-size: 16px;
+  font-weight: 700;
+  height: 44px;
+  justify-content: center;
+  overflow: hidden;
+  width: 44px;
+}
+.management-avatar img { height: 100%; object-fit: cover; width: 100%; }
+.management-row-copy { gap: 3px; }
+.management-row-copy h3 { font-size: 15px; line-height: 1.4; margin: 0; overflow-wrap: anywhere; }
+.management-row-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; justify-content: flex-end; max-width: 250px; }
+.management-row-actions .btn { min-height: 44px; padding: 7px 12px; }
 .management-card { display: flex; flex-wrap: wrap; gap: 10px; min-width: 0; }
 .management-card h2, .management-card p { flex-basis: 100%; }
-.management-status { min-height: 22px; }
-.management-undo { align-items: center; background: #fff7e0; bottom: 18px; display: flex; flex-wrap: wrap; gap: 12px; padding: 14px; position: sticky; z-index: 2; }
-.duck-archive, .report-history-row { overflow-wrap: anywhere; }
-.roster-view fieldset { border: 1px solid var(--border); border-radius: 10px; display: flex; flex-wrap: wrap; gap: 10px; padding: 12px; }
-.roster-view fieldset .teacher-field { align-items: center; display: flex; min-height: 44px; }
+.management-status, .management-dialog-status { min-height: 22px; }
+.management-status:empty { min-height: 0; }
+.management-undo {
+  align-items: center;
+  background: var(--teacher-status-warning);
+  border: 1px solid var(--teacher-accent-warning);
+  border-radius: 12px;
+  bottom: 18px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px;
+  position: sticky;
+  z-index: 2;
+}
+.ducks-workspace { display: grid; gap: 16px; grid-template-columns: minmax(320px, 5fr) minmax(360px, 7fr); min-width: 0; }
+.ducks-workspace > .management-hero, .ducks-workspace > .management-status { grid-column: 1 / -1; }
+.duck-list-panel .management-row { grid-template-columns: minmax(0, 1fr); }
+.duck-list-panel .management-row-actions { justify-content: flex-start; max-width: none; }
+.duck-list-panel .management-row-actions .btn { flex: 1 1 96px; }
+.duck-archive { align-content: start; min-height: 500px; overflow-wrap: anywhere; }
+.duck-archive > p { font-size: 15px; line-height: 1.55; white-space: pre-wrap; }
+.management-dialog {
+  background: var(--teacher-surface-panel);
+  border: 0;
+  border-radius: 16px;
+  box-shadow: 0 24px 72px rgba(36, 53, 43, .24);
+  color: var(--teacher-text-primary);
+  margin: auto;
+  max-height: min(760px, calc(100vh - 32px));
+  max-width: min(560px, calc(100vw - 32px));
+  overflow: auto;
+  padding: 0;
+  width: 100%;
+}
+.management-dialog::backdrop { background: rgba(36, 53, 43, .42); }
+.management-dialog-header, .management-dialog-body, .management-dialog-actions { padding-left: 22px; padding-right: 22px; }
+.management-dialog-header { display: grid; gap: 4px; padding-top: 22px; }
+.management-dialog-header h2 { font-size: 20px; margin: 0; }
+.management-dialog-body { display: grid; gap: 14px; padding-bottom: 20px; padding-top: 18px; }
+.management-dialog-actions {
+  align-items: center;
+  border-top: 1px solid var(--teacher-border-subtle);
+  display: flex;
+  gap: 10px;
+  justify-content: flex-end;
+  padding-bottom: 22px;
+  padding-top: 16px;
+}
+.management-dialog-actions .btn { min-width: 104px; }
+.management-avatar-field {
+  border: 1px solid #ead8bd;
+  border-radius: 12px;
+  display: grid;
+  gap: 10px;
+  padding: 14px;
+}
+.management-avatar-placeholder { align-items: center; display: flex; gap: 12px; min-width: 0; }
+.management-capability-note, .roster-capability {
+  background: var(--teacher-status-warning);
+  border-radius: 10px;
+  color: var(--teacher-text-secondary);
+  font-size: 12px;
+  line-height: 1.5;
+  padding: 10px 12px;
+}
+.roster-preview { display: grid; gap: 0; overflow: hidden; padding: 0; }
+.roster-preview > .management-list-header { padding: 14px 16px; }
+.roster-row {
+  align-items: center;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, .7fr) minmax(0, 1.4fr) minmax(0, 1.1fr);
+  min-height: 58px;
+  min-width: 0;
+  padding: 10px 16px;
+}
+.roster-row.is-today { background: var(--teacher-status-warning); }
+.roster-date { font-weight: 700; min-width: 0; overflow-wrap: anywhere; }
+.roster-people { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; min-width: 0; }
+.roster-person {
+  background: var(--teacher-status-info);
+  flex: 1 1 110px;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: center;
+  white-space: normal;
+}
+.roster-person:nth-child(odd) { background: var(--teacher-status-success); }
+.roster-footer { align-items: end; display: grid; gap: 3px; justify-items: end; min-width: 0; padding: 0; text-align: right; }
+.roster-footer .management-badge {
+  justify-self: end;
+  max-width: 100%;
+  min-height: 24px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  padding-bottom: 2px;
+  padding-top: 2px;
+  text-align: right;
+  white-space: normal;
+}
+.roster-footer .management-row-copy {
+  color: var(--teacher-text-secondary);
+  font-size: 11px;
+  max-width: 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+.roster-panel-footer {
+  align-items: end;
+  border-top: 1px solid var(--border);
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  padding: 16px;
+}
+.roster-panel-footer h3 { font-size: 15px; margin-bottom: 4px; }
+.roster-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: flex-end; }
+.roster-actions .btn { min-width: 150px; }
 .report-chart { min-width: 0; overflow-x: auto; }
 .report-chart svg { display: block; max-width: 100%; min-width: 620px; }
 .report-legend { font-weight: 600; overflow-wrap: anywhere; }
 .report-history { display: grid; gap: 12px; min-width: 0; }
 .report-history-row { display: grid; gap: 8px; }
 .report-history-row a, .report-load-more { align-items: center; display: inline-flex; min-height: 44px; min-width: 44px; width: fit-content; }
-.management-view dialog { border: 0; border-radius: 14px; margin: auto; max-width: min(520px, calc(100vw - 32px)); padding: 22px; }
-.management-view dialog::backdrop { background: rgba(15, 23, 42, .5); }
-.management-view dialog button { margin: 14px 10px 0 0; }
+.management-view dialog:not(.management-dialog) { border: 0; border-radius: 14px; margin: auto; max-width: min(520px, calc(100vw - 32px)); padding: 22px; }
+.management-view dialog:not(.management-dialog)::backdrop { background: rgba(36, 53, 43, .42); }
+.management-view dialog:not(.management-dialog) button { margin: 14px 10px 0 0; }
 
 button, input, select, textarea { min-height: 44px; }
 button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible,
@@ -549,13 +741,29 @@ h1[tabindex="-1"]:focus-visible, h2[tabindex="-1"]:focus-visible {
   .today-panel { min-height: 220px; padding-bottom: 12px; padding-top: 14px; }
   .today-metrics-strip { min-height: 44px; padding-bottom: 8px; padding-top: 8px; }
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .management-hero { gap: 16px; }
+  .management-copy h1 { font-size: 25px; }
+  .management-row-actions { max-width: 190px; }
+  .ducks-workspace { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .duck-list-panel .management-row-actions .btn { flex-basis: calc(50% - 4px); }
+  .roster-row { grid-template-columns: minmax(0, .7fr) minmax(0, 1.4fr) minmax(0, 1.1fr); }
   .card { overflow-wrap: anywhere; }
 }
 
 @media (max-width: 899px) {
   .review-shell, .review-workspace { grid-template-columns: minmax(0, 1fr); }
   .review-feeding-editor { grid-template-columns: minmax(0, 1fr); }
+  .management-hero { align-items: stretch; flex-direction: column; }
+  .management-toolbar .btn { width: 100%; }
   .management-form { grid-template-columns: minmax(0, 1fr); }
+  .ducks-workspace { grid-template-columns: minmax(0, 1fr); }
+  .management-row { grid-template-columns: 44px minmax(0, 1fr); }
+  .management-row-actions { grid-column: 1 / -1; justify-content: flex-start; max-width: none; }
+  .roster-row { grid-template-columns: minmax(0, 1fr); }
+  .roster-footer { grid-column: 1 / -1; justify-items: start; text-align: left; }
+  .roster-panel-footer { align-items: stretch; grid-template-columns: minmax(0, 1fr); }
+  .roster-actions { justify-content: stretch; }
+  .roster-actions .btn { flex: 1 1 150px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
