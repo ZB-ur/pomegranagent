@@ -18,7 +18,9 @@ TODAY_REQUESTS = [
     "/api/conversations?queue=pending",
     "/api/conversations?queue=processing",
     "/api/conversations?queue=failed",
+    "/api/reports/weekly",
 ]
+METRICS_PATH = "/api/reports/weekly"
 PANEL_PATHS = {
     "roster": "/api/roster/today",
     "pending": "/api/conversations?queue=pending",
@@ -44,6 +46,21 @@ RELOAD_COPY = {
     "failed": "重新加载分析失败",
 }
 ROSTER_ROW = {"id": 7, "name": "小雨", "nickname": "雨雨", "avatar": "rain.png"}
+
+
+def weekly_response(**overrides) -> dict:
+    body = {
+        "timezone": "Asia/Shanghai",
+        "week_start": "2026-08-31",
+        "week_end_exclusive": "2026-09-07",
+        "completed_conversations": 5,
+        "participating_children": 3,
+        "confirmed_reviews": 2,
+        "failed_analyses": 1,
+        "pending_reviews_total": 4,
+    }
+    body.update(overrides)
+    return body
 
 
 def queue_row(queue: str) -> dict:
@@ -94,7 +111,7 @@ def panel(page, key: str):
     return page.locator(f'[data-today-panel="{key}"]')
 
 
-def install_panel_routes(page, teacher_browser, handlers) -> None:
+def install_panel_routes(page, teacher_browser, handlers, metrics_handler=None) -> None:
     for key, path in PANEL_PATHS.items():
         def make_handler(panel_key):
             def handler(route):
@@ -102,6 +119,15 @@ def install_panel_routes(page, teacher_browser, handlers) -> None:
                 handlers[panel_key](route)
             return handler
         page.route(f"{teacher_browser.server.base_url}{path}", make_handler(key))
+
+    def weekly(route):
+        assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
+        if metrics_handler is None:
+            fulfill_json(route, weekly_response())
+        else:
+            metrics_handler(route)
+
+    page.route(f"{teacher_browser.server.base_url}{METRICS_PATH}", weekly)
 
 
 def fulfill_json(route, body, status: int = 200) -> None:
@@ -170,6 +196,10 @@ def test_teacher_today_shell_migrates_overview_before_first_authenticated_load(t
         held.append(route)
 
     page.route(f"{teacher_browser.server.base_url}/api/roster/today", hold_roster)
+    page.route(
+        f"{teacher_browser.server.base_url}{METRICS_PATH}",
+        lambda route: fulfill_json(route, weekly_response()),
+    )
     page.get_by_label("设置教师 PIN", exact=True).wait_for()
     assert urlsplit(page.url).fragment == "overview?source=legacy"
     setup_teacher(page)
@@ -188,8 +218,8 @@ def test_teacher_today_shell_migrates_overview_before_first_authenticated_load(t
     assert page.locator("#main").inner_text().find("开始幼儿对话") < page.locator("#main").inner_text().find("待审阅")
     assert page.locator("#main").inner_text().find("待审阅") < page.locator("#main").inner_text().find("分析中")
     assert page.locator("#main").inner_text().find("分析中") < page.locator("#main").inner_text().find("分析失败")
-    assert page.locator("#main").inner_text().find("分析失败") < page.locator("#main").inner_text().find("辅助指标")
-    assert page.get_by_text("本周指标暂不可用", exact=True).count() == 1
+    assert page.locator("#main").inner_text().find("分析失败") < page.locator("#main").inner_text().find("本周概览")
+    assert page.get_by_text("本周指标暂不可用", exact=True).count() == 0
     assert page.get_by_text("正在加载今日排班…", exact=True).count() == 1
     action = page.get_by_role("link", name="开始幼儿对话", exact=True)
     assert action.get_attribute("href") == "/index.html"
@@ -199,7 +229,7 @@ def test_teacher_today_shell_migrates_overview_before_first_authenticated_load(t
     assert application_request_paths(requests, teacher_browser.server.base_url).index(TODAY_REQUESTS[0]) < application_request_paths(requests, teacher_browser.server.base_url).index(TODAY_REQUESTS[1])
     paths = application_request_paths(requests, teacher_browser.server.base_url)
     business = [path for path in paths if path in TODAY_REQUESTS]
-    assert business[:4] == TODAY_REQUESTS
+    assert business[:5] == TODAY_REQUESTS
     assert "/api/analysis/overview" not in paths
 
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
@@ -229,12 +259,15 @@ def test_teacher_today_shows_all_panel_loading_states_before_any_response(teache
     held = []
     install_panel_routes(page, teacher_browser, {
         key: (lambda route, key=key: held.append((key, route))) for key in PANEL_PATHS
-    })
+    }, metrics_handler=lambda route: held.append(("metrics", route)))
     setup_teacher(page)
     for key, copy in LOADING_COPY.items():
         assert panel(page, key).get_by_text(copy, exact=True).count() == 1
         assert panel(page, key).get_attribute("aria-busy") == "true"
-    assert [key for key, _route in held] == ["roster", "pending", "processing", "failed"]
+    metrics = page.locator('[data-today-metrics="weekly"]')
+    assert metrics.get_by_text("正在加载本周指标…", exact=True).count() == 1
+    assert metrics.get_attribute("aria-busy") == "true"
+    assert [key for key, _route in held] == ["roster", "pending", "processing", "failed", "metrics"]
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -279,11 +312,113 @@ def test_teacher_today_uses_the_approved_hero_and_two_column_panel_grid(
     assert hero_box["y"] + hero_box["height"] <= grid_box["y"]
     assert grid_box["width"] >= hero_box["width"] * 0.95
     assert grid_box["y"] + grid_box["height"] <= metrics_box["y"]
-    assert metrics_box["height"] <= 64
-    assert page.get_by_text("本周指标暂不可用", exact=True).count() == 1
+    assert metrics_box["height"] >= 120
+    assert page.locator(".today-metrics-grid > [data-metric]").count() == 5
+    assert page.get_by_text("本周指标暂不可用", exact=True).count() == 0
     assert page.evaluate(
         "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
     )
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_today_renders_exact_week_range_and_five_weekly_metrics(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher(teacher_browser, viewport)
+    install_panel_routes(page, teacher_browser, empty_handlers())
+    setup_teacher(page)
+    metrics = page.locator('[data-today-metrics="weekly"]')
+    metrics.get_by_text("周指标已更新", exact=True).wait_for()
+
+    assert metrics.get_attribute("data-state") == "loaded"
+    assert metrics.get_attribute("aria-busy") is None
+    assert metrics.get_by_text("2026年8月31日–9月6日", exact=True).count() == 1
+    expected = {
+        "completed": ("本周完成对话", "5"),
+        "children": ("参与幼儿", "3"),
+        "confirmed": ("已确认审阅", "2"),
+        "failed": ("分析失败", "1"),
+        "pending": ("当前待审阅", "4"),
+    }
+    for key, (label, value) in expected.items():
+        card = metrics.locator(f'[data-metric="{key}"]')
+        assert card.get_by_text(label, exact=True).count() == 1
+        assert card.get_by_text(value, exact=True).count() == 1
+    assert page.get_by_text("本周指标暂不可用", exact=True).count() == 0
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_today_weekly_metrics_have_an_explicit_all_zero_state(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher(teacher_browser, viewport)
+    install_panel_routes(
+        page,
+        teacher_browser,
+        empty_handlers(),
+        metrics_handler=lambda route: fulfill_json(
+            route,
+            weekly_response(
+                completed_conversations=0,
+                participating_children=0,
+                confirmed_reviews=0,
+                failed_analyses=0,
+                pending_reviews_total=0,
+            ),
+        ),
+    )
+    setup_teacher(page)
+    metrics = page.locator('[data-today-metrics="weekly"]')
+    metrics.get_by_text(
+        "本周暂无完成数据，当前也没有待审阅。", exact=True
+    ).wait_for()
+    assert metrics.locator(".today-metric-value").all_inner_texts() == ["0"] * 5
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+def test_teacher_today_weekly_failure_retry_is_scoped_and_touch_sized(
+    teacher_browser, viewport
+):
+    _context, page = open_teacher(teacher_browser, viewport)
+    calls = {key: 0 for key in PANEL_PATHS}
+    calls["metrics"] = 0
+
+    def panel_handler(key):
+        def handler(route):
+            calls[key] += 1
+            fulfill_json(route, [])
+
+        return handler
+
+    def metrics_handler(route):
+        calls["metrics"] += 1
+        if calls["metrics"] == 1:
+            route.fulfill(
+                status=500,
+                content_type="application/json",
+                body='{"error":{"message":"raw-weekly-detail"}}',
+            )
+        else:
+            fulfill_json(route, weekly_response())
+
+    install_panel_routes(
+        page,
+        teacher_browser,
+        {key: panel_handler(key) for key in PANEL_PATHS},
+        metrics_handler=metrics_handler,
+    )
+    setup_teacher(page)
+    metrics = page.locator('[data-today-metrics="weekly"]')
+    metrics.get_by_text("本周指标加载失败，请重试。", exact=True).wait_for()
+    assert all(panel(page, key).get_attribute("data-state") == "empty" for key in PANEL_PATHS)
+    retry = metrics.get_by_role("button", name="重新加载本周指标", exact=True)
+    box = retry.bounding_box()
+    assert box["width"] >= 44 and box["height"] >= 44
+    retry.click()
+    metrics.get_by_text("周指标已更新", exact=True).wait_for()
+    assert calls == {"roster": 1, "pending": 1, "processing": 1, "failed": 1, "metrics": 2}
+    assert "raw-weekly-detail" not in page.locator("body").inner_text()
+    assert all(panel(page, key).get_attribute("data-state") == "empty" for key in PANEL_PATHS)
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -709,7 +844,7 @@ def test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_
     assert page.get_by_role("link", name="开始幼儿对话", exact=True).count() == 1
 
     application_paths = application_request_paths(requests, teacher_browser.server.base_url)
-    assert [path for path in application_paths if path in PANEL_PATHS.values()] == TODAY_REQUESTS
+    assert [path for path in application_paths if path in TODAY_REQUESTS] == TODAY_REQUESTS
     retry_requests = [
         request
         for request in requests

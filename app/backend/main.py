@@ -20,6 +20,7 @@ from .database import Base, DATABASE_PATH, DB_MODE, SETTINGS, SessionLocal, engi
 from .http_boundary import install_same_origin_boundary
 from .routes.conversations import router as conversations_router
 from .routes.media import router as media_router
+from .routes.reports import router as reports_router
 from .routes.resources import router as resources_router
 from .routes.roster import router as roster_router
 from .routes.runtime import router as runtime_router
@@ -78,6 +79,7 @@ install_same_origin_boundary(app)
 app.include_router(auth.router)
 app.include_router(conversations_router)
 app.include_router(media_router)
+app.include_router(reports_router)
 app.include_router(resources_router)
 app.include_router(roster_router)
 app.include_router(runtime_router)

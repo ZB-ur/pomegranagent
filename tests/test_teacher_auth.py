@@ -196,6 +196,7 @@ def test_teacher_route_inventory_has_the_session_dependency():
         ("PATCH", "/api/conversations/{}/logs"),
         ("GET", "/api/analysis/growth"),
         ("GET", "/api/analysis/overview"),
+        ("GET", "/api/reports/weekly"),
         ("POST", "/api/media/avatars"),
     }
     expected_methods = {
@@ -237,6 +238,7 @@ def test_teacher_route_inventory_has_the_session_dependency():
         "/api/tts": {"GET"},
         "/api/analysis/growth": {"GET"},
         "/api/analysis/overview": {"GET"},
+        "/api/reports/weekly": {"GET"},
         "/api/runtime/context": {"GET"},
         "/api/media/avatars": {"POST"},
         "/api/media/avatars/{}": {"GET", "HEAD"},
@@ -290,6 +292,7 @@ def test_teacher_routes_require_session_and_child_surface_remains_public(client)
         ("get", "/api/roster", None),
         ("get", "/api/conversations", None),
         ("get", "/api/analysis/overview", None),
+        ("get", "/api/reports/weekly?week_start=not-a-date", None),
         ("post", "/api/roster/auto", {"start_date": "2026-08-24", "days": 1, "cycle": "test"}),
         (
             "post",

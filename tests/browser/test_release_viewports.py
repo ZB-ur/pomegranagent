@@ -779,6 +779,116 @@ def _named_child_rows(database: Path, name: str) -> list[tuple[str, str | None]]
 
 
 @pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
+def test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds(
+    teacher_browser, viewport, record_property
+):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    _install_static_routes(page, teacher_browser)
+    weekly_calls = 0
+
+    def weekly(route):
+        nonlocal weekly_calls
+        _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="GET",
+            path="/api/reports/weekly",
+        )
+        weekly_calls += 1
+        if weekly_calls == 1:
+            route.fulfill(
+                status=503,
+                content_type="application/json",
+                body='{"error":{"message":"private weekly detail"}}',
+            )
+            return
+        _fulfill_json(
+            route,
+            {
+                "timezone": "Asia/Shanghai",
+                "week_start": "2026-08-31",
+                "week_end_exclusive": "2026-09-07",
+                "completed_conversations": 18,
+                "participating_children": 11,
+                "confirmed_reviews": 9,
+                "failed_analyses": 2,
+                "pending_reviews_total": 7,
+            },
+        )
+
+    page.route(f"{teacher_browser.server.base_url}/api/reports/weekly", weekly)
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#today",
+        wait_until="domcontentloaded",
+    )
+    page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
+    page.get_by_role("button", name="设置并解锁", exact=True).click()
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
+
+    metrics = page.locator('[data-today-metrics="weekly"]')
+    metrics.get_by_text("本周指标加载失败，请重试。", exact=True).wait_for()
+    header = metrics.locator(".today-metrics-header")
+    status = metrics.locator(".today-metrics-status")
+    retry = metrics.get_by_role("button", name="重新加载本周指标", exact=True)
+    section_box = _rect(metrics)
+    header_box = _rect(header)
+    status_box = _rect(status)
+    retry_box = _rect(retry)
+    assert retry_box["width"] >= 44 and retry_box["height"] >= 44
+    assert section_box["left"] <= header_box["left"] <= header_box["right"] <= section_box["right"]
+    assert section_box["left"] <= status_box["left"] <= status_box["right"] <= section_box["right"]
+    assert header_box["bottom"] <= retry_box["top"] + 1
+
+    retry.click()
+    metrics.get_by_text("周指标已更新", exact=True).wait_for()
+    grid = metrics.locator(".today-metrics-grid")
+    cards = grid.locator(":scope > [data-metric]")
+    assert cards.count() == 5
+    loaded_header_box = _rect(header)
+    grid_box = _rect(grid)
+    assert loaded_header_box["bottom"] <= grid_box["top"] + 1
+    card_boxes = cards.evaluate_all(
+        """nodes => nodes.map(node => {
+          const rect = node.getBoundingClientRect();
+          return {left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom};
+        })"""
+    )
+    for index, first in enumerate(card_boxes):
+        assert grid_box["left"] <= first["left"] <= first["right"] <= grid_box["right"] + 1
+        for second in card_boxes[index + 1:]:
+            assert (
+                first["right"] <= second["left"] + 1
+                or second["right"] <= first["left"] + 1
+                or first["bottom"] <= second["top"] + 1
+                or second["bottom"] <= first["top"] + 1
+            ), (first, second)
+    assert metrics.evaluate("node => node.scrollWidth <= node.clientWidth + 1")
+    assert page.evaluate(
+        "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+    )
+    assert "private weekly detail" not in page.locator("body").inner_text()
+    assert weekly_calls == 2
+    record_property(
+        "task7.today_metrics_geometry",
+        json.dumps(
+            {
+                "metric_cards": len(card_boxes),
+                "retry_height": retry_box["height"],
+                "retry_width": retry_box["width"],
+                "viewport": viewport,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+
+
+@pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
 def test_release_teacher_action_persists_to_disposable_sqlite(
     teacher_browser, viewport, record_property
 ):

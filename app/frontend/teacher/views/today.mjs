@@ -6,6 +6,17 @@ const QUEUE_KEYS = [
 const RETRY_KEYS = [
   'conversation_id', 'analysis_job_id', 'analysis_status', 'attempt_count', 'retry_accepted', 'replayed',
 ];
+const WEEKLY_REPORT_KEYS = [
+  'timezone', 'week_start', 'week_end_exclusive', 'completed_conversations',
+  'participating_children', 'confirmed_reviews', 'failed_analyses', 'pending_reviews_total',
+];
+const WEEKLY_METRICS = Object.freeze([
+  Object.freeze({ key: 'completed', label: '本周完成对话', field: 'completed_conversations' }),
+  Object.freeze({ key: 'children', label: '参与幼儿', field: 'participating_children' }),
+  Object.freeze({ key: 'confirmed', label: '已确认审阅', field: 'confirmed_reviews' }),
+  Object.freeze({ key: 'failed', label: '分析失败', field: 'failed_analyses' }),
+  Object.freeze({ key: 'pending', label: '当前待审阅', field: 'pending_reviews_total' }),
+]);
 const END_REASONS = new Set(['max_rounds', 'complete', 'manual']);
 const ANALYSIS_STATUSES = new Set(['pending', 'processing', 'succeeded', 'failed']);
 const REVIEW_STATUSES = new Set(['pending', 'draft', 'confirmed', 'unavailable']);
@@ -96,6 +107,38 @@ function validateRetryRecord(conversationId, value) {
   return response;
 }
 
+function canonicalDate(value) {
+  if (typeof value !== 'string') throw invalidTodayContract();
+  const match = /^([0-9]{4})-([0-9]{2})-([0-9]{2})$/.exec(value);
+  if (!match) throw invalidTodayContract();
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12 || day < 1 || day > 31) throw invalidTodayContract();
+  const parsed = new Date(0);
+  parsed.setUTCHours(0, 0, 0, 0);
+  parsed.setUTCFullYear(year, month - 1, day);
+  if (parsed.getUTCFullYear() !== year || parsed.getUTCMonth() !== month - 1
+      || parsed.getUTCDate() !== day) throw invalidTodayContract();
+  return parsed;
+}
+
+function validateWeeklyReportRecord(value) {
+  const report = readOwnDataRecord(value, WEEKLY_REPORT_KEYS);
+  const weekStart = canonicalDate(report.week_start);
+  const weekEnd = canonicalDate(report.week_end_exclusive);
+  if (report.timezone !== 'Asia/Shanghai' || weekStart.getUTCDay() !== 1
+      || weekEnd.getTime() - weekStart.getTime() !== 7 * 24 * 60 * 60 * 1000) {
+    throw invalidTodayContract();
+  }
+  for (const metric of WEEKLY_METRICS) {
+    if (!Number.isSafeInteger(report[metric.field]) || report[metric.field] < 0) {
+      throw invalidTodayContract();
+    }
+  }
+  return report;
+}
+
 function validateDependencies(dependencies) {
   let record;
   try {
@@ -164,6 +207,14 @@ export function validateRetryResponse(conversationId, response) {
   }
 }
 
+export function validateWeeklyReport(response) {
+  try {
+    return validateWeeklyReportRecord(response);
+  } catch (_error) {
+    throw invalidTodayContract();
+  }
+}
+
 function createElement(document, tag, attrs, ...children) {
   const node = document.createElement(tag);
   if (attrs) {
@@ -199,6 +250,73 @@ function createPanel(document, key, title, subtitle, loadingCopy, tone) {
     'data-state': 'loading', 'aria-busy': 'true',
   }, header, body);
   return { panel, status, body };
+}
+
+function createWeeklyMetrics(document) {
+  const range = createElement(document, 'p', { class: 'today-metrics-range muted' }, '业务周加载中');
+  const title = createElement(document, 'div', { class: 'today-metrics-title' },
+    createElement(document, 'h2', null, '本周概览'),
+    range);
+  const status = createElement(document, 'p', {
+    class: 'today-metrics-status muted', role: 'status', 'aria-live': 'polite',
+  }, '正在加载本周指标…');
+  const header = createElement(document, 'header', { class: 'today-metrics-header' }, title, status);
+  const body = createElement(document, 'div', { class: 'today-metrics-body' });
+  const panel = createElement(document, 'section', {
+    class: 'card today-metrics-strip', 'data-today-metrics': 'weekly',
+    'data-state': 'loading', 'aria-busy': 'true',
+  }, header, body);
+  return { panel, status, body, range };
+}
+
+function weekRangeLabel(report) {
+  const start = canonicalDate(report.week_start);
+  const inclusiveEnd = new Date(canonicalDate(report.week_end_exclusive).getTime() - 24 * 60 * 60 * 1000);
+  const startYear = start.getUTCFullYear();
+  const startLabel = `${startYear}年${start.getUTCMonth() + 1}月${start.getUTCDate()}日`;
+  const endLabel = inclusiveEnd.getUTCFullYear() === startYear
+    ? `${inclusiveEnd.getUTCMonth() + 1}月${inclusiveEnd.getUTCDate()}日`
+    : `${inclusiveEnd.getUTCFullYear()}年${inclusiveEnd.getUTCMonth() + 1}月${inclusiveEnd.getUTCDate()}日`;
+  return `${startLabel}–${endLabel}`;
+}
+
+function setMetricsLoading(state) {
+  state.metrics.panel.setAttribute('data-state', 'loading');
+  state.metrics.panel.setAttribute('aria-busy', 'true');
+  state.metrics.range.replaceChildren('业务周加载中');
+  state.metrics.status.replaceChildren('正在加载本周指标…');
+  state.metrics.body.replaceChildren();
+}
+
+function setMetricsLoaded(state, report) {
+  state.metrics.panel.setAttribute('data-state', 'loaded');
+  state.metrics.panel.removeAttribute('aria-busy');
+  state.metrics.range.replaceChildren(weekRangeLabel(report));
+  const allZero = WEEKLY_METRICS.every(metric => report[metric.field] === 0);
+  state.metrics.status.replaceChildren(
+    allZero ? '本周暂无完成数据，当前也没有待审阅。' : '周指标已更新',
+  );
+  const grid = createElement(state.document, 'div', { class: 'today-metrics-grid' });
+  for (const metric of WEEKLY_METRICS) {
+    grid.append(createElement(state.document, 'article', {
+      class: 'today-metric', 'data-metric': metric.key,
+    },
+    createElement(state.document, 'p', { class: 'today-metric-label' }, metric.label),
+    createElement(state.document, 'strong', { class: 'today-metric-value' }, String(report[metric.field]))));
+  }
+  state.metrics.body.replaceChildren(grid);
+}
+
+function setMetricsError(state) {
+  state.metrics.panel.setAttribute('data-state', 'error');
+  state.metrics.panel.removeAttribute('aria-busy');
+  state.metrics.range.replaceChildren('业务周暂不可用');
+  state.metrics.status.replaceChildren('本周指标加载失败，请重试。');
+  const retry = createElement(state.document, 'button', {
+    class: 'btn gray today-metrics-retry', type: 'button',
+  }, '重新加载本周指标');
+  retry.addEventListener('click', () => { void state.loadMetrics(); });
+  state.metrics.body.replaceChildren(retry);
 }
 
 const PANEL_SPECS = Object.freeze({
@@ -371,10 +489,8 @@ export function createTodayRoute(dependencies) {
     );
     const grid = createElement(validated.document, 'div', { class: 'today-panel-grid' },
       roster.panel, pending.panel, processing.panel, failed.panel);
-    const auxiliary = createElement(validated.document, 'section', { class: 'card today-panel today-auxiliary today-metrics-strip' },
-      createElement(validated.document, 'h2', null, '辅助指标'),
-      createElement(validated.document, 'p', { class: 'muted' }, '本周指标暂不可用'));
-    shell.append(hero, grid, auxiliary);
+    const metrics = createWeeklyMetrics(validated.document);
+    shell.append(hero, grid, metrics.panel);
     if (!isCurrent() || signal.aborted) return undefined;
     root.replaceChildren(shell);
 
@@ -383,7 +499,9 @@ export function createTodayRoute(dependencies) {
     const state = {
       document: validated.document,
       panels: { roster, pending, processing, failed },
+      metrics,
       loadPanel: null,
+      loadMetrics: null,
       startRetry: null,
     };
     const isPanelCurrent = (key, generation) => !cleaned && !signal.aborted && isCurrent()
@@ -412,6 +530,33 @@ export function createTodayRoute(dependencies) {
         });
     };
     state.loadPanel = loadPanel;
+    let metricsGeneration = 0;
+    const isMetricsCurrent = generation => !cleaned && !signal.aborted && isCurrent()
+      && metricsGeneration === generation;
+    const loadMetrics = () => {
+      metricsGeneration += 1;
+      const generation = metricsGeneration;
+      if (!isMetricsCurrent(generation)) return Promise.resolve();
+      setMetricsLoading(state);
+      return Promise.resolve()
+        .then(() => {
+          if (!isMetricsCurrent(generation)) return undefined;
+          return validated.request('/api/reports/weekly', { signal });
+        })
+        .then(result => {
+          if (!isMetricsCurrent(generation) || result === undefined) return undefined;
+          const report = validateWeeklyReport(result);
+          if (!isMetricsCurrent(generation)) return undefined;
+          setMetricsLoaded(state, report);
+          return undefined;
+        })
+        .catch(() => {
+          if (!isMetricsCurrent(generation)) return undefined;
+          setMetricsError(state);
+          return undefined;
+        });
+    };
+    state.loadMetrics = loadMetrics;
     const retryFlights = new Map();
     const routeIsCurrent = () => !cleaned && !signal.aborted && isCurrent();
     const startRetry = (row, button, feedback) => {
@@ -447,9 +592,11 @@ export function createTodayRoute(dependencies) {
     };
     state.startRetry = startRetry;
     void Promise.allSettled(['roster', 'pending', 'processing', 'failed'].map(loadPanel));
+    void loadMetrics();
     return {
       cleanup() {
         cleaned = true;
+        metricsGeneration += 1;
         for (const key of Object.keys(PANEL_SPECS)) generations.set(key, (generations.get(key) || 0) + 1);
         retryFlights.clear();
       },
