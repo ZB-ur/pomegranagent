@@ -243,11 +243,23 @@ test('Today strictly validates the exact weekly report contract and seven-day Mo
     validateWeeklyReport(weeklyResponse({ timezone: 'Europe/Berlin' })),
     weeklyResponse({ timezone: 'Europe/Berlin' }),
   );
+  assert.deepEqual(
+    validateWeeklyReport(weeklyResponse({ timezone: 'Etc/GMT+5' })),
+    weeklyResponse({ timezone: 'Etc/GMT+5' }),
+  );
   for (const malformed of [
     { ...weeklyResponse(), extra: true },
     { ...weeklyResponse(), timezone: '' },
     { ...weeklyResponse(), timezone: '   ' },
     { ...weeklyResponse(), timezone: ' Europe/Berlin' },
+    { ...weeklyResponse(), timezone: 'Europe/ Berlin' },
+    { ...weeklyResponse(), timezone: '+01:00' },
+    { ...weeklyResponse(), timezone: '-05:30' },
+    { ...weeklyResponse(), timezone: '+01' },
+    { ...weeklyResponse(), timezone: 'Europe//Berlin' },
+    { ...weeklyResponse(), timezone: 'Europe/../Berlin' },
+    { ...weeklyResponse(), timezone: '/Europe/Berlin' },
+    { ...weeklyResponse(), timezone: 'Europe/Berlin/' },
     { ...weeklyResponse(), timezone: 'A'.repeat(256) },
     { ...weeklyResponse(), timezone: 'Mars/Olympus' },
     { ...weeklyResponse(), timezone: 7 },

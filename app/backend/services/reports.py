@@ -49,6 +49,7 @@ def _conversation_is_valid():
     )
     canonical_date = and_(
         func.length(models.Conversation.date) == 10,
+        func.substr(models.Conversation.date, 1, 4) != "0000",
         func.date(models.Conversation.date, "+0 days")
         == models.Conversation.date,
     )

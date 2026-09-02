@@ -126,6 +126,9 @@ function canonicalDate(value) {
 function isValidIanaTimezone(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 255
       || value.trim() !== value) return false;
+  const components = value.split('/');
+  if (components.some(component => component === '.' || component === '..'
+      || !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(component))) return false;
   try {
     new Intl.DateTimeFormat('en-US', { timeZone: value }).format(0);
     return true;

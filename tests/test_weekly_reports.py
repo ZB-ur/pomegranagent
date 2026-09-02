@@ -208,6 +208,7 @@ def test_weekly_service_returns_the_exact_zero_shape(db_session):
         "conversation_end_reason",
         "conversation_pending_end_reason",
         "conversation_invalid_date",
+        "conversation_year_zero",
         "ended_without_end_reason",
         "ended_without_timestamp",
         "ended_without_boundary",
@@ -250,6 +251,8 @@ def test_weekly_service_fails_the_whole_response_for_global_integrity_corruption
         conversation.pending_end_reason = "mystery"
     elif corruption == "conversation_invalid_date":
         conversation.date = "2026-09-00"
+    elif corruption == "conversation_year_zero":
+        conversation.date = "0000-01-01"
     elif corruption == "ended_without_end_reason":
         conversation.end_reason = None
     elif corruption == "ended_without_timestamp":
@@ -299,6 +302,44 @@ def test_weekly_service_fails_the_whole_response_for_global_integrity_corruption
     assert db_session.scalar(
         select(models.Child.id).where(models.Child.name == transient_name)
     ) is None
+
+
+@pytest.mark.parametrize(
+    "conversation_date,week_start,week_end_exclusive",
+    [
+        ("0001-01-01", date(1, 1, 1), date(1, 1, 8)),
+        ("9999-12-26", date(9999, 12, 20), date(9999, 12, 27)),
+    ],
+    ids=["earliest-year", "latest-complete-week"],
+)
+def test_weekly_service_accepts_outer_representable_calendar_dates(
+    db_session,
+    conversation_date,
+    week_start,
+    week_end_exclusive,
+):
+    """Catches an over-broad year-zero guard that rejects real Python date edges."""
+    child = _child(db_session, f"边界日期-{conversation_date}")
+    _ended(
+        db_session,
+        child=child,
+        conversation_date=conversation_date,
+        job_status="succeeded",
+        assessment_status="pending",
+    )
+    db_session.commit()
+
+    result = _service().weekly_report(
+        db_session,
+        week_start=week_start,
+        week_end_exclusive=week_end_exclusive,
+    )
+
+    assert result.week_start == week_start
+    assert result.week_end_exclusive == week_end_exclusive
+    assert result.completed_conversations == 1
+    assert result.participating_children == 1
+    assert result.pending_reviews_total == 1
 
 
 @pytest.mark.parametrize(
