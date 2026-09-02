@@ -788,6 +788,7 @@ def test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds(
     page.set_viewport_size(viewport)
     _install_static_routes(page, teacher_browser)
     weekly_calls = 0
+    runtime_calls = 0
 
     def weekly(route):
         nonlocal weekly_calls
@@ -819,7 +820,27 @@ def test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds(
             },
         )
 
+    def runtime(route):
+        nonlocal runtime_calls
+        _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="GET",
+            path="/api/runtime/context",
+        )
+        runtime_calls += 1
+        _fulfill_json(
+            route,
+            {
+                "timezone": "Asia/Shanghai",
+                "business_date": "2026-09-02",
+                "week_start": "2026-08-31",
+                "week_end_exclusive": "2026-09-07",
+            },
+        )
+
     page.route(f"{teacher_browser.server.base_url}/api/reports/weekly", weekly)
+    page.route(f"{teacher_browser.server.base_url}/api/runtime/context", runtime)
     page.goto(
         f"{teacher_browser.server.base_url}/teacher.html#today",
         wait_until="domcontentloaded",
@@ -872,6 +893,7 @@ def test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds(
     )
     assert "private weekly detail" not in page.locator("body").inner_text()
     assert weekly_calls == 2
+    assert runtime_calls == 2
     record_property(
         "task7.today_metrics_geometry",
         json.dumps(

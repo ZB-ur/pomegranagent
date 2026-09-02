@@ -19,8 +19,10 @@ TODAY_REQUESTS = [
     "/api/conversations?queue=processing",
     "/api/conversations?queue=failed",
     "/api/reports/weekly",
+    "/api/runtime/context",
 ]
 METRICS_PATH = "/api/reports/weekly"
+RUNTIME_PATH = "/api/runtime/context"
 PANEL_PATHS = {
     "roster": "/api/roster/today",
     "pending": "/api/conversations?queue=pending",
@@ -58,6 +60,17 @@ def weekly_response(**overrides) -> dict:
         "confirmed_reviews": 2,
         "failed_analyses": 1,
         "pending_reviews_total": 4,
+    }
+    body.update(overrides)
+    return body
+
+
+def runtime_response(**overrides) -> dict:
+    body = {
+        "timezone": "Asia/Shanghai",
+        "business_date": "2026-09-02",
+        "week_start": "2026-08-31",
+        "week_end_exclusive": "2026-09-07",
     }
     body.update(overrides)
     return body
@@ -111,7 +124,13 @@ def panel(page, key: str):
     return page.locator(f'[data-today-panel="{key}"]')
 
 
-def install_panel_routes(page, teacher_browser, handlers, metrics_handler=None) -> None:
+def install_panel_routes(
+    page,
+    teacher_browser,
+    handlers,
+    metrics_handler=None,
+    runtime_handler=None,
+) -> None:
     for key, path in PANEL_PATHS.items():
         def make_handler(panel_key):
             def handler(route):
@@ -128,6 +147,15 @@ def install_panel_routes(page, teacher_browser, handlers, metrics_handler=None) 
             metrics_handler(route)
 
     page.route(f"{teacher_browser.server.base_url}{METRICS_PATH}", weekly)
+
+    def runtime(route):
+        assert is_exact_fixture_url(route.request.url, teacher_browser.server.port)
+        if runtime_handler is None:
+            fulfill_json(route, runtime_response())
+        else:
+            runtime_handler(route)
+
+    page.route(f"{teacher_browser.server.base_url}{RUNTIME_PATH}", runtime)
 
 
 def fulfill_json(route, body, status: int = 200) -> None:
@@ -200,6 +228,10 @@ def test_teacher_today_shell_migrates_overview_before_first_authenticated_load(t
         f"{teacher_browser.server.base_url}{METRICS_PATH}",
         lambda route: fulfill_json(route, weekly_response()),
     )
+    page.route(
+        f"{teacher_browser.server.base_url}{RUNTIME_PATH}",
+        lambda route: fulfill_json(route, runtime_response()),
+    )
     page.get_by_label("设置教师 PIN", exact=True).wait_for()
     assert urlsplit(page.url).fragment == "overview?source=legacy"
     setup_teacher(page)
@@ -229,7 +261,7 @@ def test_teacher_today_shell_migrates_overview_before_first_authenticated_load(t
     assert application_request_paths(requests, teacher_browser.server.base_url).index(TODAY_REQUESTS[0]) < application_request_paths(requests, teacher_browser.server.base_url).index(TODAY_REQUESTS[1])
     paths = application_request_paths(requests, teacher_browser.server.base_url)
     business = [path for path in paths if path in TODAY_REQUESTS]
-    assert business[:5] == TODAY_REQUESTS
+    assert business[:6] == TODAY_REQUESTS
     assert "/api/analysis/overview" not in paths
 
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
@@ -259,7 +291,8 @@ def test_teacher_today_shows_all_panel_loading_states_before_any_response(teache
     held = []
     install_panel_routes(page, teacher_browser, {
         key: (lambda route, key=key: held.append((key, route))) for key in PANEL_PATHS
-    }, metrics_handler=lambda route: held.append(("metrics", route)))
+    }, metrics_handler=lambda route: held.append(("metrics", route)),
+        runtime_handler=lambda route: held.append(("runtime", route)))
     setup_teacher(page)
     for key, copy in LOADING_COPY.items():
         assert panel(page, key).get_by_text(copy, exact=True).count() == 1
@@ -267,7 +300,9 @@ def test_teacher_today_shows_all_panel_loading_states_before_any_response(teache
     metrics = page.locator('[data-today-metrics="weekly"]')
     assert metrics.get_by_text("正在加载本周指标…", exact=True).count() == 1
     assert metrics.get_attribute("aria-busy") == "true"
-    assert [key for key, _route in held] == ["roster", "pending", "processing", "failed", "metrics"]
+    assert [key for key, _route in held] == [
+        "roster", "pending", "processing", "failed", "metrics", "runtime",
+    ]
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -325,14 +360,21 @@ def test_teacher_today_renders_exact_week_range_and_five_weekly_metrics(
     teacher_browser, viewport
 ):
     _context, page = open_teacher(teacher_browser, viewport)
+    runtime_calls = []
+
+    def runtime_handler(route):
+        runtime_calls.append(route.request.url)
+        fulfill_json(route, runtime_response(timezone="Factory"))
+
     install_panel_routes(
         page,
         teacher_browser,
         empty_handlers(),
         metrics_handler=lambda route: fulfill_json(
             route,
-            weekly_response(timezone="Europe/Berlin"),
+            weekly_response(timezone="Factory"),
         ),
+        runtime_handler=runtime_handler,
     )
     setup_teacher(page)
     metrics = page.locator('[data-today-metrics="weekly"]')
@@ -353,6 +395,7 @@ def test_teacher_today_renders_exact_week_range_and_five_weekly_metrics(
         assert card.get_by_text(label, exact=True).count() == 1
         assert card.get_by_text(value, exact=True).count() == 1
     assert page.get_by_text("本周指标暂不可用", exact=True).count() == 0
+    assert runtime_calls == [f"{teacher_browser.server.base_url}{RUNTIME_PATH}"]
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -390,6 +433,7 @@ def test_teacher_today_weekly_failure_retry_is_scoped_and_touch_sized(
     _context, page = open_teacher(teacher_browser, viewport)
     calls = {key: 0 for key in PANEL_PATHS}
     calls["metrics"] = 0
+    calls["runtime"] = 0
 
     def panel_handler(key):
         def handler(route):
@@ -409,11 +453,16 @@ def test_teacher_today_weekly_failure_retry_is_scoped_and_touch_sized(
         else:
             fulfill_json(route, weekly_response())
 
+    def runtime_handler(route):
+        calls["runtime"] += 1
+        fulfill_json(route, runtime_response())
+
     install_panel_routes(
         page,
         teacher_browser,
         {key: panel_handler(key) for key in PANEL_PATHS},
         metrics_handler=metrics_handler,
+        runtime_handler=runtime_handler,
     )
     setup_teacher(page)
     metrics = page.locator('[data-today-metrics="weekly"]')
@@ -424,7 +473,14 @@ def test_teacher_today_weekly_failure_retry_is_scoped_and_touch_sized(
     assert box["width"] >= 44 and box["height"] >= 44
     retry.click()
     metrics.get_by_text("周指标已更新", exact=True).wait_for()
-    assert calls == {"roster": 1, "pending": 1, "processing": 1, "failed": 1, "metrics": 2}
+    assert calls == {
+        "roster": 1,
+        "pending": 1,
+        "processing": 1,
+        "failed": 1,
+        "metrics": 2,
+        "runtime": 2,
+    }
     assert "raw-weekly-detail" not in page.locator("body").inner_text()
     assert all(panel(page, key).get_attribute("data-state") == "empty" for key in PANEL_PATHS)
 

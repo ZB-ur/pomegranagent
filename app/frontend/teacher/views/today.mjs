@@ -10,6 +10,9 @@ const WEEKLY_REPORT_KEYS = [
   'timezone', 'week_start', 'week_end_exclusive', 'completed_conversations',
   'participating_children', 'confirmed_reviews', 'failed_analyses', 'pending_reviews_total',
 ];
+const RUNTIME_CONTEXT_KEYS = [
+  'timezone', 'business_date', 'week_start', 'week_end_exclusive',
+];
 const WEEKLY_METRICS = Object.freeze([
   Object.freeze({ key: 'completed', label: '本周完成对话', field: 'completed_conversations' }),
   Object.freeze({ key: 'children', label: '参与幼儿', field: 'participating_children' }),
@@ -123,25 +126,33 @@ function canonicalDate(value) {
   return parsed;
 }
 
-function isValidIanaTimezone(value) {
+function isSafeIanaTimezoneKey(value) {
   if (typeof value !== 'string' || value.length === 0 || value.length > 255
       || value.trim() !== value) return false;
   const components = value.split('/');
   if (components.some(component => component === '.' || component === '..'
       || !/^[A-Za-z0-9][A-Za-z0-9._+-]*$/.test(component))) return false;
-  try {
-    new Intl.DateTimeFormat('en-US', { timeZone: value }).format(0);
-    return true;
-  } catch (_error) {
-    return false;
+  return true;
+}
+
+function validateRuntimeContextRecord(value) {
+  const runtime = readOwnDataRecord(value, RUNTIME_CONTEXT_KEYS);
+  const businessDate = canonicalDate(runtime.business_date);
+  const weekStart = canonicalDate(runtime.week_start);
+  const weekEnd = canonicalDate(runtime.week_end_exclusive);
+  if (!isSafeIanaTimezoneKey(runtime.timezone) || weekStart.getUTCDay() !== 1
+      || weekEnd.getTime() - weekStart.getTime() !== 7 * 24 * 60 * 60 * 1000
+      || businessDate < weekStart || businessDate >= weekEnd) {
+    throw invalidTodayContract();
   }
+  return runtime;
 }
 
 function validateWeeklyReportRecord(value) {
   const report = readOwnDataRecord(value, WEEKLY_REPORT_KEYS);
   const weekStart = canonicalDate(report.week_start);
   const weekEnd = canonicalDate(report.week_end_exclusive);
-  if (!isValidIanaTimezone(report.timezone) || weekStart.getUTCDay() !== 1
+  if (!isSafeIanaTimezoneKey(report.timezone) || weekStart.getUTCDay() !== 1
       || weekEnd.getTime() - weekStart.getTime() !== 7 * 24 * 60 * 60 * 1000) {
     throw invalidTodayContract();
   }
@@ -221,9 +232,12 @@ export function validateRetryResponse(conversationId, response) {
   }
 }
 
-export function validateWeeklyReport(response) {
+export function validateWeeklyReport(response, runtimeContext) {
   try {
-    return validateWeeklyReportRecord(response);
+    const report = validateWeeklyReportRecord(response);
+    const runtime = validateRuntimeContextRecord(runtimeContext);
+    if (report.timezone !== runtime.timezone) throw invalidTodayContract();
+    return report;
   } catch (_error) {
     throw invalidTodayContract();
   }
@@ -555,11 +569,15 @@ export function createTodayRoute(dependencies) {
       return Promise.resolve()
         .then(() => {
           if (!isMetricsCurrent(generation)) return undefined;
-          return validated.request('/api/reports/weekly', { signal });
+          return Promise.all([
+            validated.request('/api/reports/weekly', { signal }),
+            validated.request('/api/runtime/context', { signal }),
+          ]);
         })
-        .then(result => {
-          if (!isMetricsCurrent(generation) || result === undefined) return undefined;
-          const report = validateWeeklyReport(result);
+        .then(results => {
+          if (!isMetricsCurrent(generation) || results === undefined) return undefined;
+          const [weeklyResult, runtimeResult] = results;
+          const report = validateWeeklyReport(weeklyResult, runtimeResult);
           if (!isMetricsCurrent(generation)) return undefined;
           setMetricsLoaded(state, report);
           return undefined;

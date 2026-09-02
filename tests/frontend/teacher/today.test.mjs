@@ -143,6 +143,16 @@ function weeklyResponse(overrides = {}) {
   };
 }
 
+function runtimeContext(overrides = {}) {
+  return {
+    timezone: 'Asia/Shanghai',
+    business_date: '2026-09-02',
+    week_start: '2026-08-31',
+    week_end_exclusive: '2026-09-07',
+    ...overrides,
+  };
+}
+
 function todayHarness() {
   const calls = [];
   const route = createTodayRoute({
@@ -233,35 +243,34 @@ test('Today accepts only matching accepted or replayed analysis retry responses'
   assert.throws(() => validateRetryResponse(42, retryResponse({ replayed: 'false' })), TypeError);
 });
 
-test('Today strictly validates the exact weekly report contract and seven-day Monday window', () => {
-  assert.deepEqual(validateWeeklyReport(weeklyResponse()), weeklyResponse());
-  assert.deepEqual(
-    validateWeeklyReport(weeklyResponse({ timezone: 'UTC' })),
-    weeklyResponse({ timezone: 'UTC' }),
+test('Today trusts only an exact paired runtime context for the weekly timezone', () => {
+  for (const timezone of [
+    'Asia/Shanghai', 'UTC', 'Europe/Berlin', 'Etc/GMT+5', 'Factory', 'posixrules', 'Mars/Olympus',
+  ]) {
+    assert.deepEqual(
+      validateWeeklyReport(weeklyResponse({ timezone }), runtimeContext({ timezone })),
+      weeklyResponse({ timezone }),
+    );
+  }
+  assert.throws(() => validateWeeklyReport(weeklyResponse()), TypeError);
+  assert.throws(
+    () => validateWeeklyReport(
+      weeklyResponse({ timezone: 'Factory' }),
+      runtimeContext({ timezone: 'posixrules' }),
+    ),
+    TypeError,
   );
-  assert.deepEqual(
-    validateWeeklyReport(weeklyResponse({ timezone: 'Europe/Berlin' })),
-    weeklyResponse({ timezone: 'Europe/Berlin' }),
+
+  for (const timezone of [
+    '', '   ', ' Europe/Berlin', 'Europe/ Berlin', '+01:00', '-05:30', '+01',
+    'Europe//Berlin', 'Europe/../Berlin', '/Europe/Berlin', 'Europe/Berlin/', 'A'.repeat(256),
+  ]) assert.throws(
+    () => validateWeeklyReport(weeklyResponse({ timezone }), runtimeContext({ timezone })),
+    TypeError,
   );
-  assert.deepEqual(
-    validateWeeklyReport(weeklyResponse({ timezone: 'Etc/GMT+5' })),
-    weeklyResponse({ timezone: 'Etc/GMT+5' }),
-  );
+
   for (const malformed of [
     { ...weeklyResponse(), extra: true },
-    { ...weeklyResponse(), timezone: '' },
-    { ...weeklyResponse(), timezone: '   ' },
-    { ...weeklyResponse(), timezone: ' Europe/Berlin' },
-    { ...weeklyResponse(), timezone: 'Europe/ Berlin' },
-    { ...weeklyResponse(), timezone: '+01:00' },
-    { ...weeklyResponse(), timezone: '-05:30' },
-    { ...weeklyResponse(), timezone: '+01' },
-    { ...weeklyResponse(), timezone: 'Europe//Berlin' },
-    { ...weeklyResponse(), timezone: 'Europe/../Berlin' },
-    { ...weeklyResponse(), timezone: '/Europe/Berlin' },
-    { ...weeklyResponse(), timezone: 'Europe/Berlin/' },
-    { ...weeklyResponse(), timezone: 'A'.repeat(256) },
-    { ...weeklyResponse(), timezone: 'Mars/Olympus' },
     { ...weeklyResponse(), timezone: 7 },
     { ...weeklyResponse(), week_start: '2026-09-01' },
     { ...weeklyResponse(), week_start: '2026-8-31' },
@@ -270,14 +279,32 @@ test('Today strictly validates the exact weekly report contract and seven-day Mo
     { ...weeklyResponse(), completed_conversations: -1 },
     { ...weeklyResponse(), participating_children: 1.5 },
     { ...weeklyResponse(), pending_reviews_total: Number.MAX_SAFE_INTEGER + 1 },
-  ]) assert.throws(() => validateWeeklyReport(malformed), TypeError);
+  ]) assert.throws(() => validateWeeklyReport(malformed, runtimeContext()), TypeError);
+
+  for (const malformedRuntime of [
+    { ...runtimeContext(), extra: true },
+    { ...runtimeContext(), timezone: '+01:00' },
+    { ...runtimeContext(), business_date: '2026-09-00' },
+    { ...runtimeContext(), business_date: '2026-09-07' },
+    { ...runtimeContext(), week_start: '2026-09-01' },
+    { ...runtimeContext(), week_end_exclusive: '2026-09-06' },
+  ]) assert.throws(
+    () => validateWeeklyReport(weeklyResponse(), malformedRuntime),
+    TypeError,
+  );
 
   const accessor = weeklyResponse();
   Object.defineProperty(accessor, 'failed_analyses', { get() { throw new Error('secret getter'); }, enumerable: true });
-  assert.throws(() => validateWeeklyReport(accessor), TypeError);
+  assert.throws(() => validateWeeklyReport(accessor, runtimeContext()), TypeError);
+  const runtimeAccessor = runtimeContext();
+  Object.defineProperty(runtimeAccessor, 'timezone', { get() { throw new Error('runtime getter'); }, enumerable: true });
+  assert.throws(() => validateWeeklyReport(weeklyResponse(), runtimeAccessor), TypeError);
   const proxyError = new Error('hostile weekly proxy');
   assertFreshTypeError(
-    () => validateWeeklyReport(new Proxy(weeklyResponse(), { ownKeys() { throw proxyError; } })),
+    () => validateWeeklyReport(
+      new Proxy(weeklyResponse(), { ownKeys() { throw proxyError; } }),
+      runtimeContext(),
+    ),
     proxyError,
   );
 });
@@ -291,9 +318,11 @@ test('Today requests and renders the weekly panel independently with five fixed 
     '/api/conversations?queue=processing',
     '/api/conversations?queue=failed',
     '/api/reports/weekly',
+    '/api/runtime/context',
   ]);
   for (const call of harness.calls.slice(0, 4)) call.next.resolve([]);
-  harness.calls[4].next.resolve(weeklyResponse());
+  harness.calls[4].next.resolve(weeklyResponse({ timezone: 'Factory' }));
+  harness.calls[5].next.resolve(runtimeContext({ timezone: 'Factory' }));
   await settle();
 
   const metrics = findNode(harness.root, node => node.getAttribute?.('data-today-metrics') === 'weekly');
@@ -313,7 +342,8 @@ test('Today weekly failure and retry leave all four business panels and their ca
   const harness = todayHarness();
   await settle();
   for (const call of harness.calls.slice(0, 4)) call.next.resolve([]);
-  harness.calls[4].next.reject(new Error('raw weekly failure'));
+  harness.calls[4].next.resolve(weeklyResponse());
+  harness.calls[5].next.reject(new Error('raw runtime failure'));
   await settle();
 
   const panels = ['roster', 'pending', 'processing', 'failed'].map(key => findNode(
@@ -323,13 +353,16 @@ test('Today weekly failure and retry leave all four business panels and their ca
   assert.deepEqual(panels.map(node => node.getAttribute('data-state')), ['empty', 'empty', 'empty', 'empty']);
   const metrics = findNode(harness.root, node => node.getAttribute?.('data-today-metrics') === 'weekly');
   assert.equal(metrics.getAttribute('data-state'), 'error');
-  assert.ok(!nodeText(metrics).includes('raw weekly failure'));
+  assert.ok(!nodeText(metrics).includes('raw runtime failure'));
   const retry = findNode(metrics, node => hasClass(node, 'today-metrics-retry'));
   assert.ok(retry);
   retry.click();
   await settle();
-  assert.deepEqual(harness.calls.map(call => call.path).slice(5), ['/api/reports/weekly']);
-  harness.calls[5].next.resolve(weeklyResponse({ completed_conversations: 0 }));
+  assert.deepEqual(harness.calls.map(call => call.path).slice(6), [
+    '/api/reports/weekly', '/api/runtime/context',
+  ]);
+  harness.calls[6].next.resolve(weeklyResponse({ completed_conversations: 0 }));
+  harness.calls[7].next.resolve(runtimeContext());
   await settle();
   assert.deepEqual(panels.map(node => node.getAttribute('data-state')), ['empty', 'empty', 'empty', 'empty']);
   assert.equal(metrics.getAttribute('data-state'), 'loaded');
@@ -339,7 +372,8 @@ test('Today ignores stale weekly success, error, and completion after a newer ge
   const harness = todayHarness();
   await settle();
   for (const call of harness.calls.slice(0, 4)) call.next.resolve([]);
-  harness.calls[4].next.reject(new Error('initial failure'));
+  harness.calls[4].next.resolve(weeklyResponse());
+  harness.calls[5].next.reject(new Error('initial runtime failure'));
   await settle();
   const metrics = findNode(harness.root, node => node.getAttribute?.('data-today-metrics') === 'weekly');
   const retry = findNode(metrics, node => hasClass(node, 'today-metrics-retry'));
@@ -347,13 +381,16 @@ test('Today ignores stale weekly success, error, and completion after a newer ge
   await settle();
   retry.click();
   await settle();
-  assert.deepEqual(harness.calls.slice(5).map(call => call.path), [
-    '/api/reports/weekly', '/api/reports/weekly',
+  assert.deepEqual(harness.calls.slice(6).map(call => call.path), [
+    '/api/reports/weekly', '/api/runtime/context',
+    '/api/reports/weekly', '/api/runtime/context',
   ]);
-  harness.calls[6].next.resolve(weeklyResponse({ completed_conversations: 9 }));
+  harness.calls[8].next.resolve(weeklyResponse({ completed_conversations: 9 }));
+  harness.calls[9].next.resolve(runtimeContext());
   await settle();
   assert.ok(nodeText(metrics).includes('9'));
-  harness.calls[5].next.reject(new Error('stale error'));
+  harness.calls[6].next.resolve(weeklyResponse({ completed_conversations: 99 }));
+  harness.calls[7].next.reject(new Error('stale runtime error'));
   await settle();
   assert.equal(metrics.getAttribute('data-state'), 'loaded');
   assert.ok(nodeText(metrics).includes('9'));
@@ -361,13 +398,17 @@ test('Today ignores stale weekly success, error, and completion after a newer ge
 
   retry.click();
   await settle();
-  const staleSuccess = harness.calls.at(-1);
+  const staleWeekly = harness.calls.at(-2);
+  const staleRuntime = harness.calls.at(-1);
+  staleRuntime.next.resolve(runtimeContext());
   retry.click();
   await settle();
-  const newestSuccess = harness.calls.at(-1);
-  newestSuccess.next.resolve(weeklyResponse({ completed_conversations: 10 }));
+  const newestWeekly = harness.calls.at(-2);
+  const newestRuntime = harness.calls.at(-1);
+  newestWeekly.next.resolve(weeklyResponse({ completed_conversations: 10 }));
+  newestRuntime.next.resolve(runtimeContext());
   await settle();
-  staleSuccess.next.resolve(weeklyResponse({ completed_conversations: 99 }));
+  staleWeekly.next.resolve(weeklyResponse({ completed_conversations: 99 }));
   await settle();
   assert.equal(metrics.getAttribute('data-state'), 'loaded');
   assert.ok(nodeText(metrics).includes('10'));
@@ -375,10 +416,12 @@ test('Today ignores stale weekly success, error, and completion after a newer ge
 
   retry.click();
   await settle();
-  const pendingAfterCleanup = harness.calls.at(-1);
+  const weeklyAfterCleanup = harness.calls.at(-2);
+  const runtimeAfterCleanup = harness.calls.at(-1);
   harness.lifecycle.cleanup();
   harness.root.replaceChildren('next route');
-  pendingAfterCleanup.next.resolve(weeklyResponse({ completed_conversations: 99 }));
+  weeklyAfterCleanup.next.resolve(weeklyResponse({ completed_conversations: 99 }));
+  runtimeAfterCleanup.next.resolve(runtimeContext());
   await settle();
   assert.equal(nodeText(harness.root), 'next route');
 });
