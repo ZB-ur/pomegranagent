@@ -3315,6 +3315,171 @@ def _create_runtime_secret_scan_database(path: Path) -> None:
         connection.commit()
 
 
+def _insert_resource_create_ledger_rows(connection: sqlite3.Connection) -> None:
+    rows = (
+        (
+            "77777777-7777-4777-8777-777777777777",
+            "child_create",
+            "d" * 64,
+            json.dumps(
+                {
+                    "active": True,
+                    "avatar": (
+                        "/api/media/avatars/"
+                        "11111111-1111-4111-8111-111111111111"
+                    ),
+                    "id": 101,
+                    "name": "Live Child",
+                    "nickname": "小星",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ),
+        (
+            "88888888-8888-4888-8888-888888888888",
+            "duck_create",
+            "e" * 64,
+            json.dumps(
+                {
+                    "avatar": (
+                        "/api/media/avatars/"
+                        "22222222-2222-4222-8222-222222222222"
+                    ),
+                    "id": 201,
+                    "name": "Live Duck",
+                    "note": None,
+                    "status": "healthy",
+                },
+                ensure_ascii=False,
+                separators=(",", ":"),
+                sort_keys=True,
+            ),
+        ),
+    )
+    connection.executemany(
+        "INSERT INTO roster_requests "
+        "(request_id, operation, payload_hash, status, response_json, "
+        "last_error_code, last_error_message, created_at, updated_at) "
+        "VALUES (?, ?, ?, 'succeeded', ?, NULL, NULL, "
+        "'2026-09-04 01:02:03.000000', '2026-09-04 01:02:03.000000')",
+        rows,
+    )
+
+
+def test_teacher_pin_sqlite_accepts_exact_resource_create_response_dtos(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    _create_runtime_secret_scan_database(plan.database)
+    with sqlite3.connect(plan.database) as connection:
+        _insert_resource_create_ledger_rows(connection)
+        connection.commit()
+
+    module.scan_retained_artifacts(
+        plan.root,
+        provider_secrets=("sk-resource-create-provider-secret",),
+        runtime_secrets=("2026", "7120"),
+        pinned_plan=plan,
+    )
+
+
+@pytest.mark.parametrize(
+    ("operation", "field"),
+    (("child_create", "name"), ("duck_create", "note")),
+)
+def test_teacher_pin_sqlite_rejects_resource_response_free_text_leak(
+    tmp_path,
+    operation,
+    field,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    _create_runtime_secret_scan_database(plan.database)
+    with sqlite3.connect(plan.database) as connection:
+        _insert_resource_create_ledger_rows(connection)
+        response_json = connection.execute(
+            "SELECT response_json FROM roster_requests WHERE operation = ?",
+            (operation,),
+        ).fetchone()[0]
+        response = json.loads(response_json)
+        response[field] = "credential 2026"
+        connection.execute(
+            "UPDATE roster_requests SET response_json = ? WHERE operation = ?",
+            (
+                json.dumps(
+                    response,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+                operation,
+            ),
+        )
+        connection.commit()
+
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-resource-create-provider-secret",),
+            runtime_secrets=("2026",),
+            pinned_plan=plan,
+        )
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("replayed", "missing_response", "unknown_operation"),
+)
+def test_teacher_pin_sqlite_rejects_noncanonical_resource_response(
+    tmp_path,
+    mutation,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    _create_runtime_secret_scan_database(plan.database)
+    with sqlite3.connect(plan.database) as connection:
+        _insert_resource_create_ledger_rows(connection)
+        if mutation == "replayed":
+            response_json = connection.execute(
+                "SELECT response_json FROM roster_requests "
+                "WHERE operation = 'child_create'",
+            ).fetchone()[0]
+            response = json.loads(response_json)
+            response["replayed"] = False
+            connection.execute(
+                "UPDATE roster_requests SET response_json = ? "
+                "WHERE operation = 'child_create'",
+                (
+                    json.dumps(
+                        response,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
+            )
+        elif mutation == "missing_response":
+            connection.execute(
+                "UPDATE roster_requests SET response_json = NULL "
+                "WHERE operation = 'child_create'",
+            )
+        else:
+            connection.execute(
+                "UPDATE roster_requests SET operation = 'unknown_create' "
+                "WHERE operation = 'duck_create'",
+            )
+        connection.commit()
+
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-resource-create-provider-secret",),
+            runtime_secrets=("2026",),
+            pinned_plan=plan,
+        )
+
+
 def test_teacher_pin_sqlite_scan_exempts_machine_columns_but_rejects_free_text(
     tmp_path,
 ):
@@ -4055,6 +4220,7 @@ def _apply_live_provenance(plan):
             "VALUES (?, ?, ?, 'healthy', NULL, 1, NULL)",
             (201, "Live Duck", "/api/media/avatars/22222222-2222-4222-8222-222222222222"),
         )
+        _insert_resource_create_ledger_rows(connection)
         connection.executemany(
             "INSERT INTO duty_rosters (id, cycle, date, child_id) "
             "VALUES (?, '2026-09', ?, ?)",

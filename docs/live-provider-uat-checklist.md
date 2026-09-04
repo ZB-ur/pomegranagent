@@ -339,7 +339,16 @@ Wait for the harness to stop and exit successfully.
    human/free-text projections are scanned; strictly parsed app/server log
    records whose message fields are scanned; and a read-only SQLite shadow
    whose exact schema, credential/session hash formats, and free-text columns
-   are validated and scanned. Dates, IDs, UUIDs, paths, numeric values,
+   are validated and scanned. Every `roster_requests` response is dispatched by
+   its exact operation: `daily_roster`, `auto_roster`, and `monthly_roster`
+   retain their strict roster response contracts, while `child_create` accepts
+   exactly `active`, `avatar`, `id`, `name`, and `nickname`, and `duck_create`
+   accepts exactly `avatar`, `id`, `name`, `note`, and `status`. Resource-create
+   responses never contain `replayed`; avatars are null or canonical UUIDv4
+   media URLs, IDs are positive integers, and child `active` is boolean. Child
+   name/nickname and duck name/status/note remain PIN-scanned free text. Unknown
+   operations and malformed response objects fail closed. Dates, IDs, UUIDs,
+   paths, numeric values,
    digests, checksums, and the validated log timestamp/logger/level envelope
    are machine metadata and are not raw-substring PIN-scanned. Screenshot PNGs,
    TTS/media bytes, and every unknown file or unknown structured shape remain

@@ -3776,10 +3776,22 @@ def _seed_baseline_texts(
 def _database_response_texts(
     *,
     table: str,
+    operation: str | None,
     payload: object,
     failed: HarnessSafetyError,
 ) -> tuple[str, ...]:
+    roster_operations = {
+        "auto_roster",
+        "child_create",
+        "daily_roster",
+        "duck_create",
+        "monthly_roster",
+    }
+    if table == "roster_requests" and operation not in roster_operations:
+        raise failed
     if payload is None:
+        if table == "roster_requests":
+            raise failed
         return ()
     if not isinstance(payload, str) or not payload:
         raise failed
@@ -3799,6 +3811,26 @@ def _database_response_texts(
             and candidate
             and all(type(item) is int and item > 0 for item in candidate)
             and len(candidate) == len(set(candidate))
+        )
+
+    def avatar(candidate: object) -> bool:
+        if candidate is None:
+            return True
+        prefix = "/api/media/avatars/"
+        return (
+            isinstance(candidate, str)
+            and candidate.startswith(prefix)
+            and UUID4_PATTERN.fullmatch(candidate[len(prefix) :]) is not None
+        )
+
+    def text_field(candidate: object, *, maximum: int, optional: bool = False) -> bool:
+        if optional and candidate is None:
+            return True
+        return (
+            isinstance(candidate, str)
+            and candidate == candidate.strip()
+            and 1 <= len(candidate) <= maximum
+            and not any(character in "\r\n\x00" for character in candidate)
         )
 
     if table == "chat_requests":
@@ -3832,32 +3864,67 @@ def _database_response_texts(
         ):
             raise failed
         return (str(value["reply"]),)
-    if table != "roster_requests":
+    if table != "roster_requests" or operation is None:
         raise failed
+    if operation == "child_create":
+        if (
+            set(value) != {"active", "avatar", "id", "name", "nickname"}
+            or type(value.get("id")) is not int
+            or value["id"] <= 0
+            or type(value.get("active")) is not bool
+            or not avatar(value.get("avatar"))
+            or not text_field(value.get("name"), maximum=64)
+            or not text_field(value.get("nickname"), maximum=64, optional=True)
+        ):
+            raise failed
+        return tuple(
+            candidate
+            for candidate in (value["name"], value["nickname"])
+            if isinstance(candidate, str)
+        )
+    if operation == "duck_create":
+        if (
+            set(value) != {"avatar", "id", "name", "note", "status"}
+            or type(value.get("id")) is not int
+            or value["id"] <= 0
+            or not avatar(value.get("avatar"))
+            or not text_field(value.get("name"), maximum=64)
+            or not text_field(value.get("status"), maximum=255, optional=True)
+            or not text_field(value.get("note"), maximum=2000, optional=True)
+        ):
+            raise failed
+        return tuple(
+            candidate
+            for candidate in (value["name"], value["status"], value["note"])
+            if isinstance(candidate, str)
+        )
     if (
         not request_id(value.get("request_id"))
-        or type(value.get("replayed")) is not bool
+        or value.get("replayed") is not False
     ):
         raise failed
     keys = set(value)
-    if keys == {"child_ids", "cycle", "date", "replayed", "request_id"}:
+    if operation == "daily_roster":
         if (
-            not child_ids(value.get("child_ids"))
+            keys != {"child_ids", "cycle", "date", "replayed", "request_id"}
+            or not child_ids(value.get("child_ids"))
             or not isinstance(value.get("cycle"), str)
             or not 1 <= len(value["cycle"]) <= 64
             or not _valid_database_date(value.get("date"))
         ):
             raise failed
         return ()
-    if keys not in (
-        {"replayed", "request_id", "schedule"},
-        {"month", "replayed", "request_id", "schedule"},
-    ):
+    expected_keys = (
+        {"month", "replayed", "request_id", "schedule"}
+        if operation == "monthly_roster"
+        else {"replayed", "request_id", "schedule"}
+    )
+    if operation not in {"auto_roster", "monthly_roster"} or keys != expected_keys:
         raise failed
     schedule = value.get("schedule")
     if not isinstance(schedule, list):
         raise failed
-    monthly = "month" in value
+    monthly = operation == "monthly_roster"
     if monthly and (
         not isinstance(value.get("month"), str)
         or re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", value["month"]) is None
@@ -3969,13 +4036,19 @@ def _runtime_database_texts(
                             raise failed
                         texts.append(value)
             for table in ("chat_requests", "roster_requests"):
+                selection = (
+                    "NULL, response_json"
+                    if table == "chat_requests"
+                    else "operation, response_json"
+                )
                 rows = connection.execute(
-                    f'SELECT response_json FROM "{table}" ORDER BY rowid'
+                    f'SELECT {selection} FROM "{table}" ORDER BY rowid'
                 ).fetchall()
-                for (response_json,) in rows:
+                for operation, response_json in rows:
                     texts.extend(
                         _database_response_texts(
                             table=table,
+                            operation=operation,
                             payload=response_json,
                             failed=failed,
                         )
