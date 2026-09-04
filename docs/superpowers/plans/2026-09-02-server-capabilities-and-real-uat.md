@@ -620,7 +620,7 @@ Run exactly in this order, never concurrently:
 /Users/lddmay/AiCoding/pomegranagent/.venv/bin/pytest -q --ignore=tests/browser
 node --test tests/frontend/child/*.test.mjs tests/frontend/shared/*.test.mjs tests/frontend/teacher/*.test.mjs
 /Users/lddmay/AiCoding/pomegranagent/.venv/bin/pytest -q tests/browser
-/Users/lddmay/AiCoding/pomegranagent/.venv/bin/python scripts/run_interaction_acceptance.py
+/Users/lddmay/AiCoding/pomegranagent/.venv/bin/python scripts/run_interaction_acceptance.py run <literal-reviewed-40-hex-commit>
 ```
 
 If the recorded P5 roster concurrency test flakes, re-run that exact test twice and include all three outputs in the final evidence; do not hide the first failure.
@@ -630,7 +630,7 @@ If the recorded P5 roster concurrency test flakes, re-run that exact test twice 
 Start the harness, then use the connected in-app browser to walk the approved checklist. Capture teacher 1024×768 and 1440×900 plus child 1024×576 and 1280×720 key states. Exercise real DeepSeek chat/analysis and real Edge-TTS. Use controlled text handoff for autonomous child input and mark physical microphone/acoustic recognition `HUMAN_UAT_REQUIRED`.
 
 ```bash
-/Users/lddmay/AiCoding/pomegranagent/.venv/bin/python scripts/run_live_provider_uat.py --retain --print-runtime-json
+/Users/lddmay/AiCoding/pomegranagent/.venv/bin/python scripts/run_live_provider_uat.py --retain --print-runtime-json --expected-head <literal-reviewed-40-hex-commit>
 ```
 
 - [ ] **Step 9: Final evidence validation**
