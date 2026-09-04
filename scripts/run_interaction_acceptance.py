@@ -1646,11 +1646,16 @@ def _report_resource_snapshot(value: object) -> CanonicalResourceSnapshot:
     if log.kind is not FileKind.REGULAR:
         expected_reasons.append("LOG_NOT_REGULAR")
     expected_reasons.extend(f"TTS:{reason}" for reason in tts.unsafe_reasons)
-    expected_reasons.extend(f"MEDIA:{reason}" for reason in media.unsafe_reasons)
+    expected_reasons.extend(
+        f"MEDIA:{reason}"
+        for reason in media.unsafe_reasons
+        if reason != "DIRECTORY_MISSING"
+    )
     for protected in user_paths:
         expected_reasons.extend(
             f"USER_PATH:{protected.relative_path}:{reason}"
             for reason in protected.unsafe_reasons
+            if reason != "PATH_MISSING"
         )
     if git_head is None:
         expected_reasons.append("GIT_HEAD_UNAVAILABLE")
@@ -5133,11 +5138,16 @@ def capture_resources(repo_root: Path) -> ResourceSnapshot:
     if log.kind is not FileKind.REGULAR:
         reasons.append("LOG_NOT_REGULAR")
     reasons.extend(f"TTS:{reason}" for reason in tts.unsafe_reasons)
-    reasons.extend(f"MEDIA:{reason}" for reason in media.unsafe_reasons)
+    reasons.extend(
+        f"MEDIA:{reason}"
+        for reason in media.unsafe_reasons
+        if reason != "DIRECTORY_MISSING"
+    )
     for protected in user_paths:
         reasons.extend(
             f"USER_PATH:{protected.relative_path}:{reason}"
             for reason in protected.unsafe_reasons
+            if reason != "PATH_MISSING"
         )
 
     head_returncode, head_bytes = _git_capture(root, "rev-parse", "HEAD")

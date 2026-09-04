@@ -5,6 +5,7 @@ import html
 import json
 import os
 import re
+import shutil
 import sqlite3
 import stat
 import subprocess
@@ -862,6 +863,47 @@ def test_capture_resources_is_total_and_tracks_git_and_all_protected_paths(tmp_p
     missing = module.capture_resources(repo)
     assert missing.log.kind is module.FileKind.MISSING
     assert "LOG_NOT_REGULAR" in missing.unsafe_reasons
+
+
+def test_capture_resources_accepts_stably_missing_media_and_user_path(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo = tmp_path / "resource-repo"
+    repo.mkdir()
+    _make_resource_repository(repo)
+    shutil.rmtree(repo / "data" / "media")
+    shutil.rmtree(repo / ".superpowers" / "brainstorm")
+    _run_clean_git(repo, "add", "-u")
+    _run_clean_git(
+        repo,
+        "-c",
+        "user.name=Task 10 Fixture",
+        "-c",
+        "user.email=task10@example.invalid",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-q",
+        "-m",
+        "remove optional protected roots",
+    )
+
+    missing = module.capture_resources(repo)
+
+    assert missing.media.unsafe_reasons == ("DIRECTORY_MISSING",)
+    assert next(
+        path for path in missing.user_paths
+        if path.relative_path == ".superpowers/brainstorm"
+    ).unsafe_reasons == ("PATH_MISSING",)
+    assert missing.git_porcelain == b""
+    assert missing.unsafe_reasons == ()
+
+    (repo / "data" / "media").mkdir()
+    (repo / ".superpowers" / "brainstorm").mkdir(parents=True)
+    appeared = module.capture_resources(repo)
+
+    assert appeared.unsafe_reasons == ()
+    assert appeared != missing
+    assert module._snapshots_are_unchanged(missing, appeared) is False
 
 
 @dataclass(frozen=True)
@@ -3761,7 +3803,7 @@ def test_schema_v2_rejects_resource_snapshot_semantic_forgery(mutation):
             snapshot["media"]["entries"] = []
             snapshot["media"]["digest"] = None
             snapshot["media"]["unsafe_reasons"] = ["DIRECTORY_MISSING"]
-            snapshot["unsafe_reasons"] = []
+            snapshot["unsafe_reasons"] = ["MEDIA:DIRECTORY_MISSING"]
         elif mutation == "user_reason_mismatch":
             protected = snapshot["user_paths"][0]
             protected["file"] = {
@@ -3775,7 +3817,9 @@ def test_schema_v2_rejects_resource_snapshot_semantic_forgery(mutation):
             }
             protected["directory"] = None
             protected["unsafe_reasons"] = ["PATH_MISSING"]
-            snapshot["unsafe_reasons"] = []
+            snapshot["unsafe_reasons"] = [
+                f"USER_PATH:{protected['relative_path']}:PATH_MISSING"
+            ]
         elif mutation == "git_reason_mismatch":
             snapshot["git_porcelain"] = None
             snapshot["unsafe_reasons"] = []
