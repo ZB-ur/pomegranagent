@@ -2539,7 +2539,22 @@ backend | ^test_provider_settings_normalize_official_deepseek_openai_base_urls\[
 backend | ^test_provider_settings_default_to_the_compatible_deepseek_v1_path$ | 1 | 4,7,8,14
 backend | ^test_provider_settings_reject_nonofficial_deepseek_origins_and_paths\[(insecure-scheme|attacker-origin|lookalike-suffix-origin|official-prefix-origin|userinfo-username|userinfo-password|nondefault-port|query|fragment|other-version-path|endpoint-path|nested-compatible-path)\]$ | 12 | 4,7,8,14
 backend | ^test_(fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_failure|execute_retained_uat_rejects_teacher_pin_not_matching_runtime_scrypt)$ | 2 | 14
-backend | ^test_finish_live_server_retries_cleanup_after_stopper_fails_before_signal$ | 1 | 14"""
+backend | ^test_finish_live_server_retries_cleanup_after_stopper_fails_before_signal$ | 1 | 14
+backend | ^test_finish_live_server_continues_cleanup_when_initial_observation_fails$ | 1 | 14
+backend | ^test_start_live_server_retries_owned_cleanup_before_losing_session$ | 1 | 14
+backend | ^test_launch_server_process_retries_validated_owner_cleanup_before_raising$ | 1 | 14
+backend | ^test_run_seed_process_cleans_owned_group_after_observation_failure$ | 1 | 14
+backend | ^test_launch_server_process_preserves_owner_when_both_cleanup_attempts_fail$ | 1 | 14
+backend | ^test_finish_live_server_skips_io_for_preclosed_output_and_converges$ | 1 | 14
+backend | ^test_finish_live_server_remembers_close_that_raised_after_closing$ | 1 | 14
+backend | ^test_process_group_members_bounds_the_ps_subprocess$ | 1 | 14
+backend | ^test_owned_process_group_does_not_rediscover_members_after_reaping_leader$ | 1 | 14
+backend | ^test_launch_identity_failure_retries_direct_reap_without_group_signal$ | 1 | 14
+backend | ^test_start_live_server_preserves_owner_when_cleanup_and_collector_stop_fail$ | 1 | 14
+backend | ^test_execute_retained_uat_preserves_server_starter_owned_cleanup_error$ | 1 | 14
+backend | ^test_execute_retained_uat_retries_finisher_and_preserves_readiness_error$ | 1 | 14
+backend | ^test_finish_live_server_closes_output_after_flush_or_fsync_failure\[(flush-expected_output_calls0-expected_fsync_calls0|fsync-expected_output_calls1-expected_fsync_calls1)\]$ | 2 | 14
+backend | ^test_start_live_server_preserves_launcher_owned_error_during_parent_cleanup$ | 1 | 14"""
 
 
 _P5_SELECTOR_ORACLE = (
@@ -2556,7 +2571,7 @@ _P6_POST_REVIEW_SELECTOR_ADDITIONS_SHA256 = (
     "ed7fe56d4422466c4f88b5e27a208fb89e0d57297bbbc2dccb724b2f7440f24b"
 )
 _P6_AUDIT_FIX_SELECTOR_ADDITIONS_SHA256 = (
-    "8bf01dbef37a16ecd8c8f8e9ac92bd8fe045cb7c890b795547f8e68a353cff68"
+    "36090adf74bf960d012981f08771f6ebce44b4ddf20c3c7aae087f08db331021"
 )
 
 
@@ -2677,7 +2692,7 @@ def test_literal_p5_selector_oracle_is_exact_ordered_prefix_with_p6_suffix_separ
     assert len(p5_rows) == 97
     assert len(p6_rows) == 56
     assert len(post_review_rows) == 5
-    assert len(audit_fix_rows) == 6
+    assert len(audit_fix_rows) == 21
     p6_end = len(p5_rows) + len(p6_rows)
     post_review_end = p6_end + len(post_review_rows)
     assert actual_rows[: len(p5_rows)] == p5_rows
@@ -2775,7 +2790,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
 
     assert actual_today_retry_rows == EXPECTED_TODAY_RETRY_SELECTOR_ROWS
     assert actual_rows == expected_rows
-    assert len(actual_rows) == 164
+    assert len(actual_rows) == 179
     assert module.GATE_TITLES == EXPECTED_GATE_TITLES
     assert tuple(
         (item.source, item.evidence_id, item.expected_count, item.gates)
@@ -2800,7 +2815,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
             ]
             assert len(matches) == 1
         materialized_count += len(node_ids)
-    assert materialized_count == 411
+    assert materialized_count == 427
 
     assert module.SELECTOR_TO_GATES == {
         (row.command_id, row.node_pattern): row.gates for row in module.SELECTOR_MANIFEST
@@ -4138,8 +4153,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "cd2a86666a90233f154f901d227059f6fee983734d3fadaf3ba4ec794d3f71f3"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "f41f59622aa9df8f96d5d8dbfffcab82050d880de729b1955b508dd8786509fb"
+    assert hashlib.sha256(json_bytes).hexdigest() == "cb877a6d59d15bd3c7daca3df027bd66e84f2cede1f8a0013087d1af6781c71d"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "6d899e9b3e47efc4d334fcc6d2ce1fcead86bc773806ea976f2a4138b55f5b99"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4704,8 +4719,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "cacc9faf62ed0b963d9faf473aee5e084c4dc814aee6534bc0db7d8e6fbe7e7c"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "0b03a291bc0b7850be98c12ed8894af21c0814eb09932403fda4c52d7a955d21"
+    assert hashlib.sha256(json_bytes).hexdigest() == "57f1dd0aee56e9fdb9c83039e3a1dfffb306c2a7c377518aab88d8f554e825f3"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "f4c190f2b6193dd2edcf1c080b3dfd85fbdfe2c1bd571f923bf34223bc95d392"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown

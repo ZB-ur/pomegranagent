@@ -54,6 +54,7 @@ DEEPSEEK_ALLOWLIST = (
     "DEEPSEEK_TIMEOUT",
     "DEEPSEEK_MAX_TOKENS",
 )
+OWNER_CLEANUP_ATTEMPTS = 2
 FROZEN_RELEASE = {
     "release_id": "2026.09.02-server-capabilities.1",
     "api_version": "3",
@@ -445,6 +446,45 @@ class OwnedProcess:
     pid: int
     pgid: int
     sid: int | None = None
+
+
+class OwnedProcessCleanupError(HarnessSafetyError):
+    """Preserve a validated owner when bounded cleanup cannot prove success."""
+
+    def __init__(
+        self,
+        *,
+        owned: OwnedProcess,
+        attempt_errors: tuple[BaseException, ...],
+        original_error: BaseException,
+    ) -> None:
+        super().__init__("validated owner cleanup failed")
+        self.owned = owned
+        self.attempt_errors = attempt_errors
+        self.original_error = original_error
+
+
+def _cleanup_validated_owner(
+    owned: OwnedProcess,
+    *,
+    stopper: Callable[[OwnedProcess], object],
+    original_error: BaseException,
+    attempts: int = OWNER_CLEANUP_ATTEMPTS,
+) -> object:
+    """Boundedly retry cleanup only after the caller has validated ownership."""
+
+    attempt_errors: list[BaseException] = []
+    for _attempt in range(attempts):
+        try:
+            return stopper(owned)
+        except BaseException as exc:
+            attempt_errors.append(exc)
+    error = OwnedProcessCleanupError(
+        owned=owned,
+        attempt_errors=tuple(attempt_errors),
+        original_error=original_error,
+    )
+    raise error from attempt_errors[-1]
 
 
 @dataclass(slots=True)
@@ -1365,20 +1405,41 @@ def build_seed_environment(parent: Mapping[str, str]) -> dict[str, str]:
 def _reap_child_after_validation_failure(process) -> None:
     """Boundedly terminate one just-started leader when ownership is not usable."""
 
-    try:
-        if process.poll() is None:
-            process.terminate()
+    attempt_errors: list[BaseException] = []
+    for _attempt in range(OWNER_CLEANUP_ATTEMPTS):
         try:
-            process.wait(timeout=5)
-        except subprocess.TimeoutExpired:
-            process.kill()
-            process.wait(timeout=5)
-        if process.poll() is None:
-            raise HarnessSafetyError("started child cleanup did not reap the leader")
-    except HarnessSafetyError:
-        raise
-    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
-        raise HarnessSafetyError("started child cleanup failed") from exc
+            if process.poll() is None:
+                process.terminate()
+            try:
+                process.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5)
+            if process.poll() is None:
+                raise HarnessSafetyError(
+                    "started child cleanup did not reap the leader"
+                )
+            return
+        except (HarnessSafetyError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
+            attempt_errors.append(exc)
+    raise HarnessSafetyError("started child cleanup failed") from attempt_errors[-1]
+
+
+def _retry_child_reap_after_validation_failure(
+    process,
+    *,
+    attempts: int = OWNER_CLEANUP_ATTEMPTS,
+) -> None:
+    """Retry the exact child reaper without assuming process-group ownership."""
+
+    attempt_errors: list[BaseException] = []
+    for _attempt in range(attempts):
+        try:
+            _reap_child_after_validation_failure(process)
+            return
+        except BaseException as exc:
+            attempt_errors.append(exc)
+    raise HarnessSafetyError("started child cleanup failed") from attempt_errors[-1]
 
 
 def run_seed_process(
@@ -1389,7 +1450,7 @@ def run_seed_process(
     popen=subprocess.Popen,
     getpgid: Callable[[int], int] = os.getpgid,
     getsid: Callable[[int], int] = os.getsid,
-    group_members: Callable[[int], tuple[tuple[int, int], ...]] = lambda pgid: _process_group_members(pgid),
+    group_members: Callable[[int], tuple[tuple[int, int], ...]] | None = None,
     killpg: Callable[[int, int], None] = os.killpg,
     peek_exit: Callable[[OwnedProcess], int | None] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
@@ -1418,6 +1479,7 @@ def run_seed_process(
     ):
         raise HarnessSafetyError("offline seed process contract is invalid")
     source_validator(plan)
+    member_provider = _process_group_members if group_members is None else group_members
 
     with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
         mode="w+b"
@@ -1451,34 +1513,52 @@ def run_seed_process(
                 raise cleanup_error from validation_error
             raise
         observe = _peek_owned_exit if peek_exit is None else peek_exit
-        observed = _wait_owned_exit_unreaped(
-            owned,
-            timeout=120,
-            peek_exit=observe,
-            monotonic=monotonic,
-            sleep=sleep,
-        )
-        if observed is None:
-            stop_owned_process_group(
-                owned,
+        def stop_seed_owner(candidate: OwnedProcess) -> int:
+            return stop_owned_process_group(
+                candidate,
                 getpgid=getpgid,
                 getsid=getsid,
-                group_members=group_members,
+                group_members=member_provider,
                 killpg=killpg,
                 peek_exit=observe,
                 monotonic=monotonic,
                 sleep=sleep,
             )
-            raise HarnessSafetyError("offline seed process timed out")
-        returncode = stop_owned_process_group(
+
+        try:
+            observed = _wait_owned_exit_unreaped(
+                owned,
+                timeout=120,
+                peek_exit=observe,
+                monotonic=monotonic,
+                sleep=sleep,
+            )
+        except BaseException as observation_error:
+            if isinstance(observation_error, HarnessSafetyError):
+                operation_error = observation_error
+            else:
+                operation_error = HarnessSafetyError(
+                    "offline seed process observation failed"
+                )
+                operation_error.__cause__ = observation_error
+            _cleanup_validated_owner(
+                owned,
+                stopper=stop_seed_owner,
+                original_error=operation_error,
+            )
+            raise operation_error
+        if observed is None:
+            timeout_error = HarnessSafetyError("offline seed process timed out")
+            _cleanup_validated_owner(
+                owned,
+                stopper=stop_seed_owner,
+                original_error=timeout_error,
+            )
+            raise timeout_error
+        returncode = _cleanup_validated_owner(
             owned,
-            getpgid=getpgid,
-            getsid=getsid,
-            group_members=group_members,
-            killpg=killpg,
-            peek_exit=observe,
-            monotonic=monotonic,
-            sleep=sleep,
+            stopper=stop_seed_owner,
+            original_error=HarnessSafetyError("offline seed process cleanup failed"),
         )
         if returncode != 0:
             raise HarnessSafetyError("offline seed process failed")
@@ -2157,18 +2237,19 @@ def launch_server_process(
         identity_validated = True
         source_validator(plan)
     except BaseException as validation_error:
-        try:
-            if identity_validated:
-                stopper = (
-                    stop_owned_process_group
-                    if validation_stopper is None
-                    else validation_stopper
-                )
-                stopper(owned)
-            else:
-                _reap_child_after_validation_failure(process)
-        except BaseException as cleanup_error:
-            raise cleanup_error from validation_error
+        if identity_validated:
+            stopper = (
+                stop_owned_process_group
+                if validation_stopper is None
+                else validation_stopper
+            )
+            _cleanup_validated_owner(
+                owned,
+                stopper=stopper,
+                original_error=validation_error,
+            )
+        else:
+            _retry_child_reap_after_validation_failure(process)
         raise
     return owned
 
@@ -2252,8 +2333,9 @@ def _process_group_members(
             ("ps", "-axo", "pid=,pgid="),
             capture_output=True,
             check=False,
+            timeout=2,
         )
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
         raise HarnessSafetyError("process-group ownership is invalid") from exc
     payload = completed.stdout
     if completed.returncode != 0 or not isinstance(payload, bytes) or len(payload) > 8_000_000:
@@ -2369,8 +2451,6 @@ def stop_owned_process_group(
         raise HarnessSafetyError("owned process group could not be stopped") from exc
     if returncode != observed_status:
         raise HarnessSafetyError("owned process group exit status changed")
-    if _verified_group_members(owned, tuple(group_members(owned.pgid))):
-        raise HarnessSafetyError("owned process group could not be reaped")
     return returncode
 
 
@@ -2389,6 +2469,7 @@ def start_live_server(
     assert_run_plan_identity(plan)
     _safe_owned_directory(plan.app_log.parent, label="run log directory")
     bound = prebind()
+    bound_closed = False
     read_fd = write_fd = None
     output = None
     collector = None
@@ -2422,21 +2503,33 @@ def start_live_server(
             python_executable=python_executable,
         )
         bound.socket.close()
+        bound_closed = True
         os.close(write_fd)
         write_fd = None
         assert_run_plan_identity(plan)
     except BaseException as startup_error:
         cleanup_error = None
-        if owned is not None:
+        owner_cleanup_error = (
+            startup_error
+            if isinstance(startup_error, OwnedProcessCleanupError)
+            else None
+        )
+        if owned is not None and owner_cleanup_error is None:
             try:
-                startup_stopper(owned)
+                _cleanup_validated_owner(
+                    owned,
+                    stopper=startup_stopper,
+                    original_error=startup_error,
+                )
+            except OwnedProcessCleanupError as exc:
+                owner_cleanup_error = exc
+        if not bound_closed:
+            try:
+                bound.socket.close()
+                bound_closed = True
             except BaseException as exc:
-                cleanup_error = exc
-        try:
-            bound.socket.close()
-        except BaseException as exc:
-            if cleanup_error is None:
-                cleanup_error = exc
+                if cleanup_error is None:
+                    cleanup_error = exc
         if write_fd is not None:
             try:
                 os.close(write_fd)
@@ -2446,10 +2539,11 @@ def start_live_server(
         if collector_started:
             try:
                 collector.finish()
-                read_fd = None
             except BaseException as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
+            # The collector thread owns this descriptor once start() succeeds.
+            read_fd = None
         if read_fd is not None:
             try:
                 os.close(read_fd)
@@ -2462,6 +2556,10 @@ def start_live_server(
             except BaseException as exc:
                 if cleanup_error is None:
                     cleanup_error = exc
+        if owner_cleanup_error is not None:
+            if owner_cleanup_error is startup_error:
+                raise
+            raise owner_cleanup_error from startup_error
         if cleanup_error is not None:
             raise HarnessSafetyError("live server startup cleanup failed") from cleanup_error
         raise startup_error
@@ -2488,25 +2586,46 @@ def finish_live_server(
     error: BaseException | None = None
     observe = _peek_owned_exit if peek_exit is None else peek_exit
     if not session.process_stopped:
-        if observe(session.owned) is not None:
-            error = HarnessSafetyError("live server exited unexpectedly")
         try:
-            stopper(session.owned)
+            observed_exit = observe(session.owned)
         except BaseException as exc:
+            if isinstance(exc, HarnessSafetyError):
+                error = exc
+            else:
+                error = HarnessSafetyError("live server process observation failed")
+                error.__cause__ = exc
+        else:
+            if observed_exit is not None:
+                error = HarnessSafetyError("live server exited unexpectedly")
+        try:
+            _cleanup_validated_owner(
+                session.owned,
+                stopper=stopper,
+                original_error=error
+                or HarnessSafetyError("live server cleanup failed"),
+                attempts=1,
+            )
+        except OwnedProcessCleanupError as exc:
             error = exc
         else:
             session.process_stopped = True
+    if not session.output_closed and getattr(session.output, "closed", False) is True:
+        session.output_closed = True
     if not session.output_closed:
         try:
             session.output.flush()
             os.fsync(session.output.fileno())
         except BaseException as exc:
+            if getattr(session.output, "closed", False) is True:
+                session.output_closed = True
             if error is None:
                 error = exc
-        else:
+        if not session.output_closed:
             try:
                 session.output.close()
             except BaseException as exc:
+                if getattr(session.output, "closed", False) is True:
+                    session.output_closed = True
                 if error is None:
                     error = exc
             else:
@@ -6187,6 +6306,8 @@ def execute_retained_uat(
     plan = None
     session = None
     session_finished = False
+    finisher_attempts = 0
+    finisher_errors: list[BaseException] = []
     try:
         before_first = capture_resources(repository)
         before_second = capture_resources(repository)
@@ -6268,7 +6389,12 @@ def execute_retained_uat(
         teacher_pin = control.secret_for_scan()
         if not isinstance(teacher_pin, str):
             raise HarnessSafetyError("controller teacher credential was not registered")
-        provider_events = server_finisher(session)
+        finisher_attempts += 1
+        try:
+            provider_events = server_finisher(session)
+        except BaseException as exc:
+            finisher_errors.append(exc)
+            raise
         session_finished = True
         if plan.source_root_identity is not None:
             assert_reviewed_source_pinned(plan)
@@ -6381,10 +6507,46 @@ def execute_retained_uat(
         error = exc
 
     if session is not None and not session_finished:
-        try:
-            server_finisher(session)
-        except BaseException:
-            error = HarnessSafetyError("owned server cleanup failed")
+        while finisher_attempts < OWNER_CLEANUP_ATTEMPTS:
+            finisher_attempts += 1
+            try:
+                server_finisher(session)
+            except BaseException as exc:
+                finisher_errors.append(exc)
+            else:
+                session_finished = True
+                break
+        if not session_finished:
+            owned_errors = [
+                candidate
+                for candidate in finisher_errors
+                if isinstance(candidate, OwnedProcessCleanupError)
+            ]
+            if owned_errors:
+                retained_owner = owned_errors[0].owned
+                attempt_errors: list[BaseException] = []
+                for candidate in finisher_errors:
+                    if (
+                        isinstance(candidate, OwnedProcessCleanupError)
+                        and candidate.owned is retained_owner
+                    ):
+                        attempt_errors.extend(candidate.attempt_errors)
+                    else:
+                        attempt_errors.append(candidate)
+                original_error = (
+                    error.original_error
+                    if isinstance(error, OwnedProcessCleanupError)
+                    else error
+                )
+                error = OwnedProcessCleanupError(
+                    owned=retained_owner,
+                    attempt_errors=tuple(attempt_errors),
+                    original_error=original_error,
+                )
+            else:
+                cleanup_error = HarnessSafetyError("owned server cleanup failed")
+                cleanup_error.__cause__ = finisher_errors[-1]
+                error = cleanup_error
     if plan is not None:
         reason = (
             "CONTROLLER_EVIDENCE_MISSING"

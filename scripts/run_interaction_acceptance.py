@@ -3247,6 +3247,21 @@ backend | ^test_provider_settings_default_to_the_compatible_deepseek_v1_path$ | 
 backend | ^test_provider_settings_reject_nonofficial_deepseek_origins_and_paths\[(insecure-scheme|attacker-origin|lookalike-suffix-origin|official-prefix-origin|userinfo-username|userinfo-password|nondefault-port|query|fragment|other-version-path|endpoint-path|nested-compatible-path)\]$ | 12 | 4,7,8,14
 backend | ^test_(fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_failure|execute_retained_uat_rejects_teacher_pin_not_matching_runtime_scrypt)$ | 2 | 14
 backend | ^test_finish_live_server_retries_cleanup_after_stopper_fails_before_signal$ | 1 | 14
+backend | ^test_finish_live_server_continues_cleanup_when_initial_observation_fails$ | 1 | 14
+backend | ^test_start_live_server_retries_owned_cleanup_before_losing_session$ | 1 | 14
+backend | ^test_launch_server_process_retries_validated_owner_cleanup_before_raising$ | 1 | 14
+backend | ^test_run_seed_process_cleans_owned_group_after_observation_failure$ | 1 | 14
+backend | ^test_launch_server_process_preserves_owner_when_both_cleanup_attempts_fail$ | 1 | 14
+backend | ^test_finish_live_server_skips_io_for_preclosed_output_and_converges$ | 1 | 14
+backend | ^test_finish_live_server_remembers_close_that_raised_after_closing$ | 1 | 14
+backend | ^test_process_group_members_bounds_the_ps_subprocess$ | 1 | 14
+backend | ^test_owned_process_group_does_not_rediscover_members_after_reaping_leader$ | 1 | 14
+backend | ^test_launch_identity_failure_retries_direct_reap_without_group_signal$ | 1 | 14
+backend | ^test_start_live_server_preserves_owner_when_cleanup_and_collector_stop_fail$ | 1 | 14
+backend | ^test_execute_retained_uat_preserves_server_starter_owned_cleanup_error$ | 1 | 14
+backend | ^test_execute_retained_uat_retries_finisher_and_preserves_readiness_error$ | 1 | 14
+backend | ^test_finish_live_server_closes_output_after_flush_or_fsync_failure\[(flush-expected_output_calls0-expected_fsync_calls0|fsync-expected_output_calls1-expected_fsync_calls1)\]$ | 2 | 14
+backend | ^test_start_live_server_preserves_launcher_owned_error_during_parent_cleanup$ | 1 | 14
 """
 
 

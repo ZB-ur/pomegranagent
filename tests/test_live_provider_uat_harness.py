@@ -2234,6 +2234,23 @@ class _FakeProcess:
         self.returncode = -signal.SIGKILL
 
 
+def _still_alive_collector_factory(module, descriptors, finish_calls):
+    class StillAliveCollector:
+        def __init__(self, descriptor):
+            descriptors["read"] = descriptor
+
+        def start(self):
+            return None
+
+        def finish(self):
+            finish_calls.append("finish")
+            raise module.HarnessSafetyError(
+                "provider telemetry collector did not finish"
+            )
+
+    return StillAliveCollector
+
+
 def test_server_launch_uses_parent_prebound_random_socket_and_direct_group(tmp_path):
     module = _module()
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
@@ -2346,6 +2363,204 @@ def test_post_popen_validation_failure_reaps_seed_and_server_leaders(tmp_path):
     assert server_process.returncode == -signal.SIGTERM
 
 
+def test_launch_identity_failure_retries_direct_reap_without_group_signal(
+    tmp_path,
+    monkeypatch,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    process = _FakeProcess()
+    bound_socket = _FakeBoundSocket()
+    identity_error = module.HarnessSafetyError(
+        "synthetic process-group identity failure"
+    )
+    first_reap_error = OSError("synthetic first direct reap failure")
+    reap_calls = []
+    group_stop_calls = []
+
+    def reject_identity(*_args, **_kwargs):
+        raise identity_error
+
+    def flaky_direct_reap(candidate):
+        reap_calls.append(candidate)
+        if len(reap_calls) == 1:
+            raise first_reap_error
+        candidate.returncode = -signal.SIGTERM
+
+    monkeypatch.setattr(module, "_owned_identity", reject_identity)
+    monkeypatch.setattr(module, "_reap_child_after_validation_failure", flaky_direct_reap)
+
+    with pytest.raises(module.HarnessSafetyError) as caught:
+        module.launch_server_process(
+            plan,
+            environment={"APP_DB_MODE": "app"},
+            bound_socket=bound_socket,
+            telemetry_fd=72,
+            output=object(),
+            python_executable=PYTHON,
+            popen=lambda *_args, **_kwargs: process,
+            source_validator=lambda _plan: None,
+            validation_stopper=lambda owned: group_stop_calls.append(owned),
+        )
+
+    assert caught.value is identity_error
+    assert reap_calls == [process, process]
+    assert process.returncode == -signal.SIGTERM
+    assert group_stop_calls == []
+
+
+def test_launch_server_process_retries_validated_owner_cleanup_before_raising(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    process = _FakeProcess()
+    bound_socket = _FakeBoundSocket()
+    validation_calls = []
+    stopper_calls = []
+
+    def source_validator(_plan):
+        validation_calls.append("validate")
+        if len(validation_calls) == 2:
+            raise module.HarnessSafetyError("reviewed source changed after launch")
+
+    def flaky_stopper(owned):
+        stopper_calls.append(owned.pgid)
+        if len(stopper_calls) == 1:
+            raise OSError("synthetic failure before any process signal")
+        owned.process.returncode = -signal.SIGTERM
+
+    with pytest.raises(module.HarnessSafetyError, match="reviewed source changed"):
+        module.launch_server_process(
+            plan,
+            environment={"APP_DB_MODE": "app"},
+            bound_socket=bound_socket,
+            telemetry_fd=72,
+            output=object(),
+            python_executable=PYTHON,
+            popen=lambda *_args, **_kwargs: process,
+            getpgid=lambda pid: pid,
+            getsid=lambda pid: pid,
+            source_validator=source_validator,
+            validation_stopper=flaky_stopper,
+        )
+
+    assert validation_calls == ["validate", "validate"]
+    assert stopper_calls == [process.pid, process.pid]
+    assert process.returncode == -signal.SIGTERM
+
+
+def test_launch_server_process_preserves_owner_when_both_cleanup_attempts_fail(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    process = _FakeProcess()
+    bound_socket = _FakeBoundSocket()
+    original_error = module.HarnessSafetyError(
+        "reviewed source changed after validated launch"
+    )
+    attempt_errors = (
+        OSError("synthetic first cleanup failure"),
+        RuntimeError("synthetic second cleanup failure"),
+    )
+    validation_calls = []
+    stopped_owners = []
+
+    def source_validator(_plan):
+        validation_calls.append("validate")
+        if len(validation_calls) == 2:
+            raise original_error
+
+    def persistently_failing_stopper(owned):
+        stopped_owners.append(owned)
+        raise attempt_errors[len(stopped_owners) - 1]
+
+    with pytest.raises(module.OwnedProcessCleanupError) as caught:
+        module.launch_server_process(
+            plan,
+            environment={"APP_DB_MODE": "app"},
+            bound_socket=bound_socket,
+            telemetry_fd=72,
+            output=object(),
+            python_executable=PYTHON,
+            popen=lambda *_args, **_kwargs: process,
+            getpgid=lambda pid: pid,
+            getsid=lambda pid: pid,
+            source_validator=source_validator,
+            validation_stopper=persistently_failing_stopper,
+        )
+
+    error = caught.value
+    assert isinstance(error, module.HarnessSafetyError)
+    assert validation_calls == ["validate", "validate"]
+    assert len(stopped_owners) == 2
+    assert stopped_owners[0] is stopped_owners[1]
+    assert error.owned is stopped_owners[0]
+    assert len(error.attempt_errors) == 2
+    assert error.attempt_errors[0] is attempt_errors[0]
+    assert error.attempt_errors[1] is attempt_errors[1]
+    assert error.original_error is original_error
+    assert process.returncode is None
+
+
+def test_run_seed_process_cleans_owned_group_after_observation_failure(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    process = _FakeProcess(waits=(-signal.SIGTERM,))
+    observation_calls = []
+    signals = []
+    stage = {"signalled": False}
+
+    def peek_exit(_owned):
+        observation_calls.append("observe")
+        if len(observation_calls) == 1:
+            raise OSError("synthetic waitid observation failure")
+        return -signal.SIGTERM if stage["signalled"] else None
+
+    def group_members(_pgid):
+        if process.returncode is not None:
+            return ()
+        if stage["signalled"]:
+            return ((process.pid, process.pid),)
+        return (
+            (process.pid, process.pid),
+            (process.pid + 1, process.pid),
+        )
+
+    def killpg(pgid, signum):
+        signals.append((pgid, signum))
+        stage["signalled"] = True
+
+    with pytest.raises(module.HarnessSafetyError, match="offline seed"):
+        module.run_seed_process(
+            plan,
+            argv=(PYTHON, "seed.py"),
+            environment={
+                "DISABLE_EXTERNAL_AI": "1",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHON_DOTENV_DISABLED": "1",
+                "TZ": "Asia/Shanghai",
+            },
+            popen=lambda *_args, **_kwargs: process,
+            getpgid=lambda pid: pid,
+            getsid=lambda pid: pid,
+            group_members=group_members,
+            killpg=killpg,
+            peek_exit=peek_exit,
+            monotonic=lambda: 0.0,
+            sleep=lambda _seconds: None,
+            source_validator=lambda _plan: None,
+        )
+
+    assert signals == [(process.pid, signal.SIGTERM)]
+    assert stage["signalled"] is True
+    assert process.returncode == -signal.SIGTERM
+    assert process.wait_timeouts == [5]
+    assert group_members(process.pid) == ()
+    assert 4 <= len(observation_calls) <= 5
+
+
 def test_start_live_server_cleans_launched_group_when_post_popen_pin_fails(
     tmp_path,
     monkeypatch,
@@ -2404,6 +2619,228 @@ def test_start_live_server_cleans_launched_group_when_post_popen_pin_fails(
     assert bound_socket.closed is True
     with pytest.raises(OSError):
         os.fstat(descriptors["write"])
+
+
+def test_start_live_server_retries_owned_cleanup_before_losing_session(
+    tmp_path,
+    monkeypatch,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.app_log.parent.mkdir(mode=0o700)
+
+    class CountingBoundSocket(_FakeBoundSocket):
+        def __init__(self):
+            super().__init__()
+            self.close_calls = 0
+
+        def close(self):
+            self.close_calls += 1
+            super().close()
+
+    bound_socket = CountingBoundSocket()
+    process = _FakeProcess()
+    stopper_calls = []
+    collector_events = []
+    descriptors = {}
+    launched_output = []
+    pin_checks = 0
+    real_pin_check = module.assert_run_plan_identity
+
+    def assert_pin(candidate):
+        nonlocal pin_checks
+        pin_checks += 1
+        if pin_checks == 2:
+            raise module.HarnessSafetyError("retained run root pin changed")
+        real_pin_check(candidate)
+
+    class Collector:
+        def __init__(self, descriptor):
+            descriptors["read"] = descriptor
+
+        def start(self):
+            collector_events.append("start")
+
+        def finish(self):
+            if "finish" in collector_events:
+                pytest.fail("collector finish must not be repeated")
+            os.close(descriptors["read"])
+            collector_events.append("finish")
+            return ()
+
+    def launch(_plan, **kwargs):
+        descriptors["write"] = kwargs["telemetry_fd"]
+        launched_output.append(kwargs["output"])
+        return module.OwnedProcess(
+            process,
+            process.pid,
+            process.pid,
+            process.pid,
+        )
+
+    def flaky_stopper(owned):
+        stopper_calls.append(owned.pgid)
+        if len(stopper_calls) == 1:
+            raise OSError("synthetic failure before any process signal")
+        owned.process.returncode = -signal.SIGTERM
+
+    monkeypatch.setattr(module, "assert_run_plan_identity", assert_pin)
+    with pytest.raises(module.HarnessSafetyError, match="run root pin changed"):
+        module.start_live_server(
+            plan,
+            environment={"APP_DB_MODE": "app"},
+            python_executable=PYTHON,
+            prebind=lambda: module.BoundLoopbackSocket(bound_socket, 43123),
+            collector_factory=Collector,
+            launcher=launch,
+            startup_stopper=flaky_stopper,
+        )
+
+    assert pin_checks == 2
+    assert stopper_calls == [process.pid, process.pid]
+    assert process.returncode == -signal.SIGTERM
+    assert bound_socket.closed is True
+    assert bound_socket.close_calls == 1
+    assert collector_events == ["start", "finish"]
+    assert len(launched_output) == 1
+    assert launched_output[0].closed is True
+    with pytest.raises(OSError):
+        os.fstat(descriptors["write"])
+
+
+def test_start_live_server_preserves_owner_when_cleanup_and_collector_stop_fail(
+    tmp_path,
+    monkeypatch,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.app_log.parent.mkdir(mode=0o700)
+    bound_socket = _FakeBoundSocket()
+    process = _FakeProcess()
+    owned = module.OwnedProcess(process, process.pid, process.pid, process.pid)
+    startup_error = module.HarnessSafetyError("synthetic post-launch pin failure")
+    attempt_errors = (
+        OSError("synthetic first owner stop failure"),
+        RuntimeError("synthetic second owner stop failure"),
+    )
+    descriptors = {}
+    launched_outputs = []
+    stopper_owners = []
+    collector_finish_calls = []
+    pin_checks = 0
+    real_pin_check = module.assert_run_plan_identity
+
+    def fail_post_launch_pin(candidate):
+        nonlocal pin_checks
+        pin_checks += 1
+        if pin_checks == 2:
+            raise startup_error
+        real_pin_check(candidate)
+
+    def launch(_plan, **kwargs):
+        descriptors["write"] = kwargs["telemetry_fd"]
+        launched_outputs.append(kwargs["output"])
+        return owned
+
+    def persistently_failing_stopper(candidate):
+        stopper_owners.append(candidate)
+        raise attempt_errors[len(stopper_owners) - 1]
+
+    monkeypatch.setattr(module, "assert_run_plan_identity", fail_post_launch_pin)
+    try:
+        with pytest.raises(module.OwnedProcessCleanupError) as caught:
+            module.start_live_server(
+                plan,
+                environment={"APP_DB_MODE": "app"},
+                python_executable=PYTHON,
+                prebind=lambda: module.BoundLoopbackSocket(bound_socket, 43123),
+                collector_factory=_still_alive_collector_factory(
+                    module,
+                    descriptors,
+                    collector_finish_calls,
+                ),
+                launcher=launch,
+                startup_stopper=persistently_failing_stopper,
+            )
+
+        error = caught.value
+        assert error.owned is owned
+        assert error.original_error is startup_error
+        assert len(error.attempt_errors) == 2
+        assert error.attempt_errors[0] is attempt_errors[0]
+        assert error.attempt_errors[1] is attempt_errors[1]
+        assert stopper_owners == [owned, owned]
+        assert bound_socket.closed is True
+        assert len(launched_outputs) == 1
+        assert launched_outputs[0].closed is True
+        with pytest.raises(OSError):
+            os.fstat(descriptors["write"])
+        os.fstat(descriptors["read"])
+        assert collector_finish_calls == ["finish"]
+    finally:
+        if "read" in descriptors:
+            try:
+                os.close(descriptors["read"])
+            except OSError:
+                pass
+
+
+def test_start_live_server_preserves_launcher_owned_error_during_parent_cleanup(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.app_log.parent.mkdir(mode=0o700)
+    bound_socket = _FakeBoundSocket()
+    process = _FakeProcess()
+    owned = module.OwnedProcess(process, process.pid, process.pid, process.pid)
+    launcher_error = module.OwnedProcessCleanupError(
+        owned=owned,
+        attempt_errors=(OSError("synthetic launcher owner cleanup failure"),),
+        original_error=module.HarnessSafetyError("synthetic launcher failure"),
+    )
+    descriptors = {}
+    launched_outputs = []
+    collector_finish_calls = []
+
+    def launcher(_plan, **kwargs):
+        descriptors["write"] = kwargs["telemetry_fd"]
+        launched_outputs.append(kwargs["output"])
+        raise launcher_error
+
+    try:
+        with pytest.raises(module.OwnedProcessCleanupError) as caught:
+            module.start_live_server(
+                plan,
+                environment={"APP_DB_MODE": "app"},
+                python_executable=PYTHON,
+                prebind=lambda: module.BoundLoopbackSocket(bound_socket, 43123),
+                collector_factory=_still_alive_collector_factory(
+                    module,
+                    descriptors,
+                    collector_finish_calls,
+                ),
+                launcher=launcher,
+                startup_stopper=lambda _owned: pytest.fail(
+                    "launcher did not return an owner for start to stop"
+                ),
+            )
+
+        assert caught.value is launcher_error
+        assert caught.value.owned is owned
+        assert bound_socket.closed is True
+        assert len(launched_outputs) == 1
+        assert launched_outputs[0].closed is True
+        with pytest.raises(OSError):
+            os.fstat(descriptors["write"])
+        os.fstat(descriptors["read"])
+        assert collector_finish_calls == ["finish"]
+    finally:
+        if "read" in descriptors:
+            try:
+                os.close(descriptors["read"])
+            except OSError:
+                pass
 
 
 def test_live_server_session_closes_parent_fds_and_finishes_once(tmp_path):
@@ -2546,6 +2983,287 @@ def test_finish_live_server_retries_cleanup_after_stopper_fails_before_signal(
     assert repeated == retained_events
     assert stopper_calls == [process.pid, process.pid]
     assert telemetry.finish_calls == 1
+
+
+def test_finish_live_server_skips_io_for_preclosed_output_and_converges():
+    module = _module()
+    process = _FakeProcess()
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
+    retained_events = ({"operation": "chat_reply"},)
+    lifecycle = []
+
+    class PreclosedOutput:
+        closed = True
+
+        def flush(self):
+            pytest.fail("preclosed output must not be flushed")
+
+        def fileno(self):
+            pytest.fail("preclosed output descriptor must not be inspected")
+
+        def close(self):
+            pytest.fail("preclosed output must not be closed again")
+
+    def stopper(candidate):
+        lifecycle.append(("stop", candidate))
+        candidate.process.returncode = -signal.SIGTERM
+
+    def finish_telemetry():
+        lifecycle.append(("telemetry", None))
+        return retained_events
+
+    session = module.LiveServerSession(
+        port=43123,
+        owned=owned,
+        telemetry=types.SimpleNamespace(finish=finish_telemetry),
+        output=PreclosedOutput(),
+    )
+
+    events = module.finish_live_server(
+        session,
+        stopper=stopper,
+        peek_exit=lambda _owned: None,
+    )
+
+    assert events == retained_events
+    assert lifecycle == [("stop", owned), ("telemetry", None)]
+    assert session.process_stopped is True
+    assert session.output_closed is True
+    assert session.telemetry_finished is True
+    assert session.finished is True
+
+
+def test_finish_live_server_remembers_close_that_raised_after_closing(monkeypatch):
+    module = _module()
+    process = _FakeProcess()
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
+    retained_events = ({"operation": "chat_reply"},)
+    close_error = OSError("synthetic close failure after descriptor closed")
+    fsync_calls = []
+    stopper_calls = []
+    telemetry_calls = []
+
+    class CloseRaisesAfterClosing:
+        def __init__(self):
+            self.closed = False
+            self.calls = []
+
+        def flush(self):
+            self.calls.append("flush")
+
+        def fileno(self):
+            self.calls.append("fileno")
+            return 91
+
+        def close(self):
+            self.calls.append("close")
+            self.closed = True
+            raise close_error
+
+    output = CloseRaisesAfterClosing()
+
+    def stopper(candidate):
+        stopper_calls.append(candidate)
+        candidate.process.returncode = -signal.SIGTERM
+
+    def finish_telemetry():
+        telemetry_calls.append("finish")
+        return retained_events
+
+    monkeypatch.setattr(module.os, "fsync", fsync_calls.append)
+    session = module.LiveServerSession(
+        port=43123,
+        owned=owned,
+        telemetry=types.SimpleNamespace(finish=finish_telemetry),
+        output=output,
+    )
+
+    with pytest.raises(module.HarnessSafetyError, match="cleanup failed"):
+        module.finish_live_server(
+            session,
+            stopper=stopper,
+            peek_exit=lambda _owned: None,
+        )
+
+    assert output.calls == ["flush", "fileno", "close"]
+    assert fsync_calls == [91]
+    assert session.output_closed is True
+    assert session.finished is True
+
+    repeated = module.finish_live_server(
+        session,
+        stopper=lambda _owned: pytest.fail("converged process must not be stopped again"),
+        peek_exit=lambda _owned: pytest.fail("converged process must not be observed"),
+    )
+
+    assert repeated == retained_events
+    assert output.calls == ["flush", "fileno", "close"]
+    assert stopper_calls == [owned]
+    assert telemetry_calls == ["finish"]
+
+
+@pytest.mark.parametrize(
+    ("failure_stage", "expected_output_calls", "expected_fsync_calls"),
+    (
+        ("flush", ["flush", "close"], []),
+        ("fsync", ["flush", "fileno", "close"], [91]),
+    ),
+)
+def test_finish_live_server_closes_output_after_flush_or_fsync_failure(
+    failure_stage,
+    expected_output_calls,
+    expected_fsync_calls,
+    monkeypatch,
+):
+    module = _module()
+    process = _FakeProcess()
+    owned = module.OwnedProcess(process, process.pid, process.pid, process.pid)
+    retained_events = ({"operation": "chat_reply"},)
+    io_error = OSError(f"synthetic {failure_stage} failure")
+    stopper_calls = []
+    telemetry_calls = []
+    fsync_calls = []
+
+    class FailingOutput:
+        def __init__(self):
+            self.closed = False
+            self.calls = []
+
+        def flush(self):
+            self.calls.append("flush")
+            if failure_stage == "flush":
+                raise io_error
+
+        def fileno(self):
+            self.calls.append("fileno")
+            return 91
+
+        def close(self):
+            self.calls.append("close")
+            self.closed = True
+
+    output = FailingOutput()
+
+    def fsync(descriptor):
+        fsync_calls.append(descriptor)
+        if failure_stage == "fsync":
+            raise io_error
+
+    def stopper(candidate):
+        stopper_calls.append(candidate)
+        candidate.process.returncode = -signal.SIGTERM
+
+    def finish_telemetry():
+        telemetry_calls.append("finish")
+        return retained_events
+
+    monkeypatch.setattr(module.os, "fsync", fsync)
+    session = module.LiveServerSession(
+        port=43123,
+        owned=owned,
+        telemetry=types.SimpleNamespace(finish=finish_telemetry),
+        output=output,
+    )
+
+    with pytest.raises(module.HarnessSafetyError, match="cleanup failed"):
+        module.finish_live_server(
+            session,
+            stopper=stopper,
+            peek_exit=lambda _owned: None,
+        )
+
+    assert output.calls == expected_output_calls
+    assert fsync_calls == expected_fsync_calls
+    assert session.process_stopped is True
+    assert session.output_closed is True
+    assert session.telemetry_finished is True
+    assert session.finished is True
+
+    repeated = module.finish_live_server(
+        session,
+        stopper=lambda _owned: pytest.fail("finished process must not be stopped twice"),
+        peek_exit=lambda _owned: pytest.fail("finished process must not be observed"),
+    )
+
+    assert repeated == retained_events
+    assert output.calls == expected_output_calls
+    assert stopper_calls == [owned]
+    assert telemetry_calls == ["finish"]
+
+
+def test_finish_live_server_continues_cleanup_when_initial_observation_fails(
+    tmp_path,
+):
+    module = _module()
+    process = _FakeProcess()
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
+    output = (tmp_path / "server.log").open("w+b")
+    output.write(b"safe buffered server output\n")
+    retained_events = ({"operation": "chat_reply"},)
+    telemetry_calls = []
+
+    def finish_telemetry():
+        telemetry_calls.append("finish")
+        return retained_events
+
+    session = module.LiveServerSession(
+        port=43123,
+        owned=owned,
+        telemetry=types.SimpleNamespace(finish=finish_telemetry),
+        output=output,
+    )
+    observation_calls = []
+    stopper_calls = []
+
+    def failing_observation(_owned):
+        observation_calls.append("observe")
+        raise OSError("synthetic initial process observation failure")
+
+    def stopper(candidate):
+        stopper_calls.append(candidate.pgid)
+        candidate.process.returncode = -signal.SIGTERM
+
+    with pytest.raises(module.HarnessSafetyError):
+        module.finish_live_server(
+            session,
+            stopper=stopper,
+            peek_exit=failing_observation,
+        )
+
+    assert observation_calls == ["observe"]
+    assert stopper_calls == [process.pid]
+    assert process.returncode == -signal.SIGTERM
+    assert session.process_stopped is True
+    assert output.closed is True
+    assert telemetry_calls == ["finish"]
+    assert session.provider_events == retained_events
+    assert session.finished is True
+
+    repeated = module.finish_live_server(
+        session,
+        stopper=lambda _owned: pytest.fail("finished session must not stop twice"),
+        peek_exit=lambda _owned: pytest.fail("finished session must not be observed"),
+    )
+
+    assert repeated == retained_events
+    assert observation_calls == ["observe"]
+    assert stopper_calls == [process.pid]
+    assert telemetry_calls == ["finish"]
 
 
 def test_finish_live_server_still_cleans_owned_group_when_leader_already_exited(tmp_path):
@@ -2700,8 +3418,65 @@ def test_owned_process_group_keeps_leader_unreaped_until_descendants_are_absent(
     assert observations == [
         ("running", None),
         ("leader-zombie", None),
-        ("leader-zombie", 0),
     ]
+    assert process.wait_timeouts == [5]
+
+
+def test_process_group_members_bounds_the_ps_subprocess():
+    module = _module()
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return types.SimpleNamespace(returncode=0, stdout=b"")
+
+    members = module._process_group_members(43210, runner=runner)
+
+    assert members == ()
+    assert calls == [
+        (
+            ("ps", "-axo", "pid=,pgid="),
+            {"capture_output": True, "check": False, "timeout": 2},
+        )
+    ]
+
+
+def test_owned_process_group_does_not_rediscover_members_after_reaping_leader():
+    module = _module()
+    process = _FakeProcess(pid=43210)
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
+    member_calls = []
+    signalled = False
+
+    def group_members(_pgid):
+        if process.returncode is not None:
+            pytest.fail("reaped process group must not be rediscovered")
+        member_calls.append("members")
+        return ((process.pid, process.pid),)
+
+    def killpg(pgid, signum):
+        nonlocal signalled
+        assert (pgid, signum) == (process.pid, signal.SIGTERM)
+        signalled = True
+
+    returncode = module.stop_owned_process_group(
+        owned,
+        getpgid=lambda pid: pid,
+        getsid=lambda pid: pid,
+        group_members=group_members,
+        killpg=killpg,
+        peek_exit=lambda _owned: 0 if signalled else None,
+        monotonic=lambda: 0.0,
+        sleep=lambda _seconds: pytest.fail("quiescent group must not wait"),
+    )
+
+    assert returncode == 0
+    assert member_calls == ["members", "members"]
     assert process.wait_timeouts == [5]
 
 
@@ -5051,6 +5826,149 @@ def test_database_provenance_rejects_seed_entities_incomplete_projection_and_unf
         connection.commit()
     with pytest.raises(module.HarnessSafetyError, match="database provenance"):
         module.validate_database_provenance(plan, entity_ids, baseline)
+
+
+def _execute_fake_uat_through_server_boundary(
+    tmp_path,
+    monkeypatch,
+    *,
+    server_starter,
+    readiness_probe,
+    server_finisher,
+):
+    module = _module()
+    repository = _repository(tmp_path)
+    snapshot = {
+        "database": {},
+        "dirty_paths": [],
+        "git_head": HEAD,
+        "git_porcelain": {},
+        "log": {},
+        "media": {},
+        "tts": {},
+    }
+
+    def seed_runner(plan, **_kwargs):
+        plan.app_log.parent.mkdir(mode=0o700)
+        return {
+            "archive_directory": None,
+            "database_path": str(plan.database),
+            "log_path": str(plan.app_log),
+            "media_root": str(plan.media),
+            "media_sha256": "1" * 64,
+            "record_sha256": "2" * 64,
+        }
+
+    monkeypatch.setattr(module, "capture_post_seed_baseline", lambda _plan: {})
+
+    return module.execute_retained_uat(
+        repository=repository,
+        expected_head=HEAD,
+        environ={
+            "PATH": "/synthetic/bin",
+            "DEEPSEEK_API_KEY": "sk-fake-provider-secret-1234567890",
+        },
+        dotenv_values={},
+        input_stream=io.StringIO(),
+        output_stream=io.StringIO(),
+        python_executable=PYTHON,
+        now=lambda: datetime(2026, 9, 4, tzinfo=timezone.utc),
+        nonce=lambda: "123456789abc",
+        business_today=lambda: date(2026, 9, 4),
+        source_materializer=lambda candidate: replace(
+            candidate,
+            source_tree_oid="b" * 40,
+        ),
+        capture_resources=lambda _repository: snapshot,
+        seed_runner=seed_runner,
+        server_starter=server_starter,
+        readiness_probe=readiness_probe,
+        server_finisher=server_finisher,
+    )
+
+
+def test_execute_retained_uat_preserves_server_starter_owned_cleanup_error(
+    tmp_path,
+    monkeypatch,
+):
+    module = _module()
+    process = _FakeProcess()
+    owned = module.OwnedProcess(process, process.pid, process.pid, process.pid)
+    startup_error = module.HarnessSafetyError("synthetic server startup failure")
+    attempt_errors = (
+        OSError("synthetic first owner cleanup failure"),
+        RuntimeError("synthetic second owner cleanup failure"),
+    )
+    starter_error = module.OwnedProcessCleanupError(
+        owned=owned,
+        attempt_errors=attempt_errors,
+        original_error=startup_error,
+    )
+    starter_calls = []
+
+    def server_starter(plan, **_kwargs):
+        starter_calls.append(plan)
+        raise starter_error
+
+    with pytest.raises(module.OwnedProcessCleanupError) as caught:
+        _execute_fake_uat_through_server_boundary(
+            tmp_path,
+            monkeypatch,
+            server_starter=server_starter,
+            readiness_probe=lambda _session: pytest.fail(
+                "failed server start must not reach readiness"
+            ),
+            server_finisher=lambda _session: pytest.fail(
+                "failed server start has no session to finish"
+            ),
+        )
+
+    assert caught.value is starter_error
+    assert caught.value.owned is owned
+    assert caught.value.original_error is startup_error
+    assert len(starter_calls) == 1
+
+
+def test_execute_retained_uat_retries_finisher_and_preserves_readiness_error(
+    tmp_path,
+    monkeypatch,
+):
+    module = _module()
+    session = types.SimpleNamespace(port=43123)
+    readiness_error = module.HarnessSafetyError("synthetic readiness failure")
+    plans = []
+    finisher_calls = []
+
+    def server_starter(plan, **_kwargs):
+        plans.append(plan)
+        return session
+
+    def readiness_probe(candidate):
+        assert candidate is session
+        raise readiness_error
+
+    def server_finisher(candidate):
+        finisher_calls.append(candidate)
+        if len(finisher_calls) == 1:
+            raise OSError("synthetic pre-signal cleanup failure")
+        return ()
+
+    with pytest.raises(module.HarnessSafetyError) as caught:
+        _execute_fake_uat_through_server_boundary(
+            tmp_path,
+            monkeypatch,
+            server_starter=server_starter,
+            readiness_probe=readiness_probe,
+            server_finisher=server_finisher,
+        )
+
+    assert caught.value is readiness_error
+    assert finisher_calls == [session, session]
+    assert len(plans) == 1
+    assert plans[0].resources_after.is_file()
+    failed_manifest = json.loads(plans[0].manifest.read_text(encoding="utf-8"))
+    assert failed_manifest["status"] == "FAILED"
+    assert failed_manifest["reason_code"] == "SAFETY_FAILURE"
 
 
 def _exercise_fake_harness_dry_run(
