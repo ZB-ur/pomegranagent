@@ -2184,6 +2184,51 @@ def test_junit_parser_captures_only_canonical_structured_testcase_properties(tmp
     )
 
 
+def test_authenticated_browser_junit_accepts_p6_geometry_properties():
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    properties = (
+        (
+            "test_release_search_filters_results_and_focus_stay_in_bounds[1024x768]",
+            "task8.search_geometry",
+            '{"filter_height":391,"focus_ratios":[17.74,17.74],'
+            '"minimum_target_height":44,"viewport":{"height":768,"width":1024}}',
+        ),
+        (
+            "test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds[1024x768]",
+            "task7.today_metrics_geometry",
+            '{"metric_cards":5,"retry_height":44,"retry_width":142,'
+            '"viewport":{"height":768,"width":1024}}',
+        ),
+    )
+    testcases = "".join(
+        '<testcase name="{}"><properties><property name="{}" value="{}"/>'
+        "</properties></testcase>".format(
+            node_id,
+            name,
+            html.escape(value, quote=True),
+        )
+        for node_id, name, value in properties
+    )
+    junit = (
+        '<testsuite tests="2" failures="0" errors="0" skipped="0">'
+        f"{testcases}</testsuite>"
+    ).encode("utf-8")
+
+    evidence = module.parse_pytest_junit_bytes(
+        junit,
+        stderr_payload=_signed_tripwire_sidecar("browser", ()),
+        command_id="browser",
+        require_tripwire_auth=True,
+    )
+
+    assert evidence.valid is True
+    assert evidence.reason == "PASS"
+    assert evidence.properties == tuple(
+        module.EvidenceProperty(node_id, name, value)
+        for node_id, name, value in properties
+    )
+
+
 def test_junit_parser_counts_failure_error_skip_xfail_and_xpass(tmp_path):
     module = importlib.import_module("scripts.run_interaction_acceptance")
     path = _write_junit(
@@ -3204,6 +3249,20 @@ def _structured_property_payload(kind, viewport):
             "viewport": viewport,
             "viewport_id": viewport_id,
         }
+    if kind == "search":
+        return {
+            "filter_height": 391,
+            "focus_ratios": [17.74, 17.74],
+            "minimum_target_height": 44,
+            "viewport": viewport,
+        }
+    if kind == "today":
+        return {
+            "metric_cards": 5,
+            "retry_height": 44,
+            "retry_width": 142,
+            "viewport": viewport,
+        }
     raise AssertionError(kind)
 
 
@@ -3212,6 +3271,8 @@ def _structured_node(kind, viewport_id):
         "focus": "test_release_focus_indicator_meets_three_to_one",
         "db": "test_release_teacher_action_persists_to_disposable_sqlite",
         "timeout": "test_first_chat_timeout_retains_draft_and_reuses_request_id_once",
+        "search": "test_release_search_filters_results_and_focus_stay_in_bounds",
+        "today": "test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds",
     }
     return f"{names[kind]}[{viewport_id}]"
 
@@ -3235,6 +3296,13 @@ def _suite_with_properties(module, suite, properties):
 
 
 def _structured_suite(module, kind, viewport_ids):
+    property_names = {
+        "focus": "task9.focus_measurement",
+        "db": "task9.db_action_evidence",
+        "timeout": "task9.timeout_evidence",
+        "search": "task8.search_geometry",
+        "today": "task7.today_metrics_geometry",
+    }
     properties = []
     for viewport_id in viewport_ids:
         width, height = (int(part) for part in viewport_id.split("x"))
@@ -3242,9 +3310,7 @@ def _structured_suite(module, kind, viewport_ids):
         properties.append(
             module.EvidenceProperty(
                 node_id=node_id,
-                name=f"task9.{kind if kind == 'focus' else 'db_action' if kind == 'db' else 'timeout'}_evidence"
-                if kind != "focus"
-                else "task9.focus_measurement",
+                name=property_names[kind],
                 value=__import__("json").dumps(
                     _structured_property_payload(
                         kind, {"width": width, "height": height}
@@ -3292,6 +3358,16 @@ def _valid_pending_report_record(module, tmp_path, *, tested_head=None):
                 module, "timeout", ("1024x576", "1280x720")
             ),
         },
+        "search": {
+            "all": _structured_suite(
+                module, "search", ("1024x768", "1440x900")
+            ),
+        },
+        "today": {
+            "all": _structured_suite(
+                module, "today", ("1024x768", "1440x900")
+            ),
+        },
     }
     suites.update(
         {
@@ -3305,7 +3381,7 @@ def _valid_pending_report_record(module, tmp_path, *, tested_head=None):
     )
     browser_properties = tuple(
         property_item
-        for kind in ("timeout", "focus", "db")
+        for kind in ("timeout", "focus", "db", "search", "today")
         for property_item in structured[kind]["all"].properties
     )
     suites["browser"] = _suite_with_properties(
@@ -3899,6 +3975,95 @@ def test_schema_v2_accepts_truthful_directory_scan_failure_as_safety(
     assert "TTS:SCANDIR:.:PermissionError" in markdown
 
 
+def test_schema_v2_retains_exact_p6_browser_geometry_evidence(tmp_path):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    record = _valid_pending_report_record(module, tmp_path)
+
+    properties = record["suite_evidence"]["browser"]["properties"]
+    by_name = {
+        name: tuple(
+            item["node_id"] for item in properties if item["name"] == name
+        )
+        for name in ("task7.today_metrics_geometry", "task8.search_geometry")
+    }
+
+    assert by_name == {
+        "task7.today_metrics_geometry": (
+            "test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds[1024x768]",
+            "test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds[1440x900]",
+        ),
+        "task8.search_geometry": (
+            "test_release_search_filters_results_and_focus_stay_in_bounds[1024x768]",
+            "test_release_search_filters_results_and_focus_stay_in_bounds[1440x900]",
+        ),
+    }
+    assert "TECHNICAL_PASS_HUMAN_DECISION_PENDING" in module.render_report_markdown(
+        record
+    )
+
+
+def test_p6_geometry_validators_reject_shape_viewport_nonfinite_and_fractional_count():
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    viewport = {"height": 768, "width": 1024}
+    search = _structured_property_payload("search", viewport)
+    today = _structured_property_payload("today", viewport)
+
+    assert module._validate_search_geometry_property(search, "1024x768") is True
+    assert (
+        module._validate_today_metrics_geometry_property(today, "1024x768")
+        is True
+    )
+
+    search_mutations = (
+        {**search, "unknown": True},
+        {**search, "viewport": {"height": 768, "width": 1025}},
+        {**search, "filter_height": float("inf")},
+        {**search, "focus_ratios": [17.74]},
+    )
+    today_mutations = (
+        {**today, "unknown": True},
+        {**today, "viewport": {"height": 768, "width": 1025}},
+        {**today, "retry_height": float("inf")},
+        {**today, "metric_cards": 5.0},
+    )
+
+    assert all(
+        module._validate_search_geometry_property(item, "1024x768") is False
+        for item in search_mutations
+    )
+    assert all(
+        module._validate_today_metrics_geometry_property(item, "1024x768")
+        is False
+        for item in today_mutations
+    )
+
+
+@pytest.mark.parametrize(
+    "property_name",
+    ("task7.today_metrics_geometry", "task8.search_geometry"),
+)
+@pytest.mark.parametrize("mutation", ("missing", "duplicate"))
+def test_schema_v2_rejects_p6_browser_geometry_multiplicity(
+    tmp_path, property_name, mutation
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    record = _json_clone_record(
+        module, _valid_pending_report_record(module, tmp_path)
+    )
+    properties = record["suite_evidence"]["browser"]["properties"]
+    matching = [item for item in properties if item["name"] == property_name]
+    assert len(matching) == 2
+    if mutation == "missing":
+        properties.remove(matching[-1])
+    elif mutation == "duplicate":
+        properties.append(dict(matching[-1]))
+    else:
+        raise AssertionError(mutation)
+
+    with pytest.raises(module.CliMisuseError):
+        module.render_report_markdown(record)
+
+
 def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     module = importlib.import_module("scripts.run_interaction_acceptance")
     del tmp_path
@@ -3915,8 +4080,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "3397e0da1af517e4d544ff34508b03a4aa708f060db41186f79e172feca02ed1"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "992c033c0c321b43d3b02b244bfcdcad55e4c43b410f33f3bfecacc1dd8c274c"
+    assert hashlib.sha256(json_bytes).hexdigest() == "4a84117e0888d5aa153764b6fb97c8a86c9423f0433e5e298d628b7ee588ffa7"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "b64c3a047c200b18298a87f975ec9f16caf23f9c692ef04599a1eb7d55f49e27"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):

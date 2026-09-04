@@ -282,6 +282,8 @@ _SUITE_COUNT_FIELDS = (
 )
 _STRUCTURED_PROPERTY_NAMES = frozenset(
     {
+        "task7.today_metrics_geometry",
+        "task8.search_geometry",
         "task9.focus_measurement",
         "task9.db_action_evidence",
         "task9.timeout_evidence",
@@ -1304,6 +1306,8 @@ def _structured_node_id(kind: str, viewport_id: str) -> str:
         "focus": "test_release_focus_indicator_meets_three_to_one",
         "db": "test_release_teacher_action_persists_to_disposable_sqlite",
         "timeout": "test_first_chat_timeout_retains_draft_and_reuses_request_id_once",
+        "search": "test_release_search_filters_results_and_focus_stay_in_bounds",
+        "today": "test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds",
     }
     return f"{test_names[kind]}[{viewport_id}]"
 
@@ -1321,8 +1325,18 @@ def _structured_property_expectations() -> dict[str, dict[str, tuple[str, ...]]]
         _structured_node_id("timeout", viewport)
         for viewport in ("1024x576", "1280x720")
     )
+    search_all = tuple(
+        _structured_node_id("search", viewport)
+        for viewport in ("1024x768", "1440x900")
+    )
+    today_all = tuple(
+        _structured_node_id("today", viewport)
+        for viewport in ("1024x768", "1440x900")
+    )
     return {
         "browser": {
+            "task7.today_metrics_geometry": today_all,
+            "task8.search_geometry": search_all,
             "task9.focus_measurement": focus_all,
             "task9.db_action_evidence": db_all,
             "task9.timeout_evidence": timeout_all,
@@ -1875,10 +1889,61 @@ def _validate_timeout_property(value: object, viewport_id: str) -> bool:
     )
 
 
+def _validate_search_geometry_property(value: object, viewport_id: str) -> bool:
+    if (
+        not isinstance(value, Mapping)
+        or set(value)
+        != {
+            "filter_height",
+            "focus_ratios",
+            "minimum_target_height",
+            "viewport",
+        }
+        or not _exact_viewport(value.get("viewport"), viewport_id)
+    ):
+        return False
+    _width, height = (int(part) for part in viewport_id.split("x"))
+    return bool(
+        _finite_number(value.get("filter_height"))
+        and 0 < value["filter_height"] <= height
+        and isinstance(value.get("focus_ratios"), list)
+        and len(value["focus_ratios"]) == 2
+        and all(
+            _finite_number(ratio) and ratio >= 3
+            for ratio in value["focus_ratios"]
+        )
+        and _finite_number(value.get("minimum_target_height"))
+        and 44 <= value["minimum_target_height"] <= height
+    )
+
+
+def _validate_today_metrics_geometry_property(
+    value: object, viewport_id: str
+) -> bool:
+    if (
+        not isinstance(value, Mapping)
+        or set(value)
+        != {"metric_cards", "retry_height", "retry_width", "viewport"}
+        or not _exact_viewport(value.get("viewport"), viewport_id)
+    ):
+        return False
+    width, height = (int(part) for part in viewport_id.split("x"))
+    return bool(
+        type(value.get("metric_cards")) is int
+        and value["metric_cards"] == 5
+        and _finite_number(value.get("retry_height"))
+        and 44 <= value["retry_height"] <= height
+        and _finite_number(value.get("retry_width"))
+        and 44 <= value["retry_width"] <= width
+    )
+
+
 def _validate_pending_structured_properties(
     suites: Mapping[str, SuiteEvidence],
 ) -> None:
     validators = {
+        "task7.today_metrics_geometry": _validate_today_metrics_geometry_property,
+        "task8.search_geometry": _validate_search_geometry_property,
         "task9.focus_measurement": _validate_focus_property,
         "task9.db_action_evidence": _validate_db_property,
         "task9.timeout_evidence": _validate_timeout_property,
