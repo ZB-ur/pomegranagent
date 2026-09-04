@@ -11,6 +11,12 @@ from tests.browser.conftest import is_exact_fixture_url
 PIN = "1234"
 VIEWPORTS = [{"width": 1024, "height": 576}, {"width": 1280, "height": 720}]
 VIEWPORT_IDS = ["1024x576", "1280x720"]
+P5_GATE_VIEWPORTS = [
+    *VIEWPORTS,
+    {"width": 1024, "height": 768},
+    {"width": 1440, "height": 900},
+]
+P5_GATE_VIEWPORT_IDS = [*VIEWPORT_IDS, "1024x768", "1440x900"]
 MONTHLY_VIEWPORTS = [{"width": 1024, "height": 768}, {"width": 1440, "height": 900}]
 MONTHLY_VIEWPORT_IDS = ["1024x768", "1440x900"]
 ROOT = Path(__file__).resolve().parents[2]
@@ -193,7 +199,7 @@ def test_child_create_retries_lost_response_with_one_resource(
     page.get_by_role("button", name="编辑：只创建一次", exact=True).wait_for()
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+@pytest.mark.parametrize("viewport", P5_GATE_VIEWPORTS, ids=P5_GATE_VIEWPORT_IDS)
 def test_children_management_is_labeled_strict_and_never_sends_delete(teacher_browser, viewport):
     calls = []
     rows = [{
@@ -586,7 +592,7 @@ def test_avatar_preview_upload_retry_save_and_remove_are_ordered_and_retained(
     )
 
 
-@pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
+@pytest.mark.parametrize("viewport", P5_GATE_VIEWPORTS, ids=P5_GATE_VIEWPORT_IDS)
 def test_child_deactivation_uses_named_dialog_and_real_undo(teacher_browser, viewport):
     state_calls = []
     rows = [{
