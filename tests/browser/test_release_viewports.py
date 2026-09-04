@@ -1077,7 +1077,7 @@ def test_release_search_filters_results_and_focus_stay_in_bounds(
         "end_reason": [],
         "keyword": None,
         "sort": "completed_desc",
-        "limit": 20,
+        "limit": 5,
     }]
     record_property(
         "task8.search_geometry",

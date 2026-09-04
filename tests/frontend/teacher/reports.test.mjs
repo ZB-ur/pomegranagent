@@ -177,7 +177,7 @@ test('search request builder normalizes an exact private POST snapshot', () => {
     end_reason: ['manual', 'complete'],
     keyword: '50%_\\ 私密词',
     sort: 'completed_asc',
-    limit: 20,
+    limit: 5,
   });
   assert.equal(Object.prototype.hasOwnProperty.call(snapshot, 'cursor'), false);
   assert.deepEqual(buildSearchRequest({
@@ -185,7 +185,7 @@ test('search request builder normalizes an exact private POST snapshot', () => {
     end_reason: [], keyword: '   ', sort: 'completed_desc',
   }), {
     child_id: null, date_from: null, date_to: null, analysis_status: [], review_status: [],
-    end_reason: [], keyword: null, sort: 'completed_desc', limit: 20,
+    end_reason: [], keyword: null, sort: 'completed_desc', limit: 5,
   });
 });
 
@@ -209,7 +209,7 @@ test('search request builder accepts the backend minimum calendar year', () => {
     end_reason: [],
     keyword: null,
     sort: 'completed_desc',
-    limit: 20,
+    limit: 5,
   });
 });
 

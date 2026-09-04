@@ -7,6 +7,7 @@ const OPAQUE_CURSOR = /^[A-Za-z0-9_-]{1,1024}$/;
 const SEARCH_ANALYSIS_STATUSES = Object.freeze(['pending', 'processing', 'succeeded', 'failed']);
 const SEARCH_REVIEW_STATUSES = Object.freeze(['pending', 'draft', 'confirmed', 'unavailable']);
 const SEARCH_END_REASONS = Object.freeze(['max_rounds', 'complete', 'manual']);
+const SEARCH_PAGE_LIMIT = 5;
 
 
 function invalid(cause) {
@@ -203,7 +204,7 @@ export function buildSearchRequest(value) {
     end_reason: canonicalFilterArray(form.end_reason, SEARCH_END_REASONS),
     keyword: keyword || null,
     sort: form.sort,
-    limit: 20,
+    limit: SEARCH_PAGE_LIMIT,
   };
 }
 

@@ -411,7 +411,7 @@ def test_search_filters_private_post_and_review_anchor_are_canonical(teacher_bro
             "end_reason": ["complete", "manual"],
             "keyword": "50%_\\ 私密词",
             "sort": "completed_asc",
-            "limit": 20,
+            "limit": 5,
         },
     }
     assert "私密词" not in page.url
@@ -493,7 +493,7 @@ def test_search_append_failure_retains_rows_and_retries_frozen_body(
     expected_append = {
         "child_id": None, "date_from": None, "date_to": None,
         "analysis_status": [], "review_status": [], "end_reason": [],
-        "keyword": None, "sort": "completed_desc", "limit": 20,
+        "keyword": None, "sort": "completed_desc", "limit": 5,
         "cursor": "Cursor_42",
     }
     assert search_bodies[1] == expected_append
