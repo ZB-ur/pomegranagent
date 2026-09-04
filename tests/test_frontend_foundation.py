@@ -123,7 +123,10 @@ def test_teacher_composes_safe_management_and_reports_without_legacy_routes():
     assert "alert(" not in management + reports
     assert "error.message" not in app + router + management + reports
     assert "innerHTML" not in management + reports
-    assert "globalThis" not in management + reports
+    assert "globalThis" not in reports
+    assert management.count("globalThis") == 2
+    assert "globalThis.URL.createObjectURL(next)" in management
+    assert "globalThis.URL.revokeObjectURL(previewURL)" in management
     assert "createRequestId: () => window.crypto.randomUUID()" in app
 
 

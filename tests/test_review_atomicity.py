@@ -16,6 +16,7 @@ from app.backend.services import reviews
 
 
 NOW = datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc)
+AVATAR = "/api/media/avatars/11111111-1111-4111-8111-111111111111"
 
 
 def _unlock(client) -> None:
@@ -46,7 +47,7 @@ def _seed_reviewable_conversation(
     child = models.Child(
         name=f"小雨-{ended_at.minute}-{job_status}",
         nickname="雨雨",
-        avatar="rain.png",
+        avatar=AVATAR,
         active=child_active,
     )
     db_session.add(child)
@@ -253,7 +254,7 @@ def test_teacher_queue_uses_job_matrix_frozen_counts_sort_and_historical_child(c
             "id": newest.child_id,
             "name": f"小雨-{(NOW - timedelta(minutes=1)).minute}-succeeded",
             "nickname": "雨雨",
-            "avatar": "rain.png",
+            "avatar": AVATAR,
         },
         "date": "2026-08-23",
         "started_at": "2026-08-23T08:54:00Z",
