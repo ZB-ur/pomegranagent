@@ -74,6 +74,43 @@ FROZEN_LIMITATIONS = (
         "TAP stdout is parsed as authoritative suite evidence."
     ),
 )
+FIGMA_SCOPE_WAIVER_TEXT = (
+    "# Figma full-product interaction reference\n\n"
+    "前向设计真源；历史 Lovable 原型交付已由用户豁免。\n\n"
+    "- Review date: 2026-09-02\n"
+    "- Verification date: 2026-09-05\n"
+    "- Design version: full-product-reviewed-v1\n"
+    "- File URL: https://www.figma.com/design/czJ3EIKcXyowhfzBuQt32S\n"
+    "- File key: czJ3EIKcXyowhfzBuQt32S\n"
+    "- Editor type: figma\n"
+    "- Scope: child-and-teacher-full-product\n"
+    "- Page count: required=16; auxiliary=2\n"
+    "- Required pages: 0:1=00 Cover & Handoff | 1:2=01 Foundations | 1:3=02 Components | 1:4=10 Child · Core States | 1:5=11 Child · Recovery & Teacher Help | 1:6=12 Child · Prototype Flows | 1:7=20 Teacher · Shell & Auth | 1:8=21 Teacher · Today | 1:9=22 Teacher · Children | 1:10=23 Teacher · Ducks | 1:11=24 Teacher · Roster | 1:12=25 Teacher · Review | 1:13=26 Teacher · Growth | 1:14=27 Teacher · Search | 1:15=30 Cross-product Flows | 1:16=90 Code Mapping & Acceptance\n"
+    "- Auxiliary pages: 641:2=99 Deprecated Components | 665:2=98 Internal Feature Sources\n"
+    "- Viewports: child=1024x576,1280x720; teacher=1024x768,1440x900\n"
+    "- Child prototype paths: 93:4->93:133=happy-path | 93:143->93:220=retry-send | 93:230->93:288=teacher-recovery | 93:298->93:386=completion\n"
+    "- Teacher prototype paths: 192:4->192:60=auth-to-today | 259:197->192:349=review-save-confirm | 192:504->261:431=child-deactivate-restore | 262:317->262:683=duck-management | 263:450->263:955=roster-save-retry | 584:1199->584:2222=monthly-roster | 264:550->264:698=growth | 265:606->265:774=search\n"
+    "- Foundations: 35:2=Foundation System / Approved B+A\n"
+    "- Shared components: 70:46=Child/Shell | 533:435=Child/PetOrb | 553:686=Child/ConversationPanel | 104:121=Teacher/Shell | 126:115=Teacher/Dialog | 655:928=Teacher/AvatarUploader\n"
+    "- Code mapping: 125:2=Screen Inventory + Node Map | 125:125=Code Mapping + Delta | 125:183=Motion Asset Handoff | 125:249=Acceptance + Release Gate | 147:2440=Exact Review DTO Field Map | 679:2=Future Feature Handoff\n"
+    "- Data declaration: fictional-only\n"
+    "- Open release items: real-provider-UAT; physical-microphone=HUMAN_UAT_REQUIRED; motion-assets=PLACEHOLDER_REPLACEMENT_AFTER_UAT\n"
+    "- Lovable deliverable: WAIVED\n"
+    "- Review result: ACCEPTED\n"
+    "- Review authority: user-and-release-owner\n"
+    "- Evidence plans: 2026-09-01-child-vertical-slice.md@1e200be7b6b3b6316e15252cc086b5ce13f65487c9e4a1a3cc23b18862d510a5, 2026-09-01-teacher-shell-today-vertical-slice.md@259636693a1de958dad481a744f579989123261a55fee5e8a2a68a878269661a, 2026-09-01-teacher-reports-vertical-slice.md@de7b9ebf16afc38c16ae4d523909268b07dc669aa3dc21d02e588e91c6bc2d1f\n"
+)
+FIGMA_EVIDENCE_PLAN_SHA256 = {
+    "2026-09-01-child-vertical-slice.md": (
+        "1e200be7b6b3b6316e15252cc086b5ce13f65487c9e4a1a3cc23b18862d510a5"
+    ),
+    "2026-09-01-teacher-shell-today-vertical-slice.md": (
+        "259636693a1de958dad481a744f579989123261a55fee5e8a2a68a878269661a"
+    ),
+    "2026-09-01-teacher-reports-vertical-slice.md": (
+        "de7b9ebf16afc38c16ae4d523909268b07dc669aa3dc21d02e588e91c6bc2d1f"
+    ),
+}
 
 COMMAND_TIMEOUTS = {
     "runner": 300,
@@ -2370,7 +2407,9 @@ def _completed_missing_lovable_state_is_valid(value: object) -> bool:
     )
 
 
-def _verified_lovable_reference_is_valid(artifact_root: Path | None) -> bool:
+def _verified_legacy_lovable_reference_is_valid(
+    artifact_root: Path | None,
+) -> bool:
     if artifact_root is None:
         return False
     root = Path(artifact_root)
@@ -2437,6 +2476,63 @@ def _verified_lovable_reference_is_valid(artifact_root: Path | None) -> bool:
         and observations.strip() == observations
         and len(observations) <= 500
     )
+
+
+def _verified_figma_scope_waiver_is_valid(
+    artifact_root: Path | None,
+) -> bool:
+    if artifact_root is None:
+        return False
+    root = Path(artifact_root)
+    if root.parent.name != "acceptance" or root.parent.parent.name != "artifacts":
+        return False
+    repo_root = root.parents[2]
+    docs_root = repo_root / "docs"
+    superpowers_root = docs_root / "superpowers"
+    plans_root = superpowers_root / "plans"
+    figma_root = docs_root / "figma"
+    reference = figma_root / "prototype-reference.md"
+    expected_reference = FIGMA_SCOPE_WAIVER_TEXT.encode("utf-8")
+    try:
+        if any(
+            not stat.S_ISDIR(os.lstat(directory).st_mode)
+            for directory in (
+                docs_root,
+                superpowers_root,
+                plans_root,
+                figma_root,
+            )
+        ):
+            return False
+        reference_stat = os.lstat(reference)
+        if (
+            not stat.S_ISREG(reference_stat.st_mode)
+            or reference_stat.st_size != len(expected_reference)
+        ):
+            return False
+        payload = reference.read_bytes()
+        if payload != expected_reference:
+            return False
+        for name, expected_sha256 in FIGMA_EVIDENCE_PLAN_SHA256.items():
+            plan = plans_root / name
+            plan_stat = os.lstat(plan)
+            if (
+                not stat.S_ISREG(plan_stat.st_mode)
+                or plan_stat.st_size <= 0
+                or plan_stat.st_size > 65536
+            ):
+                return False
+            if hashlib.sha256(plan.read_bytes()).hexdigest() != expected_sha256:
+                return False
+    except OSError:
+        return False
+    return True
+
+
+def _verified_lovable_reference_is_valid(artifact_root: Path | None) -> bool:
+    return _verified_legacy_lovable_reference_is_valid(
+        artifact_root
+    ) or _verified_figma_scope_waiver_is_valid(artifact_root)
 
 
 def _completed_lovable_state_is_valid(

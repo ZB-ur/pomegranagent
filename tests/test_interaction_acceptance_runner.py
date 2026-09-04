@@ -6013,6 +6013,35 @@ def _valid_lovable_reference_text(tested_head):
     )
 
 
+def _valid_figma_scope_waiver_text():
+    return (
+        "# Figma full-product interaction reference\n\n"
+        "前向设计真源；历史 Lovable 原型交付已由用户豁免。\n\n"
+        "- Review date: 2026-09-02\n"
+        "- Verification date: 2026-09-05\n"
+        "- Design version: full-product-reviewed-v1\n"
+        "- File URL: https://www.figma.com/design/czJ3EIKcXyowhfzBuQt32S\n"
+        "- File key: czJ3EIKcXyowhfzBuQt32S\n"
+        "- Editor type: figma\n"
+        "- Scope: child-and-teacher-full-product\n"
+        "- Page count: required=16; auxiliary=2\n"
+        "- Required pages: 0:1=00 Cover & Handoff | 1:2=01 Foundations | 1:3=02 Components | 1:4=10 Child · Core States | 1:5=11 Child · Recovery & Teacher Help | 1:6=12 Child · Prototype Flows | 1:7=20 Teacher · Shell & Auth | 1:8=21 Teacher · Today | 1:9=22 Teacher · Children | 1:10=23 Teacher · Ducks | 1:11=24 Teacher · Roster | 1:12=25 Teacher · Review | 1:13=26 Teacher · Growth | 1:14=27 Teacher · Search | 1:15=30 Cross-product Flows | 1:16=90 Code Mapping & Acceptance\n"
+        "- Auxiliary pages: 641:2=99 Deprecated Components | 665:2=98 Internal Feature Sources\n"
+        "- Viewports: child=1024x576,1280x720; teacher=1024x768,1440x900\n"
+        "- Child prototype paths: 93:4->93:133=happy-path | 93:143->93:220=retry-send | 93:230->93:288=teacher-recovery | 93:298->93:386=completion\n"
+        "- Teacher prototype paths: 192:4->192:60=auth-to-today | 259:197->192:349=review-save-confirm | 192:504->261:431=child-deactivate-restore | 262:317->262:683=duck-management | 263:450->263:955=roster-save-retry | 584:1199->584:2222=monthly-roster | 264:550->264:698=growth | 265:606->265:774=search\n"
+        "- Foundations: 35:2=Foundation System / Approved B+A\n"
+        "- Shared components: 70:46=Child/Shell | 533:435=Child/PetOrb | 553:686=Child/ConversationPanel | 104:121=Teacher/Shell | 126:115=Teacher/Dialog | 655:928=Teacher/AvatarUploader\n"
+        "- Code mapping: 125:2=Screen Inventory + Node Map | 125:125=Code Mapping + Delta | 125:183=Motion Asset Handoff | 125:249=Acceptance + Release Gate | 147:2440=Exact Review DTO Field Map | 679:2=Future Feature Handoff\n"
+        "- Data declaration: fictional-only\n"
+        "- Open release items: real-provider-UAT; physical-microphone=HUMAN_UAT_REQUIRED; motion-assets=PLACEHOLDER_REPLACEMENT_AFTER_UAT\n"
+        "- Lovable deliverable: WAIVED\n"
+        "- Review result: ACCEPTED\n"
+        "- Review authority: user-and-release-owner\n"
+        "- Evidence plans: 2026-09-01-child-vertical-slice.md@1e200be7b6b3b6316e15252cc086b5ce13f65487c9e4a1a3cc23b18862d510a5, 2026-09-01-teacher-shell-today-vertical-slice.md@259636693a1de958dad481a744f579989123261a55fee5e8a2a68a878269661a, 2026-09-01-teacher-reports-vertical-slice.md@de7b9ebf16afc38c16ae4d523909268b07dc669aa3dc21d02e588e91c6bc2d1f\n"
+    )
+
+
 @pytest.mark.parametrize(
     ("reference_kind", "caller_value", "expected_status"),
     (
@@ -6020,6 +6049,66 @@ def _valid_lovable_reference_text(tested_head):
         pytest.param("malformed", True, "MISSING", id="caller-true-malformed"),
         pytest.param("symlink", None, "MISSING", id="is-file-symlink"),
         pytest.param("valid", False, "PROVIDED_OR_WAIVED", id="caller-false-valid"),
+        pytest.param(
+            "figma-valid",
+            None,
+            "PROVIDED_OR_WAIVED",
+            id="verified-figma-scope-waiver",
+        ),
+        pytest.param(
+            "figma-malformed",
+            None,
+            "MISSING",
+            id="malformed-figma-scope-waiver",
+        ),
+        pytest.param(
+            "figma-symlink",
+            None,
+            "MISSING",
+            id="figma-reference-symlink",
+        ),
+        pytest.param(
+            "figma-arbitrary-key",
+            None,
+            "MISSING",
+            id="figma-arbitrary-key",
+        ),
+        pytest.param(
+            "figma-control-url",
+            None,
+            "MISSING",
+            id="figma-control-character-url",
+        ),
+        pytest.param(
+            "figma-plan-missing",
+            None,
+            "MISSING",
+            id="figma-plan-missing",
+        ),
+        pytest.param(
+            "figma-plan-empty",
+            None,
+            "MISSING",
+            id="figma-plan-empty",
+        ),
+        pytest.param(
+            "figma-plan-tampered",
+            None,
+            "MISSING",
+            id="figma-plan-tampered",
+        ),
+        pytest.param(
+            "figma-plan-symlink",
+            None,
+            "MISSING",
+            id="figma-plan-symlink",
+        ),
+        pytest.param(
+            "figma-plans-dir-symlink",
+            None,
+            "MISSING",
+            id="figma-plans-directory-symlink",
+        ),
         pytest.param("missing", None, "MISSING", id="derived-missing-control"),
     ),
 )
@@ -6035,7 +6124,33 @@ def test_run_acceptance_derives_lovable_state_from_strict_reference(
     artifact_root = repo_root / "artifacts" / "acceptance" / run_id
     stable = FakeRunOneResources()
     reference = repo_root / "docs" / "lovable" / "prototype-reference.md"
-    if reference_kind != "missing":
+    figma_reference = repo_root / "docs" / "figma" / "prototype-reference.md"
+    if reference_kind.startswith("figma-"):
+        source_plans = (
+            Path(__file__).resolve().parents[1]
+            / "docs"
+            / "superpowers"
+            / "plans"
+        )
+        plans_parent = repo_root / "docs" / "superpowers"
+        plans_parent.mkdir(parents=True)
+        plans = plans_parent / "plans"
+        if reference_kind == "figma-plans-dir-symlink":
+            plan_destination = tmp_path / "external-figma-plans"
+            plan_destination.mkdir()
+            plans.symlink_to(plan_destination, target_is_directory=True)
+        else:
+            plans.mkdir()
+            plan_destination = plans
+        plan_names = (
+            "2026-09-01-child-vertical-slice.md",
+            "2026-09-01-teacher-shell-today-vertical-slice.md",
+            "2026-09-01-teacher-reports-vertical-slice.md",
+        )
+        for name in plan_names:
+            (plan_destination / name).write_bytes((source_plans / name).read_bytes())
+        figma_reference.parent.mkdir(parents=True)
+    if reference_kind in {"malformed", "symlink", "valid"}:
         reference.parent.mkdir(parents=True)
     if reference_kind == "malformed":
         reference.write_text("not the frozen nine-line reference\n", encoding="utf-8")
@@ -6049,6 +6164,39 @@ def test_run_acceptance_derives_lovable_state_from_strict_reference(
         reference.write_text(
             _valid_lovable_reference_text(stable.git_head), encoding="utf-8"
         )
+    elif reference_kind.startswith("figma-"):
+        figma_text = _valid_figma_scope_waiver_text()
+        if reference_kind == "figma-malformed":
+            figma_text = figma_text.replace(
+                "- Lovable deliverable: WAIVED",
+                "- Lovable deliverable: PENDING",
+            )
+        elif reference_kind == "figma-arbitrary-key":
+            figma_text = figma_text.replace(
+                "czJ3EIKcXyowhfzBuQt32S", "AAAAAAAAAAAAAAAAAAAAAA"
+            )
+        elif reference_kind == "figma-control-url":
+            figma_text = figma_text.replace("www.figma.com", "www.fig\tma.com")
+        figma_reference.write_text(figma_text, encoding="utf-8")
+        if reference_kind == "figma-symlink":
+            target = tmp_path / "valid-figma-reference-target.md"
+            target.write_text(figma_text, encoding="utf-8")
+            figma_reference.unlink()
+            figma_reference.symlink_to(target)
+        elif reference_kind == "figma-plan-missing":
+            (plans / plan_names[0]).unlink()
+        elif reference_kind == "figma-plan-empty":
+            (plans / plan_names[0]).write_bytes(b"")
+        elif reference_kind == "figma-plan-tampered":
+            (plans / plan_names[0]).write_bytes(
+                (plans / plan_names[0]).read_bytes() + b"\n# tampered\n"
+            )
+        elif reference_kind == "figma-plan-symlink":
+            plan = plans / plan_names[0]
+            target = tmp_path / "valid-figma-plan-target.md"
+            target.write_bytes(plan.read_bytes())
+            plan.unlink()
+            plan.symlink_to(target)
     elif reference_kind != "missing":
         raise AssertionError(reference_kind)
 
@@ -6090,6 +6238,15 @@ def test_run_acceptance_derives_lovable_state_from_strict_reference(
         if expected_status == "PROVIDED_OR_WAIVED"
         else "A blank or zero-credit project is not completion evidence."
     )
+def test_repository_figma_scope_waiver_matches_the_frozen_review_snapshot():
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    repo_root = Path(__file__).resolve().parents[1]
+    artifact_root = repo_root / "artifacts" / "acceptance" / "validation-probe"
+    reference = repo_root / "docs" / "figma" / "prototype-reference.md"
+
+    assert reference.read_text(encoding="utf-8") == _valid_figma_scope_waiver_text()
+    assert module.FIGMA_SCOPE_WAIVER_TEXT == _valid_figma_scope_waiver_text()
+    assert module._verified_figma_scope_waiver_is_valid(artifact_root) is True
 
 
 def test_unit7_run_orchestration_writes_ignored_canonical_artifacts(tmp_path):
@@ -6862,6 +7019,76 @@ def _completed_full_with_verified_lovable_reference(module, tmp_path):
     }
     _refresh_completed_report_files(module, relocated_root, record)
     return relocated_root, record, reference
+
+
+def _completed_full_with_verified_figma_scope_waiver(module, tmp_path):
+    artifact_root, record = _completed_full_lovable_missing_artifact_tree(
+        module, tmp_path, safety=False
+    )
+    repo_root = tmp_path / "relocated-figma-repository"
+    relocated_root = repo_root / "artifacts" / "acceptance" / record["run_id"]
+    relocated_root.parent.mkdir(parents=True)
+    artifact_root.rename(relocated_root)
+    _rewrite_recorded_pytest_junit_roots(record, relocated_root)
+
+    source_repo = Path(__file__).resolve().parents[1]
+    reference = repo_root / "docs" / "figma" / "prototype-reference.md"
+    reference.parent.mkdir(parents=True)
+    reference.write_text(_valid_figma_scope_waiver_text(), encoding="utf-8")
+    plans = repo_root / "docs" / "superpowers" / "plans"
+    plans.mkdir(parents=True)
+    for name in module.FIGMA_EVIDENCE_PLAN_SHA256:
+        shutil.copyfile(source_repo / "docs" / "superpowers" / "plans" / name, plans / name)
+
+    record["lovable"].update(
+        {
+            "completion_or_scope_waiver": True,
+            "project_status": "PROVIDED_OR_WAIVED",
+            "status": "PROVIDED_OR_WAIVED",
+            "zero_credit_blocker": None,
+        }
+    )
+    record["decision"] = {
+        "final_go": False,
+        "outcome": "TECHNICAL_PASS_HUMAN_DECISION_PENDING",
+        "reasons": ["HUMAN_AUTHORITY_REQUIRED"],
+        "runner_process_exit": 2,
+    }
+    _refresh_completed_report_files(module, relocated_root, record)
+    return relocated_root, record, reference, plans
+
+
+@pytest.mark.parametrize("mutation", ("reference", "plan"))
+def test_completed_report_revalidates_verified_figma_scope_waiver(
+    tmp_path, mutation
+):
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    artifact_root, _record, reference, plans = (
+        _completed_full_with_verified_figma_scope_waiver(module, tmp_path)
+    )
+    control = tmp_path / f"rendered-figma-waiver-{mutation}.md"
+
+    assert module.render_completed_report(
+        artifact_root / "report.json", control
+    ) == control
+
+    if mutation == "reference":
+        reference.write_text(
+            _valid_figma_scope_waiver_text().replace(
+                "- Review result: ACCEPTED", "- Review result: PENDING"
+            ),
+            encoding="utf-8",
+        )
+    elif mutation == "plan":
+        plan = plans / next(iter(module.FIGMA_EVIDENCE_PLAN_SHA256))
+        plan.write_bytes(plan.read_bytes() + b"\n# tampered\n")
+    else:
+        raise AssertionError(mutation)
+
+    rejected = tmp_path / f"rejected-mutated-figma-waiver-{mutation}.md"
+    with pytest.raises(module.CliMisuseError, match="completed report"):
+        module.render_completed_report(artifact_root / "report.json", rejected)
+    assert not rejected.exists()
 
 
 @pytest.mark.parametrize("outcome", ("technical", "safety"))
