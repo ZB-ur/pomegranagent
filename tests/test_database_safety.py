@@ -348,6 +348,7 @@ def test_uncaught_tripwire_probe_exposes_exact_junit_types_and_frames(
                 sentinel = object()
                 fake_module = types.SimpleNamespace(
                     capture_resource_snapshots=lambda *_args: sentinel,
+                    assert_safe_resource_snapshots=lambda snapshots, *, phase: None,
                     REAL_DATABASE_PATH=None,
                     REAL_LOG_PATH=None,
                     REAL_TTS_CACHE_PATH=None,
