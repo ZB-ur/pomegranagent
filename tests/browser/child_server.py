@@ -11,6 +11,7 @@ import os
 import socket
 import sqlite3
 import subprocess
+import tempfile
 import types
 from collections.abc import Callable, Iterable, Mapping
 from typing import NamedTuple
@@ -21,12 +22,17 @@ SAFE_EXECUTION_ENV = ("PATH", "LANG", "LC_ALL", "TMPDIR", "TZ", "SYSTEMROOT")
 REAL_DATABASE_PATH = ROOT / "data" / "duck_diary.db"
 REAL_LOG_PATH = ROOT / "logs" / "app.log"
 REAL_TTS_CACHE_PATH = ROOT / "data" / "tts_cache"
+REAL_MEDIA_ROOT = ROOT / "data" / "media"
 
 
 class ResourceSnapshots(NamedTuple):
     database: str | None
+    database_wal: str | None
+    database_shm: str | None
+    database_logical: str | None
     log: str | None
     tts_cache: str | None
+    media: str | None
 
 
 class FreshMainImportResult:
@@ -224,6 +230,9 @@ def build_browser_environment(
         {
             "APP_DB_MODE": "app",
             "APP_DB_PATH": str(database),
+            "APP_LOG_PATH": str((runtime / "logs/app.log").resolve()),
+            "APP_MEDIA_ROOT": str((runtime / "media").resolve()),
+            "APP_TTS_CACHE_PATH": str((runtime / "tts-cache").resolve()),
             "BROWSER_PORT": str(int(port)),
             "BROWSER_LOG_DIR": str((runtime / "logs").resolve()),
             "BROWSER_TTS_CACHE_DIR": str((runtime / "tts-cache").resolve()),
@@ -248,9 +257,16 @@ def logical_sqlite_digest(
     resolved = path.resolve()
     if not resolved.exists():
         return None
-    database_uri = f"{resolved.as_uri()}?mode=ro"
-    with connect(database_uri, uri=True) as connection:
-        snapshot = "\n".join(connection.iterdump()).encode("utf-8")
+    with tempfile.TemporaryDirectory(prefix="browser-sqlite-shadow-") as temporary:
+        shadow = Path(temporary) / resolved.name
+        shadow.write_bytes(resolved.read_bytes())
+        for suffix in ("-wal", "-shm"):
+            source = Path(f"{resolved}{suffix}")
+            if source.exists():
+                Path(f"{shadow}{suffix}").write_bytes(source.read_bytes())
+        database_uri = f"{shadow.as_uri()}?mode=ro"
+        with connect(database_uri, uri=True) as connection:
+            snapshot = "\n".join(connection.iterdump()).encode("utf-8")
     return hashlib.sha256(snapshot).hexdigest()
 
 
@@ -276,13 +292,19 @@ def capture_resource_snapshots(
     database: Path,
     log: Path,
     tts_cache: Path,
+    media: Path,
     *,
     connect: Callable[..., sqlite3.Connection] = sqlite3.connect,
 ) -> ResourceSnapshots:
+    logical = logical_sqlite_digest(database, connect=connect)
     return ResourceSnapshots(
-        logical_sqlite_digest(database, connect=connect),
+        file_digest(database),
+        file_digest(Path(f"{database}-wal")),
+        file_digest(Path(f"{database}-shm")),
+        logical,
         file_digest(log),
         directory_digest(tts_cache),
+        directory_digest(media),
     )
 
 
@@ -336,15 +358,14 @@ def _install_external_tripwires(main_module) -> None:
 
 
 def run_server() -> None:
-    browser_log_dir = Path(os.environ["BROWSER_LOG_DIR"]).resolve()
+    browser_log_dir = Path(os.environ["APP_LOG_PATH"]).resolve().parent
+    assert browser_log_dir == Path(os.environ["BROWSER_LOG_DIR"]).resolve()
     browser_log_dir.mkdir(parents=True, exist_ok=True)
-    tts_cache = Path(os.environ["BROWSER_TTS_CACHE_DIR"]).resolve()
+    tts_cache = Path(os.environ["APP_TTS_CACHE_PATH"]).resolve()
+    assert tts_cache == Path(os.environ["BROWSER_TTS_CACHE_DIR"]).resolve()
     tts_cache.mkdir(parents=True, exist_ok=True)
-    runtime_root = Path(os.environ["APP_DB_PATH"]).resolve().parent
+    Path(os.environ["APP_MEDIA_ROOT"]).resolve().mkdir(parents=True, exist_ok=True)
     os.environ["APP_BUSINESS_TIMEZONE"] = "Asia/Shanghai"
-    os.environ["APP_LOG_PATH"] = str((browser_log_dir / "app.log").resolve())
-    os.environ["APP_MEDIA_ROOT"] = str((runtime_root / "media").resolve())
-    os.environ["APP_TTS_CACHE_PATH"] = str(tts_cache)
     result = fresh_import_main(browser_log_dir=browser_log_dir)
     main_module = result.module
     _install_external_tripwires(main_module)

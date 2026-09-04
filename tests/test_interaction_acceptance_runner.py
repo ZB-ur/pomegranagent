@@ -154,6 +154,15 @@ def test_full_suite_argv_is_explicit_sorted_and_forbidden_targets_are_absent(tmp
         "tests/test_deactivation.py",
         "tests/test_conversation_history.py",
         "tests/test_api.py",
+        "tests/test_server_capability_contracts.py",
+        "tests/test_schema_migrations.py",
+        "tests/test_business_time.py",
+        "tests/test_runtime_context.py",
+        "tests/test_resource_idempotency.py",
+        "tests/test_avatar_media.py",
+        "tests/test_weekly_reports.py",
+        "tests/test_conversation_search.py",
+        "tests/test_demo_seed.py",
         "tests/e2e.py",
     )
     child_targets = tuple(
@@ -780,6 +789,7 @@ def _run_clean_git(repo: Path, *args: str) -> subprocess.CompletedProcess:
 
 def _make_resource_repository(root: Path) -> None:
     (root / "data" / "tts_cache").mkdir(parents=True)
+    (root / "data" / "media").mkdir()
     (root / "logs").mkdir()
     (root / ".workbuddy" / "memory").mkdir(parents=True)
     (root / "docs" / "superpowers" / "specs").mkdir(parents=True)
@@ -790,6 +800,7 @@ def _make_resource_repository(root: Path) -> None:
         connection.execute("INSERT INTO protected(value) VALUES ('stable')")
     (root / "logs" / "app.log").write_bytes(b"stable-log")
     (root / "data" / "tts_cache" / "voice.bin").write_bytes(b"voice")
+    (root / "data" / "media" / "avatar.webp").write_bytes(b"avatar")
     (root / ".workbuddy" / "memory" / "2026-08-22.md").write_text("memory\n")
     (
         root
@@ -828,6 +839,10 @@ def test_capture_resources_is_total_and_tracks_git_and_all_protected_paths(tmp_p
     assert initial.unsafe_reasons == ()
     assert len(initial.git_head) == 40
     assert initial.git_porcelain == b""
+    assert initial.media.root.kind is module.FileKind.DIRECTORY
+    assert tuple(entry.relative_path for entry in initial.media.entries) == (
+        "avatar.webp",
+    )
     assert tuple(path.relative_path for path in initial.user_paths) == (
         ".workbuddy/memory/2026-08-22.md",
         "docs/superpowers/specs/2026-08-23-interaction-stabilization-design.md",
@@ -2364,21 +2379,164 @@ EXPECTED_TODAY_RETRY_SELECTOR_ROWS = (
 )
 
 
+_EXPECTED_SELECTOR_MANIFEST_TEXT = r"""backend | ^test_pytest_application_logging_uses_only_the_disposable_runtime_file$ | 1 | 1,14
+backend | ^test_pytest_subprocess_does_not_change_application_db$ | 1 | 1
+backend | ^test_review_atomic_pytest_subprocess_does_not_change_the_real_application_log$ | 1 | 1
+backend | ^test_health_returns_frozen_runtime_versions$ | 1 | 2
+backend | ^test_version_manifest_is_no_store$ | 1 | 2
+backend | ^test_teacher_navigation_is_blocked_until_runtime_ready$ | 1 | 2
+backend | ^test_teacher_navigation_requires_both_runtime_and_authentication_and_can_relock$ | 1 | 2
+backend | ^test_chat_writes_one_pair_after_ai_success$ | 1 | 3
+backend | ^test_duplicate_request_replays_stored_pair_without_a_second_ai_call$ | 1 | 3
+backend | ^test_internal_chat_fault_marks_current_claim_failed_and_allows_retry\[(commit|context)\]$ | 2 | 3,4,14
+backend | ^test_fixed_max_round_commit_fault_marks_current_claim_failed_and_allows_retry$ | 1 | 3,7,14
+backend | ^test_complete_replays_the_frozen_snapshot_without_a_second_job$ | 1 | 3,7
+backend | ^test_completion_write_failure_rolls_back_the_job_and_end_state\[(commit|flush)\]$ | 2 | 3,7,14
+backend | ^test_process_builds_the_frozen_input_outside_a_database_session_and_projects_once$ | 1 | 7
+backend | ^test_restart_recovers_only_expired_processing_jobs_and_preserves_attempts$ | 1 | 7
+backend | ^test_failure_uses_bounded_backoff_then_a_sanitized_terminal_state\[(1-pending-1|2-pending-5|3-failed-0)\]$ | 3 | 7,14
+backend | ^test_teacher_retry_requires_session_and_reuses_the_failed_job$ | 1 | 7
+backend | ^test_teacher_retry_has_frozen_pending_and_terminal_state_contracts\[(pending-2-200-None|processing-1-409-ANALYSIS_IN_PROGRESS|succeeded-1-409-ANALYSIS_ALREADY_SUCCEEDED)\]$ | 3 | 7
+backend | ^test_lifespan_uses_the_injected_single_worker_for_health_and_teardown$ | 1 | 7
+backend | ^test_auto_generates_five_rotating_weekday_pairs_and_replays_first_snapshot$ | 1 | 3,11
+backend | ^test_draft_review_replaces_the_full_document_and_refetches_identically$ | 1 | 3,8
+backend | ^test_confirm_requires_complete_reasoned_scores_then_leaves_every_queue$ | 1 | 8
+backend | ^test_reliable_end_to_end_flow$ | 1 | 7,8,14
+backend | ^test_teacher_queue_uses_job_matrix_frozen_counts_sort_and_historical_child$ | 1 | 9
+backend | ^test_succeeded_detail_has_one_complete_ordered_document_or_a_stable_corruption_error$ | 1 | 9
+backend | ^test_child_deactivation_preserves_history_and_reactivation_restores_today_visibility$ | 1 | 12
+backend | ^test_resource_state_routes_are_locked_and_hard_delete_is_an_auth_first_tombstone$ | 1 | 12
+backend | ^test_hard_delete_tombstones_have_stable_missing_codes_and_no_target_lookup_or_write$ | 1 | 12
+backend | ^test_resource_route_inventory_flattens_direct_and_included_routes_and_rejects_legacy_parameter_aliases$ | 1 | 12
+backend | ^test_teacher_composes_safe_management_and_reports_without_legacy_routes$ | 1 | 12
+shared_node | ^version mismatch enters maintenance before any business request$ | 1 | 2
+shared_node | ^bootstrapVersionGate and ready share one pending successful gate promise$ | 1 | 2
+shared_node | ^caller abort stays AbortError while timeout becomes REQUEST_TIMEOUT$ | 1 | 3,14
+child_node | ^unbound and matching bound drafts become child-retryable without changing their request identity$ | 1 | 5
+child_node | ^a COMPLETE_FAILED recovery reload returns to saving_conversation at the same remote boundary$ | 1 | 5,7
+child_node | ^pending completion keeps the remote completion boundary and never reopens chat$ | 1 | 5,7
+child_node | ^ended chat saved through the machine restores only the completion path$ | 1 | 5,7
+child_node | ^uses the exact 1500 ms silence boundary and replaces one live timer on results and speech end$ | 1 | 10
+child_node | ^a timeout before deferred loader invocation falls back safely and ignores its late blob$ | 1 | 10
+teacher_node | ^Today validates every queue DTO shape, fixed labels, and queue-specific combinations$ | 1 | 7
+browser | ^test_child_health_validation_fallback_preserves_foundation_maintenance\[(1024x576|1280x720)\]$ | 2 | 2
+browser | ^test_teacher_locked_bootstrap_makes_only_runtime_and_auth_requests\[(1024x768|1440x900)\]$ | 2 | 2
+browser | ^test_teacher_runtime_failure_keeps_maintenance_and_makes_zero_auth_or_business_requests\[(1024x768|1440x900)\]$ | 2 | 2
+browser | ^test_teacher_auth_status_failure_is_safe_and_makes_zero_business_requests\[(1024x768|1440x900)\]$ | 2 | 2
+browser | ^test_chat_retryable_fault_reuses_persisted_request_id_once\[(1024x576|1280x720)\]$ | 2 | 3
+browser | ^test_first_chat_timeout_retains_draft_and_reuses_request_id_once\[(1024x576|1280x720)\]$ | 2 | 3,4,14
+browser | ^test_chat_fault_matrix_retains_draft_without_success_copy\[(http_500|non_json|offline)-(1024x576|1280x720)\]$ | 6 | 3,4,14
+browser | ^test_completion_delay_is_single_flight_and_saves_once\[(1024x576|1280x720)\]$ | 2 | 3,7,14
+browser | ^test_teacher_review_put_timeout_preserves_dirty_values_and_restores_focus\[(seed_review_timeout_1024|review_timeout_1440)\]$ | 2 | 3,14
+browser | ^test_teacher_review_delayed_save_is_single_flight_and_disables_every_editor_control\[(1024x768|1440x900)\]$ | 2 | 3,14
+browser | ^test_teacher_resource_state_delay_is_single_flight\[(seed_child_deactivate_1024|child_reactivate_1024|duck_deactivate_1024|duck_reactivate_1024|(child|duck)_(deactivate|reactivate)_1440)\]$ | 8 | 3,12,14
+browser | ^test_teacher_roster_delay_is_single_flight\[(seed_daily_1024|auto_1024|daily_1440|auto_1440)\]$ | 4 | 3,11,14
+browser | ^test_teacher_roster_settled_faults_preserve_snapshot_and_request_id\[(seed_daily_json_500_1024|auto_json_500_1024|(daily|auto)_(html_502|offline)_1024|(daily|auto)_(json_500|html_502|offline)_1440)\]$ | 12 | 3,11,14
+browser | ^test_reload_during_submit_restores_same_draft_and_ignores_old_response\[(1024x576|1280x720)\]$ | 2 | 5
+browser | ^test_pagehide_destroy_makes_held_callback_inert\[(1024x576|1280x720)\]$ | 2 | 5,14
+browser | ^test_microphone_denial_focuses_visible_teacher_help_then_opens_dialog\[(1024x576|1280x720)\]$ | 2 | 6
+browser | ^test_completion_replay_reaches_completed_once_after_strict_save\[(1024x576|1280x720)\]$ | 2 | 3,7
+browser | ^test_child_core_flow_is_page_keyboard_only_and_saves_once\[(1024x576|1280x720)\]$ | 2 | 7,13,14
+browser | ^test_teacher_today_renders_pending_processing_and_failed_rows_with_retry_boundaries\[(1024x768|1440x900)\]$ | 2 | 7,14
+browser | ^test_teacher_today_each_panel_has_its_fixed_empty_state\[(pending|processing|failed)-(1024x768|1440x900)\]$ | 6 | 7
+browser | ^test_teacher_today_analysis_retry_is_single_flight_and_refreshes_three_queues_in_order\[(accepted|replayed)-(1024x768|1440x900)\]$ | 4 | 3,7,14
+browser | ^test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy\[(mismatch|malformed|401|404|409|500|non-json)-(1024x768|1440x900)\]$ | 14 | 7,14
+browser | ^test_teacher_today_analysis_retry_offline_is_single_flight_until_transport_rejects\[(1024x768|1440x900)\]$ | 2 | 3,7,14
+browser | ^test_teacher_review_editor_saves_the_complete_normalized_draft_and_refreshes_only_queue\[(1024x768|1440x900)\]$ | 2 | 8
+browser | ^test_teacher_review_complete_confirm_uses_confirm_action_and_removes_the_pending_row\[(1024x768|1440x900)\]$ | 2 | 8
+browser | ^test_teacher_review_queue_and_detail_show_identity_time_id_and_status\[(1024x768|1440x900)\]$ | 2 | 9
+browser | ^test_tts_cold_start_uses_reachable_five_second_fallback\[(1024x576|1280x720)\]$ | 2 | 10,14
+browser | ^test_tts_faults_settle_and_do_not_block_completion\[(edge_http_500|edge_non_json|edge_offline|play_rejected|audio_error|browser_speech_error)-(1024x576|1280x720)\]$ | 12 | 10,14
+browser | ^test_child_deactivation_uses_named_dialog_and_real_undo\[(1024x768|1440x900)\]$ | 2 | 12
+browser | ^test_children_management_is_labeled_strict_and_never_sends_delete\[(1024x768|1440x900)\]$ | 2 | 12
+browser | ^test_teacher_management_exposes_reversible_state_without_delete\[(1024x768|1440x900)\]$ | 2 | 12
+browser | ^test_teacher_resource_state_settled_faults_never_claim_success\[(seed_child_deactivate_json_500_1024|child_reactivate_json_500_1024|duck_deactivate_json_500_1024|duck_reactivate_json_500_1024|(child|duck)_(deactivate|reactivate)_(html_502|offline)_1024|(child|duck)_(deactivate|reactivate)_(json_500|html_502|offline)_1440)\]$ | 24 | 12,14
+browser | ^test_manual_space_stop_requires_one_explicit_end\[(1024x576|1280x720)\]$ | 2 | 13
+browser | ^test_space_is_single_action_for_native_and_global_paths\[(1024x576|1280x720)\]$ | 2 | 13
+browser | ^test_keyboard_focus_visible_uses_start_to_ready_flow\[(1024x576|1280x720)\]$ | 2 | 13
+browser | ^test_fault_recovery_preserves_accessibility_and_projection_constraints\[(chat_retryable|completion_failure)-(1024x576|1280x720)\]$ | 4 | 13,14
+browser | ^test_teacher_complete_review_flow_is_page_keyboard_only\[(seed_keyboard_review_1024|keyboard_review_1440)\]$ | 2 | 13
+browser | ^test_teacher_dirty_review_dialog_is_named_keyboard_operable_and_restores_focus\[(seed_dirty_dialog_1024|dirty_dialog_1440)\]$ | 2 | 13
+browser | ^test_teacher_authenticated_routes_have_frozen_accessibility_structure\[(seed_a11y_today_1024|a11y_(children|ducks|roster|review|growth|search)_1024|a11y_(today|children|ducks|roster|review|growth|search)_1440)\]$ | 14 | 13
+browser | ^test_release_focus_indicator_meets_three_to_one\[(1024x768|1440x900)\]$ | 2 | 13
+browser | ^test_completion_fault_matrix_never_claims_saved_copy\[(http_500|non_json|offline|boundary_mismatch)-(1024x576|1280x720)\]$ | 8 | 3,14
+browser | ^test_teacher_representative_read_validators_cover_missing_transport_faults\[(seed_today_roster_html_502_1024|today_roster_offline_1024|review_pending_html_502_1024|review_pending_offline_1024|today_roster_html_502_1440|today_roster_offline_1440|review_pending_html_502_1440|review_pending_offline_1440)\]$ | 8 | 14
+browser | ^test_teacher_review_save_failures_keep_exact_values_dirty_and_never_refresh\[(server|non-json|offline)-\\u4fdd\\u5b58\\u5931\\u8d25\\uff0c\\u8bf7\\u7a0d\\u540e\\u91cd\\u8bd5\\u3002-(1024x768|1440x900)\]$ | 6 | 14
+browser | ^test_child_server_import_preflight_blocks_provider_env$ | 1 | 14
+browser | ^test_main_import_filehandler_is_redirected_from_real_log$ | 1 | 1,14
+browser | ^test_edge_tts_fake_stream_trips_before_network$ | 1 | 14
+browser | ^test_nonstarting_worker_has_no_start_side_effect$ | 1 | 14
+browser | ^test_browser_subprocess_environment_is_minimal$ | 1 | 14
+browser | ^test_real_resource_snapshots_are_read_only$ | 1 | 1,14
+browser | ^test_socket_guard_blocks_non_loopback$ | 1 | 14
+browser | ^test_fixture_teardown_closes_before_process_assertions$ | 1 | 14
+browser | ^test_context_loopback_policy_allows_only_exact_origin\[(data:text/plain,synthetic-False|http://127\.0\.0\.1/-False|http://127\.0\.0\.1:43123/-True|http://127\.0\.0\.1:43123/api/health\?x=1-True|http://127\.0\.0\.1:43124/-False|http://127\.0\.0\.1:not-a-port/-False|http://\[::1\]:43123/-False|http://example\.invalid:43123/-False|http://localhost:43123/-False|http://user:pass@127\.0\.0\.1:43123/-False|https://127\.0\.0\.1:43123/-False)\]$ | 11 | 14
+browser | ^test_loopback_server_uses_disposable_resources$ | 1 | 1,14
+browser | ^test_child_page_registers_fail_closed_business_routes_before_navigation$ | 1 | 14
+browser | ^test_page_specific_routes_cannot_widen_loopback_policy$ | 1 | 14
+browser | ^test_browser_parent_logging_is_redirected_from_real_application_log$ | 1 | 1,14
+browser | ^test_release_teacher_action_persists_to_disposable_sqlite\[(1024x768|1440x900)\]$ | 2 | 14
+backend | ^test_runtime_context_is_public_static_exact_and_reads_date_once$ | 1 | 2,14
+backend | ^test_runtime_context_rejects_every_query_shape_before_reading_the_clock$ | 1 | 2,14
+backend | ^test_business_today_reads_the_provider_exactly_once$ | 1 | 2,14
+backend | ^test_upload_authentication_precedes_multipart_parsing_content_length_and_writes$ | 1 | 3,14
+backend | ^test_unauthenticated_asgi_request_reads_zero_body_bytes$ | 1 | 3,14
+backend | ^test_authenticated_(chunked_multipart_total_budget_stops_before_oversize_epilogue|chunked_oversize_preamble_hits_total_budget_and_stops_receive|repeated_file_parts_stop_before_receiving_second_payload)$ | 3 | 3,14
+backend | ^test_valid_uploads_have_exact_dto_uuid_metadata_and_static_webp\[(png|jpeg|webp)\]$ | 3 | 3,14
+backend | ^test_(atomic_publish_never_overwrites_boundary_attacker_and_retries_uuid|concurrent_fixed_uuid_collision_never_overwrites_or_deletes_winner)$ | 2 | 3,14
+backend | ^test_(store_holds_trusted_parent_fd_when_root_parent_is_swapped_to_symlink|load_holds_trusted_parent_fd_when_root_parent_is_swapped_to_symlink|reader_holds_root_lease_through_stored_content_validation|invalidating_waiter_never_closes_a_root_held_by_an_active_reader)$ | 4 | 1,14
+backend | ^test_public_get_is_exact_webp_with_cache_nosniff_etag_and_no_auth$ | 1 | 14
+backend | ^test_public_head_conditional_get_and_unsupported_range_have_explicit_contract$ | 1 | 14
+backend | ^test_resource_avatar_reference_requires_safe_row_and_file_before_any_write$ | 1 | 3,12,14
+backend | ^test_valid_reference_replacement_and_null_removal_never_delete_old_media$ | 1 | 3,12,14
+backend | ^test_(child|duck)_mutation_normalizes_the_exact_client_owned_fields$ | 2 | 3,12,14
+backend | ^test_create_retry_replays_exact_response_and_changed_payload_conflicts\[(child|duck)\]$ | 2 | 3,14
+backend | ^test_service_concurrent_same_request_creates_one_child_and_two_exact_responses$ | 1 | 3,14
+backend | ^test_monthly_route_canonicalizes_dates_pairs_and_uses_one_clock_sample$ | 1 | 3,11,14
+backend | ^test_monthly_accepts_31_calendar_dates_and_rejects_every_structural_boundary$ | 1 | 11,14
+backend | ^test_monthly_any_occupied_date_conflicts_without_changing_the_batch_or_ledger$ | 1 | 3,11,14
+backend | ^test_monthly_replay_uses_the_original_snapshot_after_child_deactivation$ | 1 | 3,11,14
+backend | ^test_concurrent_monthly_distinct_uuids_same_date_leave_exactly_one_pair$ | 1 | 3,11,14
+backend | ^test_weekly_service_uses_conversation_calendar_window_and_global_review_backlog$ | 1 | 7,14
+backend | ^test_weekly_service_returns_the_exact_zero_shape$ | 1 | 7,14
+backend | ^test_weekly_service_fails_the_whole_response_for_global_integrity_corruption\[(conversation_status|conversation_end_reason|conversation_pending_end_reason|conversation_invalid_date|conversation_year_zero|ended_without_end_reason|ended_without_timestamp|ended_without_boundary|active_with_ended_boundary|job_status|job_boundary|job_for_active_conversation|assessment_status|assessment_child|confirmed_without_succeeded)\]$ | 15 | 7,14
+backend | ^test_weekly_service_uses_the_same_two_sql_statements_for_one_or_one_hundred_rows\[(1|100)\]$ | 2 | 7,14
+backend | ^test_weekly_route_authenticates_before_reading_even_an_invalid_raw_query$ | 1 | 7,14
+backend | ^test_weekly_route_rejects_noncanonical_or_non_monday_raw_query_before_any_sql\[(unknown=2026-08-31|week_start=2026-08-31&week_start=2026-08-31|week_start=|=2026-08-31|week_start|week%5Fstart=2026-08-31|week_start=2026%2D08%2D31|week_start=%FF|week_start=2026-02-30|week_start=2026-8-31|week_start=2026-09-01|week_start=9999-12-27)\]$ | 12 | 7,14
+backend | ^test_weekly_route_without_query_samples_the_business_clock_once$ | 1 | 7,14
+backend | ^test_weekly_route_explicit_monday_never_reads_the_now_provider$ | 1 | 7,14
+backend | ^test_search_static_route_authenticates_before_body_or_query_validation$ | 1 | 14
+backend | ^test_search_keyword_is_literal_frozen_role_bounded_and_preserves_projection_counts$ | 1 | 8,9,14
+backend | ^test_search_cursor_is_canonical_keyset_and_snapshot_excludes_new_inserts\[(completed_desc-descending|completed_asc-ascending)\]$ | 2 | 8,9,14
+backend | ^test_search_cursor_fingerprint_ignores_limit_and_array_order_but_binds_filters$ | 1 | 8,9,14
+backend | ^test_search_fails_whole_page_for_selected_projection_corruption$ | 1 | 8,9,14
+backend | ^test_search_statement_budget_is_fixed_for_one_or_fifty_rows$ | 1 | 8,9,14
+backend | ^test_fixed_anchor_seed_has_exact_graph_and_stable_logical_hashes$ | 1 | 1,14
+backend | ^test_seeded_reports_growth_search_and_worker_are_demo_ready$ | 1 | 7,8,9,14
+backend | ^test_seed_without_force_rejects_every_existing_resource_before_install\[(database|wal|shm|media|log)\]$ | 5 | 1,14
+backend | ^test_all_demo_rows_roll_back_when_a_late_insert_fails$ | 1 | 1,14
+backend | ^test_concurrent_seed_attempts_have_exactly_one_success$ | 1 | 1,14
+backend | ^test_full_demo_cli_requires_explicit_targets_and_prints_hashes$ | 1 | 1,14
+browser | ^test_avatar_preview_upload_retry_save_and_remove_are_ordered_and_retained\[(1024x576|1280x720)\]$ | 2 | 3,12,14
+browser | ^test_monthly_roster_defaults_rows_and_retries_only_the_unchanged_snapshot\[(1024x768|1440x900)\]$ | 2 | 3,11,14
+browser | ^test_monthly_conflict_requires_new_overwrite_id_then_reuses_it_on_failure\[(1024x768|1440x900)\]$ | 2 | 3,11,14
+browser | ^test_teacher_today_renders_exact_week_range_and_five_weekly_metrics\[(1024x768|1440x900)\]$ | 2 | 7,14
+browser | ^test_teacher_today_weekly_metrics_have_an_explicit_all_zero_state\[(1024x768|1440x900)\]$ | 2 | 7,14
+browser | ^test_teacher_today_weekly_failure_retry_is_scoped_and_touch_sized\[(1024x768|1440x900)\]$ | 2 | 7,14
+browser | ^test_search_filters_private_post_and_review_anchor_are_canonical\[(1024x768|1440x900)\]$ | 2 | 8,9,14
+browser | ^test_search_append_failure_retains_rows_and_retries_frozen_body\[(http|parse)-(1024x768|1440x900)\]$ | 4 | 8,9,14
+browser | ^test_search_new_search_supersedes_abort_insensitive_pending_append\[(resolve|reject)\]$ | 2 | 8,9,14
+browser | ^test_search_held_first_page_exposes_busy_loading_then_polite_empty$ | 1 | 8,9,14
+browser | ^test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping\[avatar_cards-(1024x576|1280x720)\]$ | 2 | 14
+browser | ^test_release_monthly_roster_dialog_keeps_fixed_actions_and_scrollable_rows\[(1024x768|1440x900)\]$ | 2 | 11,14
+browser | ^test_release_search_filters_results_and_focus_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 8,9,14
+browser | ^test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 7,14
+browser | ^test_release_avatar_upload_and_fallback_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 12,14"""
+
+
 def _frozen_manifest_rows():
-    brief = (
-        Path(__file__).resolve().parents[1]
-        / ".superpowers"
-        / "sdd"
-        / "2026-08-23-teacher-workbench-and-acceptance"
-        / "task-9-brief.md"
-    ).read_text(encoding="utf-8")
-    marker = "```text\nbackend |"
-    start = brief.index(marker, brief.index("complete machine-readable selector")) + len(
-        "```text\n"
-    )
-    end = brief.index("\n```", start)
     rows = []
-    for line in brief[start:end].splitlines():
+    for line in _EXPECTED_SELECTOR_MANIFEST_TEXT.splitlines():
         command_id, pattern, count, gates = line.split(" | ")
         rows.append(
             (command_id, pattern, int(count), tuple(int(gate) for gate in gates.split(",")))
@@ -2472,7 +2630,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
 
     assert actual_today_retry_rows == EXPECTED_TODAY_RETRY_SELECTOR_ROWS
     assert actual_rows == expected_rows
-    assert len(actual_rows) == 97
+    assert len(actual_rows) == 153
     assert module.GATE_TITLES == EXPECTED_GATE_TITLES
     assert tuple(
         (item.source, item.evidence_id, item.expected_count, item.gates)
@@ -2497,11 +2655,40 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
             ]
             assert len(matches) == 1
         materialized_count += len(node_ids)
-    assert materialized_count == 259
+    assert materialized_count == 372
 
     assert module.SELECTOR_TO_GATES == {
         (row.command_id, row.node_pattern): row.gates for row in module.SELECTOR_MANIFEST
     }
+
+
+def test_p6_runtime_version_is_additive_to_runner_schema_two():
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+
+    assert module.FROZEN_RUNTIME_VERSION == {
+        "release_id": "2026.09.02-server-capabilities.1",
+        "api_version": "3",
+        "schema_version": "3",
+    }
+    assert module.REPORT_SCHEMA_VERSION == 2
+
+
+def test_resource_snapshot_shape_adds_main_media_without_dropping_p5_fields():
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+
+    assert tuple(module.ResourceSnapshot.__dataclass_fields__) == (
+        "database",
+        "log",
+        "tts",
+        "media",
+        "user_paths",
+        "git_head",
+        "git_porcelain",
+        "unsafe_reasons",
+    )
+    assert tuple(module.CanonicalResourceSnapshot.__dataclass_fields__) == tuple(
+        module.ResourceSnapshot.__dataclass_fields__
+    )
 
 
 def test_gate_manifest_allows_clean_ordinary_full_suite_nodes_outside_manifest():
@@ -3500,6 +3687,7 @@ def test_schema_v2_rejects_noncanonical_resource_snapshot_shapes(mutation):
         "nested_unsafe_top_safe",
         "log_reason_mismatch",
         "tts_reason_mismatch",
+        "media_reason_mismatch",
         "user_reason_mismatch",
         "git_reason_mismatch",
         "wrong_directory_digest",
@@ -3559,6 +3747,20 @@ def test_schema_v2_rejects_resource_snapshot_semantic_forgery(mutation):
             snapshot["tts"]["entries"] = []
             snapshot["tts"]["digest"] = None
             snapshot["tts"]["unsafe_reasons"] = ["DIRECTORY_MISSING"]
+            snapshot["unsafe_reasons"] = []
+        elif mutation == "media_reason_mismatch":
+            snapshot["media"]["root"] = {
+                "error": None,
+                "kind": "missing",
+                "mode": None,
+                "mtime_ns": None,
+                "sha256": None,
+                "size": None,
+                "symlink_target": None,
+            }
+            snapshot["media"]["entries"] = []
+            snapshot["media"]["digest"] = None
+            snapshot["media"]["unsafe_reasons"] = ["DIRECTORY_MISSING"]
             snapshot["unsafe_reasons"] = []
         elif mutation == "user_reason_mismatch":
             protected = snapshot["user_paths"][0]
@@ -3669,8 +3871,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "1b909818d5454dbc4bdbaef0394389cf893b6d1129b745807a901ccbfaa6d367"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "2aa9d5c2dbdb59801350cbb6bcd108c5b6720bf2facf6352afa63c6a653444f7"
+    assert hashlib.sha256(json_bytes).hexdigest() == "3397e0da1af517e4d544ff34508b03a4aa708f060db41186f79e172feca02ed1"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "992c033c0c321b43d3b02b244bfcdcad55e4c43b410f33f3bfecacc1dd8c274c"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4235,8 +4437,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "5a6cd3647544d5bfa81c04ffb955c10e89964fe0877590c0761326e113333a5c"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "fe9622915a97310c41346643a5b127987b737af12025779def1692a78d5a5ff5"
+    assert hashlib.sha256(json_bytes).hexdigest() == "49c403f0ce0773eafe5c5e63edf7132153883c20ab50bd6637bbd35e7b5a36d5"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "1a894857c0740c71c01f9e1b5660e99a7d1652068f011d1b6388545ce0520d74"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown
@@ -4313,6 +4515,7 @@ def FakeRunOneResources(
         ),
         log=regular,
         tts=empty_directory,
+        media=empty_directory,
         user_paths=protected,
         git_head=git_head,
         git_porcelain=git_porcelain,
@@ -5447,10 +5650,10 @@ def _unit7_passing_tap_nodes(node_ids):
 @pytest.mark.parametrize(
     "porcelain",
     [
-        b"M  scripts/run_interaction_acceptance.py\n",
-        b" M scripts/run_interaction_acceptance.py\n",
-        b"?? tests/new_implementation_test.py\n",
-        b"M  .workbuddy/memory/2026-08-22.md\n",
+        b"M  scripts/run_interaction_acceptance.py\0",
+        b" M scripts/run_interaction_acceptance.py\0",
+        b"?? tests/new_implementation_test.py\0",
+        b"M  .workbuddy/memory/2026-08-22.md\0",
     ],
 )
 def test_unit8_porcelain_policy_rejects_implementation_dirt_and_nonempty_index(
@@ -5464,15 +5667,15 @@ def test_unit8_porcelain_policy_rejects_implementation_dirt_and_nonempty_index(
 def test_unit8_porcelain_policy_allows_only_unstaged_inherited_user_categories():
     module = importlib.import_module("scripts.run_interaction_acceptance")
     inherited = (
-        b" M .workbuddy/memory/2026-08-22.md\n"
-        b" M docs/superpowers/specs/2026-08-23-interaction-stabilization-design.md\n"
-        b"?? .superpowers/brainstorm/synthetic-state\n"
-        b"?? docs/superpowers/plans/synthetic-plan.md\n"
+        b" M .workbuddy/memory/2026-08-22.md\0"
+        b" M docs/superpowers/specs/2026-08-23-interaction-stabilization-design.md\0"
+        b"?? .superpowers/brainstorm/synthetic-state\0"
+        b"?? docs/superpowers/plans/synthetic-plan.md\0"
     )
 
     assert module.unit8_porcelain_is_allowed(b"") is True
     assert module.unit8_porcelain_is_allowed(inherited) is True
-    assert module.unit8_porcelain_is_allowed(b"not porcelain\n") is False
+    assert module.unit8_porcelain_is_allowed(b"not porcelain\0") is False
 
 
 def test_full_run_requires_exact_designated_candidate_head_before_artifact_write(
@@ -5505,7 +5708,7 @@ def test_full_run_rejects_dirty_implementation_tree_before_artifact_write(tmp_pa
     module = importlib.import_module("scripts.run_interaction_acceptance")
     artifact_root = tmp_path / "artifacts" / "acceptance" / "dirty-tree"
     dirty = FakeRunOneResources(
-        git_porcelain=b" M scripts/run_interaction_acceptance.py\n"
+        git_porcelain=b" M scripts/run_interaction_acceptance.py\0"
     )
     executor = ScriptedProcessExecutor(snapshots=[dirty, dirty])
 

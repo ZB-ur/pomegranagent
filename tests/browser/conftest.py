@@ -41,6 +41,11 @@ FAIL_CLOSED_BUSINESS_PATTERNS = (
     "**/api/chat",
     "**/api/conversations/*/complete",
     "**/api/tts*",
+    "**/api/runtime/context",
+    "**/api/media/avatars*",
+    "**/api/roster/month",
+    "**/api/reports/weekly*",
+    "**/api/conversations/search*",
 )
 FAIL_CLOSED_BUSINESS_BODY = (
     '{"error":{"code":"UNEXPECTED_BROWSER_REQUEST","message":"fixture route required"}}'
@@ -300,6 +305,7 @@ def _verify_server_safety(module, server: BrowserServer) -> None:
         module.REAL_DATABASE_PATH,
         module.REAL_LOG_PATH,
         module.REAL_TTS_CACHE_PATH,
+        module.REAL_MEDIA_ROOT,
     )
     assert after == server.real_snapshots, "browser fixture changed a real application resource"
     for name in (
@@ -328,6 +334,7 @@ def child_server(chromium_browser, tmp_path, unused_tcp_port):
         module.REAL_DATABASE_PATH,
         module.REAL_LOG_PATH,
         module.REAL_TTS_CACHE_PATH,
+        module.REAL_MEDIA_ROOT,
     )
     process = subprocess.Popen(
         [sys.executable, str(CHILD_SERVER_SCRIPT)],

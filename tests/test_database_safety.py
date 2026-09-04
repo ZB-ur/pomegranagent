@@ -157,7 +157,7 @@ def test_pytest_application_logging_uses_only_the_disposable_runtime_file():
         assert TEST_APPLICATION_LOG_PATH.is_relative_to(TEST_RUNTIME_DIR)
 
 
-def test_application_resource_guard_captures_db_sidecars_log_and_tts_tree(
+def test_application_resource_guard_captures_db_sidecars_log_tts_and_media_trees(
     tmp_path: Path,
 ):
     from conftest import (
@@ -168,35 +168,52 @@ def test_application_resource_guard_captures_db_sidecars_log_and_tts_tree(
     database = tmp_path / "guard.db"
     application_log = tmp_path / "app.log"
     tts_cache = tmp_path / "tts-cache"
+    media_root = tmp_path / "media"
     application_log.write_bytes(b"before-log")
     tts_cache.mkdir()
     (tts_cache / "voice.mp3").write_bytes(b"before-audio")
+    media_root.mkdir()
+    (media_root / "avatar.webp").write_bytes(b"before-avatar")
 
     with sqlite3.connect(database) as connection:
         assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
         connection.execute("CREATE TABLE evidence (value TEXT NOT NULL)")
         connection.execute("INSERT INTO evidence VALUES ('before')")
         connection.commit()
-        before = capture_application_resources(database, application_log, tts_cache)
+        before = capture_application_resources(
+            database,
+            application_log,
+            tts_cache,
+            media_root,
+        )
         assert before.database.database.kind.value == "regular"
         assert before.database.wal.kind.value == "regular"
         assert before.database.shm.kind.value == "regular"
         assert before.log.kind.value == "regular"
         assert before.tts.root.kind.value == "directory"
         assert before.tts.entries[0].relative_path == "voice.mp3"
+        assert before.media.root.kind.value == "directory"
+        assert before.media.entries[0].relative_path == "avatar.webp"
         assert before.unsafe_reasons == ()
 
         connection.execute("INSERT INTO evidence VALUES ('after')")
         connection.commit()
         application_log.write_bytes(b"after-log")
         (tts_cache / "voice.mp3").write_bytes(b"after-audio")
-        after = capture_application_resources(database, application_log, tts_cache)
+        (media_root / "avatar.webp").write_bytes(b"after-avatar")
+        after = capture_application_resources(
+            database,
+            application_log,
+            tts_cache,
+            media_root,
+        )
 
     violations = set(application_resource_violations(before, after))
     assert "DATABASE_LOGICAL_CHANGED" in violations
     assert "DATABASE_WAL_CHANGED" in violations
     assert "APPLICATION_LOG_CHANGED" in violations
     assert "TTS_TREE_CHANGED" in violations
+    assert "MEDIA_TREE_CHANGED" in violations
 
 
 def test_real_application_resource_baseline_is_complete_and_stable():
@@ -204,6 +221,7 @@ def test_real_application_resource_baseline_is_complete_and_stable():
         APPLICATION_RESOURCE_BASELINE,
         REAL_APPLICATION_DATABASE_PATH,
         REAL_APPLICATION_LOG_PATH,
+        REAL_MEDIA_ROOT,
         REAL_TTS_CACHE_PATH,
         capture_application_resources,
     )
@@ -212,11 +230,13 @@ def test_real_application_resource_baseline_is_complete_and_stable():
     assert REAL_APPLICATION_DATABASE_PATH == (ROOT / "data" / "duck_diary.db").resolve()
     assert REAL_APPLICATION_LOG_PATH == (ROOT / "logs" / "app.log").resolve()
     assert REAL_TTS_CACHE_PATH == (ROOT / "data" / "tts_cache").resolve()
+    assert REAL_MEDIA_ROOT == (ROOT / "data" / "media").resolve()
     assert baseline.database.database.kind.value == "regular"
     assert baseline.database.wal.kind.value in {"missing", "regular"}
     assert baseline.database.shm.kind.value in {"missing", "regular"}
     assert baseline.log.kind.value == "regular"
     assert baseline.tts.root.kind.value == "directory"
+    assert baseline.media.root.kind.value in {"missing", "directory"}
     assert baseline.unsafe_reasons == ()
     assert capture_application_resources() == baseline
 
@@ -331,6 +351,7 @@ def test_uncaught_tripwire_probe_exposes_exact_junit_types_and_frames(
                     REAL_DATABASE_PATH=None,
                     REAL_LOG_PATH=None,
                     REAL_TTS_CACHE_PATH=None,
+                    REAL_MEDIA_ROOT=None,
                 )
                 server = types.SimpleNamespace(
                     real_snapshots=sentinel, environment=environment

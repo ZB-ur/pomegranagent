@@ -8,6 +8,7 @@ import uuid
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
 from tests.browser.test_teacher_accessibility import (
     PIN,
@@ -22,6 +23,25 @@ TEACHER_VIEWPORTS = [
     pytest.param({"width": 1024, "height": 768}, id="1024x768"),
     pytest.param({"width": 1440, "height": 900}, id="1440x900"),
 ]
+
+LIVE_AVATAR_FIXTURES = (
+    (
+        "child",
+        Path(__file__).resolve().parents[1]
+        / "fixtures/live_provider/avatars/child.png",
+        "PNG",
+        (117, 128),
+        "89b67c4243f1a5812e48ba115e0035a392cdd1897590b69d4a88755142b8ecd6",
+    ),
+    (
+        "duck",
+        Path(__file__).resolve().parents[1]
+        / "fixtures/live_provider/avatars/duck.jpg",
+        "JPEG",
+        (128, 128),
+        "d2c0e097af4e7923ea87e79eb485907d3b7058e155bd15f62b075cad7e7104c2",
+    ),
+)
 
 
 REVIEW_WORKSPACE_BREAKPOINTS = [
@@ -1032,6 +1052,224 @@ def test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds(
             sort_keys=True,
         ),
     )
+
+
+@pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
+def test_release_avatar_upload_and_fallback_stay_in_bounds(
+    teacher_browser,
+    viewport,
+):
+    for _kind, fixture, image_format, image_size, expected_sha256 in LIVE_AVATAR_FIXTURES:
+        assert fixture.is_file()
+        assert hashlib.sha256(fixture.read_bytes()).hexdigest() == expected_sha256
+        with Image.open(fixture) as decoded:
+            decoded.load()
+            assert decoded.format == image_format
+            assert decoded.size == image_size
+
+    child_avatar_id = "123e4567-e89b-42d3-a456-426614174001"
+    duck_avatar_id = "123e4567-e89b-42d3-a456-426614174002"
+    canonical = {
+        "child": f"/api/media/avatars/{child_avatar_id}",
+        "duck": f"/api/media/avatars/{duck_avatar_id}",
+    }
+    children = [{
+        "id": 701,
+        "name": "边界幼儿",
+        "nickname": None,
+        "avatar": None,
+        "active": True,
+        "deactivated_at": None,
+        "future_roster_entries": 0,
+        "has_active_conversation": False,
+    }]
+    ducks = [{
+        "id": 702,
+        "name": "界内小鸭",
+        "avatar": None,
+        "status": "健康",
+        "note": None,
+        "active": True,
+        "deactivated_at": None,
+        "historical_feeding_log_count": 0,
+    }]
+    uploads = []
+    updates = []
+
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    _install_static_routes(page, teacher_browser)
+
+    def collection(route, *, kind):
+        request = route.request
+        rows = children if kind == "child" else ducks
+        collection_name = "children" if kind == "child" else "ducks"
+        if request.method == "GET":
+            _assert_fixture_request(
+                route,
+                teacher_browser,
+                method="GET",
+                path=f"/api/{collection_name}",
+                query={"include_inactive": ["true"]},
+            )
+            _fulfill_json(route, rows)
+            return
+        _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="PUT",
+            path=f"/api/{collection_name}/{rows[0]['id']}",
+        )
+        body = json.loads(request.post_data)
+        assert set(body) == (
+            {"name", "nickname", "avatar"}
+            if kind == "child"
+            else {"name", "avatar", "status", "note"}
+        )
+        assert body["avatar"] == canonical[kind]
+        updates.append((kind, body, request.headers["x-request-id"]))
+        rows[0].update(body)
+        acknowledgement = {
+            key: rows[0][key]
+            for key in (
+                ("id", "name", "nickname", "avatar", "active")
+                if kind == "child"
+                else ("id", "name", "avatar", "status", "note")
+            )
+        }
+        _fulfill_json(route, acknowledgement)
+
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children**",
+        lambda route: collection(route, kind="child"),
+    )
+    page.route(
+        f"{teacher_browser.server.base_url}/api/ducks**",
+        lambda route: collection(route, kind="duck"),
+    )
+
+    def upload(route):
+        request = _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="POST",
+            path="/api/media/avatars",
+        )
+        payload = request.post_data_buffer
+        assert payload is not None
+        if b'filename="child.png"' in payload:
+            kind = "child"
+            avatar_id = child_avatar_id
+            width, height = 117, 128
+        elif b'filename="duck.jpg"' in payload:
+            kind = "duck"
+            avatar_id = duck_avatar_id
+            width, height = 128, 128
+        else:
+            raise AssertionError("avatar chooser did not send a tracked fixture")
+        uploads.append((kind, request.headers["x-request-id"]))
+        _fulfill_json(route, {
+            "id": avatar_id,
+            "url": canonical[kind],
+            "mime_type": "image/webp",
+            "width": width,
+            "height": height,
+            "size_bytes": len(payload),
+            "sha256": "ab" * 32,
+        })
+
+    page.route(f"{teacher_browser.server.base_url}/api/media/avatars", upload)
+    fixture_by_kind = {kind: fixture for kind, fixture, *_rest in LIVE_AVATAR_FIXTURES}
+    mime_by_kind = {"child": "image/png", "duck": "image/jpeg"}
+
+    def avatar_bytes(selected):
+        def handler(route):
+            route.fulfill(
+                status=200,
+                content_type=mime_by_kind[selected],
+                body=fixture_by_kind[selected].read_bytes(),
+            )
+
+        return handler
+
+    for kind in ("child", "duck"):
+        page.route(
+            f"{teacher_browser.server.base_url}{canonical[kind]}",
+            avatar_bytes(kind),
+        )
+
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#children",
+        wait_until="domcontentloaded",
+    )
+    page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
+    page.get_by_role("button", name="设置并解锁", exact=True).click()
+
+    def exercise(*, kind, noun, display_name, navigation=None):
+        if navigation is not None:
+            page.get_by_role("button", name=navigation, exact=True).click()
+        page.get_by_role("heading", name=f"{noun}管理", exact=True).wait_for()
+        launcher = page.get_by_role("button", name=f"编辑：{display_name}", exact=True)
+        launcher.click()
+        dialog = page.get_by_role("dialog", name=f"修改{noun}：{display_name}", exact=True)
+        dialog.wait_for()
+        file_input = dialog.get_by_label("头像图片", exact=True)
+        file_input.set_input_files(str(fixture_by_kind[kind]))
+        assert file_input.input_value().endswith(fixture_by_kind[kind].name)
+        preview = dialog.locator("[data-avatar-preview]")
+        preview_image = preview.locator("img")
+        preview_image.wait_for()
+        assert preview_image.get_attribute("src").startswith("blob:")
+        preview_box = _rect(preview)
+        controls_box = _rect(dialog.locator(".management-avatar-controls"))
+        dialog_box = _rect(dialog)
+        assert (
+            preview_box["right"] <= controls_box["left"] + 1
+            or controls_box["right"] <= preview_box["left"] + 1
+            or preview_box["bottom"] <= controls_box["top"] + 1
+            or controls_box["bottom"] <= preview_box["top"] + 1
+        )
+        assert 0 <= dialog_box["left"] <= dialog_box["right"] <= viewport["width"]
+        assert 0 <= dialog_box["top"] <= dialog_box["bottom"] <= viewport["height"]
+        dialog.get_by_role("button", name=f"保存{noun}", exact=True).click()
+        dialog.wait_for(state="detached")
+        page.get_by_text("已保存", exact=True).wait_for()
+
+        card = page.locator(".management-row").filter(has_text=display_name)
+        assert card.count() == 1
+        shell = card.locator(".management-avatar")
+        image = shell.locator("img")
+        image.wait_for()
+        assert image.get_attribute("src") == canonical[kind]
+        page.wait_for_function(
+            "node => node.complete && node.naturalWidth > 0 && node.naturalHeight > 0",
+            arg=image.element_handle(),
+        )
+        card_box = _rect(card)
+        avatar_box = _rect(shell)
+        assert card_box["left"] <= avatar_box["left"] < avatar_box["right"] <= card_box["right"]
+        assert card_box["top"] <= avatar_box["top"] < avatar_box["bottom"] <= card_box["bottom"]
+        image.dispatch_event("error")
+        assert shell.locator("img").count() == 0
+        assert shell.locator(".avatar-fallback").inner_text() == display_name[0]
+        assert page.evaluate(
+            "document.documentElement.scrollWidth <= document.documentElement.clientWidth"
+        )
+
+    exercise(kind="child", noun="幼儿", display_name="边界幼儿")
+    exercise(
+        kind="duck",
+        noun="小鸭",
+        display_name="界内小鸭",
+        navigation="小鸭管理",
+    )
+    assert [kind for kind, _request_id in uploads] == ["child", "duck"]
+    assert [kind for kind, _body, _request_id in updates] == ["child", "duck"]
+    assert uploads[0][1] == updates[0][2]
+    assert uploads[1][1] == updates[1][2]
 
 
 @pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)

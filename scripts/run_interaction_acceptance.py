@@ -50,10 +50,11 @@ PYTHON = "/Users/lddmay/AiCoding/pomegranagent/.venv/bin/python"
 NODE = "/opt/homebrew/bin/node"
 FROZEN_START_HEAD = "89b3459973bb7cd6e8be43b1251ac6cdb5dfa292"
 FROZEN_RUNTIME_VERSION = {
-    "release_id": "2026.08.23-stabilization.1",
-    "api_version": "2",
-    "schema_version": "2",
+    "release_id": "2026.09.02-server-capabilities.1",
+    "api_version": "3",
+    "schema_version": "3",
 }
+REPORT_SCHEMA_VERSION = 2
 FROZEN_LIMITATIONS = (
     "The runner cannot authorize release GO.",
     "Historical incidents still require release-owner disposition.",
@@ -204,6 +205,7 @@ class ResourceSnapshot:
     database: DatabaseSnapshot
     log: FileSnapshot
     tts: DirectorySnapshot
+    media: DirectorySnapshot
     user_paths: tuple[ProtectedPathSnapshot, ...]
     git_head: str | None
     git_porcelain: bytes | None
@@ -221,6 +223,7 @@ class CanonicalResourceSnapshot:
     database: DatabaseSnapshot
     log: FileSnapshot
     tts: DirectorySnapshot
+    media: DirectorySnapshot
     user_paths: tuple[ProtectedPathSnapshot, ...]
     git_head: str | None
     git_porcelain: CanonicalBytesSnapshot | None
@@ -1175,7 +1178,7 @@ def build_report_record(
         },
         "run_id": run_id,
         "runtime_versions": dict(FROZEN_RUNTIME_VERSION),
-        "schema_version": 2,
+        "schema_version": REPORT_SCHEMA_VERSION,
         "suite_evidence": {
             command_id: _canonical_value(evidence)
             for command_id, evidence in sorted(suites.items())
@@ -1636,12 +1639,14 @@ def _report_resource_snapshot(value: object) -> CanonicalResourceSnapshot:
     database = _report_database_snapshot(value["database"])
     log = _report_file_snapshot(value["log"])
     tts = _report_directory_snapshot(value["tts"], allow_symlinks=False)
+    media = _report_directory_snapshot(value["media"], allow_symlinks=False)
     expected_reasons: list[str] = [
         f"DATABASE:{reason}" for reason in database.unsafe_reasons
     ]
     if log.kind is not FileKind.REGULAR:
         expected_reasons.append("LOG_NOT_REGULAR")
     expected_reasons.extend(f"TTS:{reason}" for reason in tts.unsafe_reasons)
+    expected_reasons.extend(f"MEDIA:{reason}" for reason in media.unsafe_reasons)
     for protected in user_paths:
         expected_reasons.extend(
             f"USER_PATH:{protected.relative_path}:{reason}"
@@ -1658,6 +1663,7 @@ def _report_resource_snapshot(value: object) -> CanonicalResourceSnapshot:
         database=database,
         log=log,
         tts=tts,
+        media=media,
         user_paths=user_paths,
         git_head=git_head,
         git_porcelain=git_porcelain,
@@ -2409,7 +2415,7 @@ def _validate_report_record_shape(
     if (completed and set(record) != expected) or not _REPORT_BASE_KEYS.issubset(record):
         raise CliMisuseError("completed report JSON has the wrong schema")
     if (
-        record.get("schema_version") != 2
+        record.get("schema_version") != REPORT_SCHEMA_VERSION
         or record.get("runtime_versions") != FROZEN_RUNTIME_VERSION
         or record.get("supersedes") != "docs/acceptance-report.md"
         or record.get("pending_status")
@@ -3007,7 +3013,64 @@ browser | ^test_loopback_server_uses_disposable_resources$ | 1 | 1,14
 browser | ^test_child_page_registers_fail_closed_business_routes_before_navigation$ | 1 | 14
 browser | ^test_page_specific_routes_cannot_widen_loopback_policy$ | 1 | 14
 browser | ^test_browser_parent_logging_is_redirected_from_real_application_log$ | 1 | 1,14
-browser | ^test_release_teacher_action_persists_to_disposable_sqlite\[(1024x768|1440x900)\]$ | 2 | 14"""
+browser | ^test_release_teacher_action_persists_to_disposable_sqlite\[(1024x768|1440x900)\]$ | 2 | 14
+backend | ^test_runtime_context_is_public_static_exact_and_reads_date_once$ | 1 | 2,14
+backend | ^test_runtime_context_rejects_every_query_shape_before_reading_the_clock$ | 1 | 2,14
+backend | ^test_business_today_reads_the_provider_exactly_once$ | 1 | 2,14
+backend | ^test_upload_authentication_precedes_multipart_parsing_content_length_and_writes$ | 1 | 3,14
+backend | ^test_unauthenticated_asgi_request_reads_zero_body_bytes$ | 1 | 3,14
+backend | ^test_authenticated_(chunked_multipart_total_budget_stops_before_oversize_epilogue|chunked_oversize_preamble_hits_total_budget_and_stops_receive|repeated_file_parts_stop_before_receiving_second_payload)$ | 3 | 3,14
+backend | ^test_valid_uploads_have_exact_dto_uuid_metadata_and_static_webp\[(png|jpeg|webp)\]$ | 3 | 3,14
+backend | ^test_(atomic_publish_never_overwrites_boundary_attacker_and_retries_uuid|concurrent_fixed_uuid_collision_never_overwrites_or_deletes_winner)$ | 2 | 3,14
+backend | ^test_(store_holds_trusted_parent_fd_when_root_parent_is_swapped_to_symlink|load_holds_trusted_parent_fd_when_root_parent_is_swapped_to_symlink|reader_holds_root_lease_through_stored_content_validation|invalidating_waiter_never_closes_a_root_held_by_an_active_reader)$ | 4 | 1,14
+backend | ^test_public_get_is_exact_webp_with_cache_nosniff_etag_and_no_auth$ | 1 | 14
+backend | ^test_public_head_conditional_get_and_unsupported_range_have_explicit_contract$ | 1 | 14
+backend | ^test_resource_avatar_reference_requires_safe_row_and_file_before_any_write$ | 1 | 3,12,14
+backend | ^test_valid_reference_replacement_and_null_removal_never_delete_old_media$ | 1 | 3,12,14
+backend | ^test_(child|duck)_mutation_normalizes_the_exact_client_owned_fields$ | 2 | 3,12,14
+backend | ^test_create_retry_replays_exact_response_and_changed_payload_conflicts\[(child|duck)\]$ | 2 | 3,14
+backend | ^test_service_concurrent_same_request_creates_one_child_and_two_exact_responses$ | 1 | 3,14
+backend | ^test_monthly_route_canonicalizes_dates_pairs_and_uses_one_clock_sample$ | 1 | 3,11,14
+backend | ^test_monthly_accepts_31_calendar_dates_and_rejects_every_structural_boundary$ | 1 | 11,14
+backend | ^test_monthly_any_occupied_date_conflicts_without_changing_the_batch_or_ledger$ | 1 | 3,11,14
+backend | ^test_monthly_replay_uses_the_original_snapshot_after_child_deactivation$ | 1 | 3,11,14
+backend | ^test_concurrent_monthly_distinct_uuids_same_date_leave_exactly_one_pair$ | 1 | 3,11,14
+backend | ^test_weekly_service_uses_conversation_calendar_window_and_global_review_backlog$ | 1 | 7,14
+backend | ^test_weekly_service_returns_the_exact_zero_shape$ | 1 | 7,14
+backend | ^test_weekly_service_fails_the_whole_response_for_global_integrity_corruption\[(conversation_status|conversation_end_reason|conversation_pending_end_reason|conversation_invalid_date|conversation_year_zero|ended_without_end_reason|ended_without_timestamp|ended_without_boundary|active_with_ended_boundary|job_status|job_boundary|job_for_active_conversation|assessment_status|assessment_child|confirmed_without_succeeded)\]$ | 15 | 7,14
+backend | ^test_weekly_service_uses_the_same_two_sql_statements_for_one_or_one_hundred_rows\[(1|100)\]$ | 2 | 7,14
+backend | ^test_weekly_route_authenticates_before_reading_even_an_invalid_raw_query$ | 1 | 7,14
+backend | ^test_weekly_route_rejects_noncanonical_or_non_monday_raw_query_before_any_sql\[(unknown=2026-08-31|week_start=2026-08-31&week_start=2026-08-31|week_start=|=2026-08-31|week_start|week%5Fstart=2026-08-31|week_start=2026%2D08%2D31|week_start=%FF|week_start=2026-02-30|week_start=2026-8-31|week_start=2026-09-01|week_start=9999-12-27)\]$ | 12 | 7,14
+backend | ^test_weekly_route_without_query_samples_the_business_clock_once$ | 1 | 7,14
+backend | ^test_weekly_route_explicit_monday_never_reads_the_now_provider$ | 1 | 7,14
+backend | ^test_search_static_route_authenticates_before_body_or_query_validation$ | 1 | 14
+backend | ^test_search_keyword_is_literal_frozen_role_bounded_and_preserves_projection_counts$ | 1 | 8,9,14
+backend | ^test_search_cursor_is_canonical_keyset_and_snapshot_excludes_new_inserts\[(completed_desc-descending|completed_asc-ascending)\]$ | 2 | 8,9,14
+backend | ^test_search_cursor_fingerprint_ignores_limit_and_array_order_but_binds_filters$ | 1 | 8,9,14
+backend | ^test_search_fails_whole_page_for_selected_projection_corruption$ | 1 | 8,9,14
+backend | ^test_search_statement_budget_is_fixed_for_one_or_fifty_rows$ | 1 | 8,9,14
+backend | ^test_fixed_anchor_seed_has_exact_graph_and_stable_logical_hashes$ | 1 | 1,14
+backend | ^test_seeded_reports_growth_search_and_worker_are_demo_ready$ | 1 | 7,8,9,14
+backend | ^test_seed_without_force_rejects_every_existing_resource_before_install\[(database|wal|shm|media|log)\]$ | 5 | 1,14
+backend | ^test_all_demo_rows_roll_back_when_a_late_insert_fails$ | 1 | 1,14
+backend | ^test_concurrent_seed_attempts_have_exactly_one_success$ | 1 | 1,14
+backend | ^test_full_demo_cli_requires_explicit_targets_and_prints_hashes$ | 1 | 1,14
+browser | ^test_avatar_preview_upload_retry_save_and_remove_are_ordered_and_retained\[(1024x576|1280x720)\]$ | 2 | 3,12,14
+browser | ^test_monthly_roster_defaults_rows_and_retries_only_the_unchanged_snapshot\[(1024x768|1440x900)\]$ | 2 | 3,11,14
+browser | ^test_monthly_conflict_requires_new_overwrite_id_then_reuses_it_on_failure\[(1024x768|1440x900)\]$ | 2 | 3,11,14
+browser | ^test_teacher_today_renders_exact_week_range_and_five_weekly_metrics\[(1024x768|1440x900)\]$ | 2 | 7,14
+browser | ^test_teacher_today_weekly_metrics_have_an_explicit_all_zero_state\[(1024x768|1440x900)\]$ | 2 | 7,14
+browser | ^test_teacher_today_weekly_failure_retry_is_scoped_and_touch_sized\[(1024x768|1440x900)\]$ | 2 | 7,14
+browser | ^test_search_filters_private_post_and_review_anchor_are_canonical\[(1024x768|1440x900)\]$ | 2 | 8,9,14
+browser | ^test_search_append_failure_retains_rows_and_retries_frozen_body\[(http|parse)-(1024x768|1440x900)\]$ | 4 | 8,9,14
+browser | ^test_search_new_search_supersedes_abort_insensitive_pending_append\[(resolve|reject)\]$ | 2 | 8,9,14
+browser | ^test_search_held_first_page_exposes_busy_loading_then_polite_empty$ | 1 | 8,9,14
+browser | ^test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping\[avatar_cards-(1024x576|1280x720)\]$ | 2 | 14
+browser | ^test_release_monthly_roster_dialog_keeps_fixed_actions_and_scrollable_rows\[(1024x768|1440x900)\]$ | 2 | 11,14
+browser | ^test_release_search_filters_results_and_focus_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 8,9,14
+browser | ^test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 7,14
+browser | ^test_release_avatar_upload_and_fallback_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 12,14
+"""
 
 
 def _parse_selector_manifest(text: str) -> tuple[SelectorRequirement, ...]:
@@ -4194,6 +4257,15 @@ def build_command_specs(repo_root: Path, artifact_root: Path) -> tuple[CommandSp
         "tests/test_deactivation.py",
         "tests/test_conversation_history.py",
         "tests/test_api.py",
+        "tests/test_server_capability_contracts.py",
+        "tests/test_schema_migrations.py",
+        "tests/test_business_time.py",
+        "tests/test_runtime_context.py",
+        "tests/test_resource_idempotency.py",
+        "tests/test_avatar_media.py",
+        "tests/test_weekly_reports.py",
+        "tests/test_conversation_search.py",
+        "tests/test_demo_seed.py",
         "tests/e2e.py",
     )
 
@@ -4623,8 +4695,10 @@ def unit8_porcelain_is_allowed(payload: bytes) -> bool:
         return False
     if not payload:
         return True
-    lines = payload.splitlines()
-    if not lines or not payload.endswith(b"\n"):
+    if not payload.endswith(b"\0"):
+        return False
+    lines = payload[:-1].split(b"\0")
+    if not lines or any(not line for line in lines):
         return False
     for line in lines:
         if len(line) < 4 or line[2:3] != b" ":
@@ -5050,6 +5124,7 @@ def capture_resources(repo_root: Path) -> ResourceSnapshot:
     database = database_snapshot(root / "data" / "duck_diary.db")
     log = file_snapshot(root / "logs" / "app.log")
     tts = directory_snapshot(root / "data" / "tts_cache")
+    media = directory_snapshot(root / "data" / "media")
     user_paths = tuple(
         _protected_path_snapshot(root, relative_path)
         for relative_path in PROTECTED_USER_PATHS
@@ -5058,6 +5133,7 @@ def capture_resources(repo_root: Path) -> ResourceSnapshot:
     if log.kind is not FileKind.REGULAR:
         reasons.append("LOG_NOT_REGULAR")
     reasons.extend(f"TTS:{reason}" for reason in tts.unsafe_reasons)
+    reasons.extend(f"MEDIA:{reason}" for reason in media.unsafe_reasons)
     for protected in user_paths:
         reasons.extend(
             f"USER_PATH:{protected.relative_path}:{reason}"
@@ -5066,7 +5142,7 @@ def capture_resources(repo_root: Path) -> ResourceSnapshot:
 
     head_returncode, head_bytes = _git_capture(root, "rev-parse", "HEAD")
     status_returncode, status_bytes = _git_capture(
-        root, "status", "--short", "--untracked-files=all"
+        root, "status", "--porcelain=v1", "-z", "--untracked-files=all"
     )
     git_head = None
     if head_returncode == 0:
@@ -5085,6 +5161,7 @@ def capture_resources(repo_root: Path) -> ResourceSnapshot:
         database=database,
         log=log,
         tts=tts,
+        media=media,
         user_paths=user_paths,
         git_head=git_head,
         git_porcelain=git_porcelain,

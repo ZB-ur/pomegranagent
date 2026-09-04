@@ -22,6 +22,7 @@ TEST_TTS_CACHE_PATH = (TEST_RUNTIME_DIR / "tts-cache").resolve()
 REAL_APPLICATION_DATABASE_PATH = (ROOT / "data" / "duck_diary.db").resolve()
 REAL_APPLICATION_LOG_PATH = (ROOT / "logs" / "app.log").resolve()
 REAL_TTS_CACHE_PATH = (ROOT / "data" / "tts_cache").resolve()
+REAL_MEDIA_ROOT = (ROOT / "data" / "media").resolve()
 os.environ["APP_DB_MODE"] = "test"
 os.environ["APP_DB_PATH"] = str(TEST_DATABASE_PATH)
 os.environ["APP_BUSINESS_TIMEZONE"] = "Asia/Shanghai"
@@ -54,6 +55,7 @@ class ApplicationResourceSnapshot:
     database: DatabaseSnapshot
     log: FileSnapshot
     tts: DirectorySnapshot
+    media: DirectorySnapshot
     unsafe_reasons: tuple[str, ...]
 
 
@@ -61,20 +63,28 @@ def capture_application_resources(
     database_path: Path = REAL_APPLICATION_DATABASE_PATH,
     log_path: Path = REAL_APPLICATION_LOG_PATH,
     tts_path: Path = REAL_TTS_CACHE_PATH,
+    media_path: Path = REAL_MEDIA_ROOT,
 ) -> ApplicationResourceSnapshot:
     """Capture logical and physical application resources without following links."""
 
     database = database_snapshot(Path(database_path))
     log = file_snapshot(Path(log_path))
     tts = directory_snapshot(Path(tts_path))
+    media = directory_snapshot(Path(media_path))
     reasons = list(database.unsafe_reasons)
     if log.kind is not FileKind.REGULAR:
         reasons.append("APPLICATION_LOG_NOT_REGULAR")
     reasons.extend(tts.unsafe_reasons)
+    reasons.extend(
+        reason
+        for reason in media.unsafe_reasons
+        if reason != "DIRECTORY_MISSING"
+    )
     return ApplicationResourceSnapshot(
         database=database,
         log=log,
         tts=tts,
+        media=media,
         unsafe_reasons=tuple(dict.fromkeys(reasons)),
     )
 
@@ -105,6 +115,13 @@ def application_resource_violations(
         or before.tts.digest != after.tts.digest
     ):
         violations.append("TTS_TREE_CHANGED")
+    if before.media.root != after.media.root:
+        violations.append("MEDIA_ROOT_CHANGED")
+    if (
+        before.media.entries != after.media.entries
+        or before.media.digest != after.media.digest
+    ):
+        violations.append("MEDIA_TREE_CHANGED")
     return tuple(violations)
 
 

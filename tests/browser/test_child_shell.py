@@ -392,6 +392,9 @@ def test_browser_subprocess_environment_is_minimal(tmp_path):
         "LANG": "C.UTF-8",
         "APP_DB_MODE": "app",
         "APP_DB_PATH": str((tmp_path / "browser-app.db").resolve()),
+        "APP_LOG_PATH": str((tmp_path / "logs/app.log").resolve()),
+        "APP_MEDIA_ROOT": str((tmp_path / "media").resolve()),
+        "APP_TTS_CACHE_PATH": str((tmp_path / "tts-cache").resolve()),
         "BROWSER_PORT": "43123",
         "BROWSER_LOG_DIR": str((tmp_path / "logs").resolve()),
         "BROWSER_TTS_CACHE_DIR": str((tmp_path / "tts-cache").resolve()),
@@ -403,29 +406,83 @@ def test_browser_subprocess_environment_is_minimal(tmp_path):
     }
 
 
-def test_real_resource_snapshots_are_read_only(tmp_path):
+def test_real_resource_snapshots_include_physical_db_sidecars_and_media_read_only(
+    tmp_path,
+):
     module = load_child_server_module()
     database = tmp_path / "real.db"
     log = tmp_path / "app.log"
     cache = tmp_path / "tts-cache"
+    media = tmp_path / "media"
     cache.mkdir()
+    media.mkdir()
     with sqlite3.connect(database) as connection:
+        assert connection.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
         connection.execute("CREATE TABLE sample (value TEXT)")
         connection.execute("INSERT INTO sample VALUES ('synthetic')")
-    log.write_bytes(b"synthetic-log")
-    (cache / "synthetic.mp3").write_bytes(b"synthetic-audio")
-    before_bytes = database.read_bytes(), log.read_bytes(), (cache / "synthetic.mp3").read_bytes()
-    calls = []
+        connection.commit()
+        log.write_bytes(b"synthetic-log")
+        (cache / "synthetic.mp3").write_bytes(b"synthetic-audio")
+        (media / "synthetic.webp").write_bytes(b"synthetic-avatar")
+        wal = Path(f"{database}-wal")
+        shm = Path(f"{database}-shm")
+        assert wal.is_file()
+        assert shm.is_file()
+        before_bytes = (
+            database.read_bytes(),
+            wal.read_bytes(),
+            shm.read_bytes(),
+            log.read_bytes(),
+            (cache / "synthetic.mp3").read_bytes(),
+            (media / "synthetic.webp").read_bytes(),
+        )
+        calls = []
 
-    def read_only_connect(database_uri, *, uri):
-        calls.append((database_uri, uri))
-        return sqlite3.connect(database_uri, uri=uri)
+        def read_only_connect(database_uri, *, uri):
+            calls.append((database_uri, uri))
+            return sqlite3.connect(database_uri, uri=uri)
 
-    first = module.capture_resource_snapshots(database, log, cache, connect=read_only_connect)
-    second = module.capture_resource_snapshots(database, log, cache, connect=read_only_connect)
-    assert first == second
-    assert calls and all(uri is True and "mode=ro" in database_uri for database_uri, uri in calls)
-    assert before_bytes == (database.read_bytes(), log.read_bytes(), (cache / "synthetic.mp3").read_bytes())
+        first = module.capture_resource_snapshots(
+            database,
+            log,
+            cache,
+            media,
+            connect=read_only_connect,
+        )
+        second = module.capture_resource_snapshots(
+            database,
+            log,
+            cache,
+            media,
+            connect=read_only_connect,
+        )
+        assert module.ResourceSnapshots._fields == (
+            "database",
+            "database_wal",
+            "database_shm",
+            "database_logical",
+            "log",
+            "tts_cache",
+            "media",
+        )
+        assert first == second
+        assert first.database == module.file_digest(database)
+        assert first.database_wal == module.file_digest(wal)
+        assert first.database_shm == module.file_digest(shm)
+        assert first.database_logical == module.logical_sqlite_digest(database)
+        assert first.media == module.directory_digest(media)
+        assert calls and all(
+            uri is True and "mode=ro" in database_uri
+            for database_uri, uri in calls
+        )
+        assert before_bytes == (
+            database.read_bytes(),
+            wal.read_bytes(),
+            shm.read_bytes(),
+            log.read_bytes(),
+            (cache / "synthetic.mp3").read_bytes(),
+            (media / "synthetic.webp").read_bytes(),
+        )
 
 
 def test_socket_guard_blocks_non_loopback(tmp_path):
@@ -549,6 +606,9 @@ def test_loopback_server_uses_disposable_resources(child_server):
     assert Path(child_server.environment["APP_DB_PATH"]).parent == child_server.runtime_dir
     assert Path(child_server.environment["BROWSER_LOG_DIR"]).is_relative_to(child_server.runtime_dir)
     assert Path(child_server.environment["BROWSER_TTS_CACHE_DIR"]).is_relative_to(child_server.runtime_dir)
+    assert Path(child_server.environment["APP_LOG_PATH"]).is_relative_to(child_server.runtime_dir)
+    assert Path(child_server.environment["APP_MEDIA_ROOT"]).is_relative_to(child_server.runtime_dir)
+    assert Path(child_server.environment["APP_TTS_CACHE_PATH"]).is_relative_to(child_server.runtime_dir)
     assert child_server.process.poll() is None
 
 
@@ -569,6 +629,11 @@ def test_child_page_registers_fail_closed_business_routes_before_navigation(
         "**/api/chat",
         "**/api/conversations/*/complete",
         "**/api/tts*",
+        "**/api/runtime/context",
+        "**/api/media/avatars*",
+        "**/api/roster/month",
+        "**/api/reports/weekly*",
+        "**/api/conversations/search*",
     ]
     for pattern, handler in routes:
         outcomes = []
