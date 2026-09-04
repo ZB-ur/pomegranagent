@@ -10,10 +10,12 @@ import logging
 import os
 import socket
 import sqlite3
+import stat
 import subprocess
 import tempfile
 import types
 from collections.abc import Callable, Iterable, Mapping
+from enum import Enum
 from typing import NamedTuple
 
 
@@ -25,14 +27,47 @@ REAL_TTS_CACHE_PATH = ROOT / "data" / "tts_cache"
 REAL_MEDIA_ROOT = ROOT / "data" / "media"
 
 
+class FileKind(str, Enum):
+    MISSING = "missing"
+    REGULAR = "regular"
+    DIRECTORY = "directory"
+    SYMLINK = "symlink"
+    SPECIAL = "special"
+    UNREADABLE = "unreadable"
+
+
+class FileSnapshot(NamedTuple):
+    kind: FileKind
+    mode: int | None = None
+    device: int | None = None
+    inode: int | None = None
+    size: int | None = None
+    mtime_ns: int | None = None
+    sha256: str | None = None
+    symlink_target: str | None = None
+    error: str | None = None
+
+
+class DirectoryEntrySnapshot(NamedTuple):
+    relative_path: str
+    snapshot: FileSnapshot
+
+
+class DirectorySnapshot(NamedTuple):
+    root: FileSnapshot
+    entries: tuple[DirectoryEntrySnapshot, ...]
+    scan_error: str | None = None
+    scan_source: str | None = None
+
+
 class ResourceSnapshots(NamedTuple):
-    database: str | None
-    database_wal: str | None
-    database_shm: str | None
+    database: FileSnapshot
+    database_wal: FileSnapshot
+    database_shm: FileSnapshot
     database_logical: str | None
-    log: str | None
-    tts_cache: str | None
-    media: str | None
+    log: FileSnapshot
+    tts_cache: DirectorySnapshot
+    media: DirectorySnapshot
 
 
 class FreshMainImportResult:
@@ -249,43 +284,257 @@ def build_browser_environment(
     return environment
 
 
+def _snapshot_fields(details: os.stat_result) -> dict[str, int]:
+    return {
+        "mode": stat.S_IMODE(details.st_mode),
+        "device": details.st_dev,
+        "inode": details.st_ino,
+        "size": details.st_size,
+        "mtime_ns": details.st_mtime_ns,
+    }
+
+
+def _snapshot_identity(details: os.stat_result) -> tuple[int, ...]:
+    return (
+        details.st_mode,
+        details.st_dev,
+        details.st_ino,
+        details.st_size,
+        details.st_mtime_ns,
+    )
+
+
+def _unreadable_snapshot(details: os.stat_result, error: str) -> FileSnapshot:
+    return FileSnapshot(FileKind.UNREADABLE, error=error, **_snapshot_fields(details))
+
+
+def _capture_from_stat(
+    details: os.stat_result,
+    *,
+    open_regular: Callable[[], int],
+    read_link: Callable[[], str],
+    restat: Callable[[], os.stat_result],
+    include_bytes: bool,
+) -> tuple[FileSnapshot, bytes | None]:
+    fields = _snapshot_fields(details)
+    if stat.S_ISLNK(details.st_mode):
+        try:
+            target = read_link()
+            if _snapshot_identity(restat()) != _snapshot_identity(details):
+                return _unreadable_snapshot(details, "CHANGED_DURING_READ"), None
+        except OSError as error:
+            return _unreadable_snapshot(details, type(error).__name__), None
+        return FileSnapshot(FileKind.SYMLINK, symlink_target=target, **fields), None
+    if stat.S_ISDIR(details.st_mode):
+        return FileSnapshot(FileKind.DIRECTORY, **fields), None
+    if not stat.S_ISREG(details.st_mode):
+        return FileSnapshot(FileKind.SPECIAL, **fields), None
+
+    descriptor = -1
+    try:
+        descriptor = open_regular()
+        opened = os.fstat(descriptor)
+        if _snapshot_identity(opened) != _snapshot_identity(details):
+            return _unreadable_snapshot(details, "CHANGED_DURING_READ"), None
+        chunks = []
+        while True:
+            chunk = os.read(descriptor, 65536)
+            if not chunk:
+                break
+            chunks.append(chunk)
+        content = b"".join(chunks)
+        if (
+            _snapshot_identity(os.fstat(descriptor)) != _snapshot_identity(opened)
+            or _snapshot_identity(restat()) != _snapshot_identity(opened)
+        ):
+            return _unreadable_snapshot(details, "CHANGED_DURING_READ"), None
+    except OSError as error:
+        return _unreadable_snapshot(details, type(error).__name__), None
+    finally:
+        if descriptor >= 0:
+            os.close(descriptor)
+    return (
+        FileSnapshot(
+            FileKind.REGULAR,
+            sha256=hashlib.sha256(content).hexdigest(),
+            **fields,
+        ),
+        content if include_bytes else None,
+    )
+
+
+def _capture_path(path: Path, *, include_bytes: bool) -> tuple[FileSnapshot, bytes | None]:
+    candidate = Path(path)
+    try:
+        details = candidate.lstat()
+    except FileNotFoundError:
+        return FileSnapshot(FileKind.MISSING), None
+    except OSError as error:
+        return FileSnapshot(FileKind.UNREADABLE, error=type(error).__name__), None
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None and stat.S_ISREG(details.st_mode):
+        return _unreadable_snapshot(details, "O_NOFOLLOW_UNAVAILABLE"), None
+    close_on_exec = getattr(os, "O_CLOEXEC", 0)
+    return _capture_from_stat(
+        details,
+        open_regular=lambda: os.open(
+            candidate,
+            os.O_RDONLY | int(no_follow) | close_on_exec,
+        ),
+        read_link=lambda: os.readlink(candidate),
+        restat=candidate.lstat,
+        include_bytes=include_bytes,
+    )
+
+
+def _capture_at(
+    directory_fd: int,
+    name: str,
+    *,
+    include_bytes: bool = False,
+) -> tuple[FileSnapshot, bytes | None]:
+    try:
+        details = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return FileSnapshot(FileKind.MISSING), None
+    except OSError as error:
+        return FileSnapshot(FileKind.UNREADABLE, error=type(error).__name__), None
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None and stat.S_ISREG(details.st_mode):
+        return _unreadable_snapshot(details, "O_NOFOLLOW_UNAVAILABLE"), None
+    close_on_exec = getattr(os, "O_CLOEXEC", 0)
+    return _capture_from_stat(
+        details,
+        open_regular=lambda: os.open(
+            name,
+            os.O_RDONLY | int(no_follow) | close_on_exec,
+            dir_fd=directory_fd,
+        ),
+        read_link=lambda: os.readlink(name, dir_fd=directory_fd),
+        restat=lambda: os.stat(name, dir_fd=directory_fd, follow_symlinks=False),
+        include_bytes=include_bytes,
+    )
+
+
+def file_snapshot(path: Path) -> FileSnapshot:
+    return _capture_path(path, include_bytes=False)[0]
+
+
+def directory_snapshot(path: Path) -> DirectorySnapshot:
+    root_path = Path(path)
+    root = file_snapshot(root_path)
+    if root.kind is not FileKind.DIRECTORY:
+        return DirectorySnapshot(root, ())
+
+    entries: list[DirectoryEntrySnapshot] = []
+    scan_error = None
+    scan_source = None
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        return DirectorySnapshot(root, (), "O_NOFOLLOW_UNAVAILABLE", ".")
+    close_on_exec = getattr(os, "O_CLOEXEC", 0)
+    directory_only = getattr(os, "O_DIRECTORY", 0)
+
+    def walk(directory_fd: int, prefix: str) -> None:
+        nonlocal scan_error, scan_source
+        try:
+            with os.scandir(directory_fd) as scan:
+                children = sorted(tuple(scan), key=lambda item: item.name)
+        except OSError as error:
+            scan_error = type(error).__name__
+            scan_source = prefix or "."
+            return
+        for child in children:
+            if scan_error is not None:
+                return
+            relative = f"{prefix}/{child.name}" if prefix else child.name
+            snapshot, _content = _capture_at(directory_fd, child.name)
+            entries.append(DirectoryEntrySnapshot(relative, snapshot))
+            if snapshot.kind is not FileKind.DIRECTORY:
+                continue
+            child_fd = -1
+            try:
+                child_fd = os.open(
+                    child.name,
+                    os.O_RDONLY | directory_only | no_follow | close_on_exec,
+                    dir_fd=directory_fd,
+                )
+                opened = os.fstat(child_fd)
+                if (
+                    stat.S_IMODE(opened.st_mode) != snapshot.mode
+                    or opened.st_dev != snapshot.device
+                    or opened.st_ino != snapshot.inode
+                    or opened.st_size != snapshot.size
+                    or opened.st_mtime_ns != snapshot.mtime_ns
+                ):
+                    scan_error = "CHANGED_DURING_SCAN"
+                    scan_source = relative
+                    return
+                walk(child_fd, relative)
+            except OSError as error:
+                scan_error = type(error).__name__
+                scan_source = relative
+                return
+            finally:
+                if child_fd >= 0:
+                    os.close(child_fd)
+
+    root_fd = -1
+    try:
+        root_fd = os.open(
+            root_path,
+            os.O_RDONLY | directory_only | no_follow | close_on_exec,
+        )
+        opened = os.fstat(root_fd)
+        if (
+            stat.S_IMODE(opened.st_mode) != root.mode
+            or opened.st_dev != root.device
+            or opened.st_ino != root.inode
+            or opened.st_size != root.size
+            or opened.st_mtime_ns != root.mtime_ns
+        ):
+            scan_error = "CHANGED_DURING_SCAN"
+            scan_source = "."
+        else:
+            walk(root_fd, "")
+    except OSError as error:
+        scan_error = type(error).__name__
+        scan_source = "."
+    finally:
+        if root_fd >= 0:
+            os.close(root_fd)
+    entries.sort(key=lambda item: item.relative_path)
+    return DirectorySnapshot(root, tuple(entries), scan_error, scan_source)
+
+
 def logical_sqlite_digest(
     path: Path,
     *,
     connect: Callable[..., sqlite3.Connection] = sqlite3.connect,
 ) -> str | None:
-    resolved = path.resolve()
-    if not resolved.exists():
+    database = Path(path)
+    database_snapshot, database_bytes = _capture_path(database, include_bytes=True)
+    if database_snapshot.kind is not FileKind.REGULAR or database_bytes is None:
         return None
+    sidecar_bytes = {}
+    for suffix in ("-wal", "-shm"):
+        sidecar_snapshot, content = _capture_path(
+            Path(f"{database}{suffix}"), include_bytes=True
+        )
+        if sidecar_snapshot.kind is FileKind.MISSING:
+            continue
+        if sidecar_snapshot.kind is not FileKind.REGULAR or content is None:
+            return None
+        sidecar_bytes[suffix] = content
     with tempfile.TemporaryDirectory(prefix="browser-sqlite-shadow-") as temporary:
-        shadow = Path(temporary) / resolved.name
-        shadow.write_bytes(resolved.read_bytes())
-        for suffix in ("-wal", "-shm"):
-            source = Path(f"{resolved}{suffix}")
-            if source.exists():
-                Path(f"{shadow}{suffix}").write_bytes(source.read_bytes())
+        shadow = Path(temporary) / database.name
+        shadow.write_bytes(database_bytes)
+        for suffix, content in sidecar_bytes.items():
+            Path(f"{shadow}{suffix}").write_bytes(content)
         database_uri = f"{shadow.as_uri()}?mode=ro"
         with connect(database_uri, uri=True) as connection:
             snapshot = "\n".join(connection.iterdump()).encode("utf-8")
     return hashlib.sha256(snapshot).hexdigest()
-
-
-def file_digest(path: Path) -> str | None:
-    if not path.exists():
-        return None
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
-def directory_digest(path: Path) -> str | None:
-    if not path.exists():
-        return None
-    digest = hashlib.sha256()
-    for item in sorted(candidate for candidate in path.rglob("*") if candidate.is_file()):
-        digest.update(item.relative_to(path).as_posix().encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(item.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
 
 
 def capture_resource_snapshots(
@@ -298,13 +547,13 @@ def capture_resource_snapshots(
 ) -> ResourceSnapshots:
     logical = logical_sqlite_digest(database, connect=connect)
     return ResourceSnapshots(
-        file_digest(database),
-        file_digest(Path(f"{database}-wal")),
-        file_digest(Path(f"{database}-shm")),
+        file_snapshot(database),
+        file_snapshot(Path(f"{database}-wal")),
+        file_snapshot(Path(f"{database}-shm")),
         logical,
-        file_digest(log),
-        directory_digest(tts_cache),
-        directory_digest(media),
+        file_snapshot(log),
+        directory_snapshot(tts_cache),
+        directory_snapshot(media),
     )
 
 

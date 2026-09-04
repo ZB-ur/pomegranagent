@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "fixtures": [
+    {
+      "path": "child.png",
+      "sha256": "89b67c4243f1a5812e48ba115e0035a392cdd1897590b69d4a88755142b8ecd6",
+      "origin": {
+        "introduced_commit": "7bc5934a0976d6189cc6481005be45fcd272fb7a",
+        "upstream_source": "unrecorded"
+      },
+      "license": {
+        "status": "unverified",
+        "scope": "repository acceptance testing only"
+      },
+      "derivation": "Retained byte-for-byte from the introducing commit; Pillow inspection proves an empty EXIF map and no EXIF, Photoshop, ICC, or XMP info keys."
+    },
+    {
+      "path": "duck.jpg",
+      "sha256": "a34318126cc0371919ee33751be4042897ee1e86b10070bbf454ef3b32956d22",
+      "origin": {
+        "introduced_commit": "7bc5934a0976d6189cc6481005be45fcd272fb7a",
+        "upstream_source": "unrecorded"
+      },
+      "license": {
+        "status": "unverified",
+        "scope": "repository acceptance testing only"
+      },
+      "derivation": "Losslessly normalized from the introducing commit with jpegtran -copy none -optimize on 2026-09-04; EXIF and Photoshop application metadata were removed while the JPEG image coefficients and 128x128 dimensions were retained."
+    }
+  ]
+}

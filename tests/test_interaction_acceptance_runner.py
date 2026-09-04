@@ -2466,104 +2466,7 @@ EXPECTED_TODAY_RETRY_SELECTOR_ROWS = (
 )
 
 
-_EXPECTED_SELECTOR_MANIFEST_TEXT = r"""backend | ^test_pytest_application_logging_uses_only_the_disposable_runtime_file$ | 1 | 1,14
-backend | ^test_pytest_subprocess_does_not_change_application_db$ | 1 | 1
-backend | ^test_review_atomic_pytest_subprocess_does_not_change_the_real_application_log$ | 1 | 1
-backend | ^test_health_returns_frozen_runtime_versions$ | 1 | 2
-backend | ^test_version_manifest_is_no_store$ | 1 | 2
-backend | ^test_teacher_navigation_is_blocked_until_runtime_ready$ | 1 | 2
-backend | ^test_teacher_navigation_requires_both_runtime_and_authentication_and_can_relock$ | 1 | 2
-backend | ^test_chat_writes_one_pair_after_ai_success$ | 1 | 3
-backend | ^test_duplicate_request_replays_stored_pair_without_a_second_ai_call$ | 1 | 3
-backend | ^test_internal_chat_fault_marks_current_claim_failed_and_allows_retry\[(commit|context)\]$ | 2 | 3,4,14
-backend | ^test_fixed_max_round_commit_fault_marks_current_claim_failed_and_allows_retry$ | 1 | 3,7,14
-backend | ^test_complete_replays_the_frozen_snapshot_without_a_second_job$ | 1 | 3,7
-backend | ^test_completion_write_failure_rolls_back_the_job_and_end_state\[(commit|flush)\]$ | 2 | 3,7,14
-backend | ^test_process_builds_the_frozen_input_outside_a_database_session_and_projects_once$ | 1 | 7
-backend | ^test_restart_recovers_only_expired_processing_jobs_and_preserves_attempts$ | 1 | 7
-backend | ^test_failure_uses_bounded_backoff_then_a_sanitized_terminal_state\[(1-pending-1|2-pending-5|3-failed-0)\]$ | 3 | 7,14
-backend | ^test_teacher_retry_requires_session_and_reuses_the_failed_job$ | 1 | 7
-backend | ^test_teacher_retry_has_frozen_pending_and_terminal_state_contracts\[(pending-2-200-None|processing-1-409-ANALYSIS_IN_PROGRESS|succeeded-1-409-ANALYSIS_ALREADY_SUCCEEDED)\]$ | 3 | 7
-backend | ^test_lifespan_uses_the_injected_single_worker_for_health_and_teardown$ | 1 | 7
-backend | ^test_auto_generates_five_rotating_weekday_pairs_and_replays_first_snapshot$ | 1 | 3,11
-backend | ^test_draft_review_replaces_the_full_document_and_refetches_identically$ | 1 | 3,8
-backend | ^test_confirm_requires_complete_reasoned_scores_then_leaves_every_queue$ | 1 | 8
-backend | ^test_reliable_end_to_end_flow$ | 1 | 7,8,14
-backend | ^test_teacher_queue_uses_job_matrix_frozen_counts_sort_and_historical_child$ | 1 | 9
-backend | ^test_succeeded_detail_has_one_complete_ordered_document_or_a_stable_corruption_error$ | 1 | 9
-backend | ^test_child_deactivation_preserves_history_and_reactivation_restores_today_visibility$ | 1 | 12
-backend | ^test_resource_state_routes_are_locked_and_hard_delete_is_an_auth_first_tombstone$ | 1 | 12
-backend | ^test_hard_delete_tombstones_have_stable_missing_codes_and_no_target_lookup_or_write$ | 1 | 12
-backend | ^test_resource_route_inventory_flattens_direct_and_included_routes_and_rejects_legacy_parameter_aliases$ | 1 | 12
-backend | ^test_teacher_composes_safe_management_and_reports_without_legacy_routes$ | 1 | 12
-shared_node | ^version mismatch enters maintenance before any business request$ | 1 | 2
-shared_node | ^bootstrapVersionGate and ready share one pending successful gate promise$ | 1 | 2
-shared_node | ^caller abort stays AbortError while timeout becomes REQUEST_TIMEOUT$ | 1 | 3,14
-child_node | ^unbound and matching bound drafts become child-retryable without changing their request identity$ | 1 | 5
-child_node | ^a COMPLETE_FAILED recovery reload returns to saving_conversation at the same remote boundary$ | 1 | 5,7
-child_node | ^pending completion keeps the remote completion boundary and never reopens chat$ | 1 | 5,7
-child_node | ^ended chat saved through the machine restores only the completion path$ | 1 | 5,7
-child_node | ^uses the exact 1500 ms silence boundary and replaces one live timer on results and speech end$ | 1 | 10
-child_node | ^a timeout before deferred loader invocation falls back safely and ignores its late blob$ | 1 | 10
-teacher_node | ^Today validates every queue DTO shape, fixed labels, and queue-specific combinations$ | 1 | 7
-browser | ^test_child_health_validation_fallback_preserves_foundation_maintenance\[(1024x576|1280x720)\]$ | 2 | 2
-browser | ^test_teacher_locked_bootstrap_makes_only_runtime_and_auth_requests\[(1024x768|1440x900)\]$ | 2 | 2
-browser | ^test_teacher_runtime_failure_keeps_maintenance_and_makes_zero_auth_or_business_requests\[(1024x768|1440x900)\]$ | 2 | 2
-browser | ^test_teacher_auth_status_failure_is_safe_and_makes_zero_business_requests\[(1024x768|1440x900)\]$ | 2 | 2
-browser | ^test_chat_retryable_fault_reuses_persisted_request_id_once\[(1024x576|1280x720)\]$ | 2 | 3
-browser | ^test_first_chat_timeout_retains_draft_and_reuses_request_id_once\[(1024x576|1280x720)\]$ | 2 | 3,4,14
-browser | ^test_chat_fault_matrix_retains_draft_without_success_copy\[(http_500|non_json|offline)-(1024x576|1280x720)\]$ | 6 | 3,4,14
-browser | ^test_completion_delay_is_single_flight_and_saves_once\[(1024x576|1280x720)\]$ | 2 | 3,7,14
-browser | ^test_teacher_review_put_timeout_preserves_dirty_values_and_restores_focus\[(seed_review_timeout_1024|review_timeout_1440)\]$ | 2 | 3,14
-browser | ^test_teacher_review_delayed_save_is_single_flight_and_disables_every_editor_control\[(1024x768|1440x900)\]$ | 2 | 3,14
-browser | ^test_teacher_resource_state_delay_is_single_flight\[(seed_child_deactivate_1024|child_reactivate_1024|duck_deactivate_1024|duck_reactivate_1024|(child|duck)_(deactivate|reactivate)_1440)\]$ | 8 | 3,12,14
-browser | ^test_teacher_roster_delay_is_single_flight\[(seed_daily_1024|auto_1024|daily_1440|auto_1440)\]$ | 4 | 3,11,14
-browser | ^test_teacher_roster_settled_faults_preserve_snapshot_and_request_id\[(seed_daily_json_500_1024|auto_json_500_1024|(daily|auto)_(html_502|offline)_1024|(daily|auto)_(json_500|html_502|offline)_1440)\]$ | 12 | 3,11,14
-browser | ^test_reload_during_submit_restores_same_draft_and_ignores_old_response\[(1024x576|1280x720)\]$ | 2 | 5
-browser | ^test_pagehide_destroy_makes_held_callback_inert\[(1024x576|1280x720)\]$ | 2 | 5,14
-browser | ^test_microphone_denial_focuses_visible_teacher_help_then_opens_dialog\[(1024x576|1280x720)\]$ | 2 | 6
-browser | ^test_completion_replay_reaches_completed_once_after_strict_save\[(1024x576|1280x720)\]$ | 2 | 3,7
-browser | ^test_child_core_flow_is_page_keyboard_only_and_saves_once\[(1024x576|1280x720)\]$ | 2 | 7,13,14
-browser | ^test_teacher_today_renders_pending_processing_and_failed_rows_with_retry_boundaries\[(1024x768|1440x900)\]$ | 2 | 7,14
-browser | ^test_teacher_today_each_panel_has_its_fixed_empty_state\[(pending|processing|failed)-(1024x768|1440x900)\]$ | 6 | 7
-browser | ^test_teacher_today_analysis_retry_is_single_flight_and_refreshes_three_queues_in_order\[(accepted|replayed)-(1024x768|1440x900)\]$ | 4 | 3,7,14
-browser | ^test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy\[(mismatch|malformed|401|404|409|500|non-json)-(1024x768|1440x900)\]$ | 14 | 7,14
-browser | ^test_teacher_today_analysis_retry_offline_is_single_flight_until_transport_rejects\[(1024x768|1440x900)\]$ | 2 | 3,7,14
-browser | ^test_teacher_review_editor_saves_the_complete_normalized_draft_and_refreshes_only_queue\[(1024x768|1440x900)\]$ | 2 | 8
-browser | ^test_teacher_review_complete_confirm_uses_confirm_action_and_removes_the_pending_row\[(1024x768|1440x900)\]$ | 2 | 8
-browser | ^test_teacher_review_queue_and_detail_show_identity_time_id_and_status\[(1024x768|1440x900)\]$ | 2 | 9
-browser | ^test_tts_cold_start_uses_reachable_five_second_fallback\[(1024x576|1280x720)\]$ | 2 | 10,14
-browser | ^test_tts_faults_settle_and_do_not_block_completion\[(edge_http_500|edge_non_json|edge_offline|play_rejected|audio_error|browser_speech_error)-(1024x576|1280x720)\]$ | 12 | 10,14
-browser | ^test_child_deactivation_uses_named_dialog_and_real_undo\[(1024x768|1440x900)\]$ | 2 | 12
-browser | ^test_children_management_is_labeled_strict_and_never_sends_delete\[(1024x768|1440x900)\]$ | 2 | 12
-browser | ^test_teacher_management_exposes_reversible_state_without_delete\[(1024x768|1440x900)\]$ | 2 | 12
-browser | ^test_teacher_resource_state_settled_faults_never_claim_success\[(seed_child_deactivate_json_500_1024|child_reactivate_json_500_1024|duck_deactivate_json_500_1024|duck_reactivate_json_500_1024|(child|duck)_(deactivate|reactivate)_(html_502|offline)_1024|(child|duck)_(deactivate|reactivate)_(json_500|html_502|offline)_1440)\]$ | 24 | 12,14
-browser | ^test_manual_space_stop_requires_one_explicit_end\[(1024x576|1280x720)\]$ | 2 | 13
-browser | ^test_space_is_single_action_for_native_and_global_paths\[(1024x576|1280x720)\]$ | 2 | 13
-browser | ^test_keyboard_focus_visible_uses_start_to_ready_flow\[(1024x576|1280x720)\]$ | 2 | 13
-browser | ^test_fault_recovery_preserves_accessibility_and_projection_constraints\[(chat_retryable|completion_failure)-(1024x576|1280x720)\]$ | 4 | 13,14
-browser | ^test_teacher_complete_review_flow_is_page_keyboard_only\[(seed_keyboard_review_1024|keyboard_review_1440)\]$ | 2 | 13
-browser | ^test_teacher_dirty_review_dialog_is_named_keyboard_operable_and_restores_focus\[(seed_dirty_dialog_1024|dirty_dialog_1440)\]$ | 2 | 13
-browser | ^test_teacher_authenticated_routes_have_frozen_accessibility_structure\[(seed_a11y_today_1024|a11y_(children|ducks|roster|review|growth|search)_1024|a11y_(today|children|ducks|roster|review|growth|search)_1440)\]$ | 14 | 13
-browser | ^test_release_focus_indicator_meets_three_to_one\[(1024x768|1440x900)\]$ | 2 | 13
-browser | ^test_completion_fault_matrix_never_claims_saved_copy\[(http_500|non_json|offline|boundary_mismatch)-(1024x576|1280x720)\]$ | 8 | 3,14
-browser | ^test_teacher_representative_read_validators_cover_missing_transport_faults\[(seed_today_roster_html_502_1024|today_roster_offline_1024|review_pending_html_502_1024|review_pending_offline_1024|today_roster_html_502_1440|today_roster_offline_1440|review_pending_html_502_1440|review_pending_offline_1440)\]$ | 8 | 14
-browser | ^test_teacher_review_save_failures_keep_exact_values_dirty_and_never_refresh\[(server|non-json|offline)-\\u4fdd\\u5b58\\u5931\\u8d25\\uff0c\\u8bf7\\u7a0d\\u540e\\u91cd\\u8bd5\\u3002-(1024x768|1440x900)\]$ | 6 | 14
-browser | ^test_child_server_import_preflight_blocks_provider_env$ | 1 | 14
-browser | ^test_main_import_filehandler_is_redirected_from_real_log$ | 1 | 1,14
-browser | ^test_edge_tts_fake_stream_trips_before_network$ | 1 | 14
-browser | ^test_nonstarting_worker_has_no_start_side_effect$ | 1 | 14
-browser | ^test_browser_subprocess_environment_is_minimal$ | 1 | 14
-browser | ^test_real_resource_snapshots_are_read_only$ | 1 | 1,14
-browser | ^test_socket_guard_blocks_non_loopback$ | 1 | 14
-browser | ^test_fixture_teardown_closes_before_process_assertions$ | 1 | 14
-browser | ^test_context_loopback_policy_allows_only_exact_origin\[(data:text/plain,synthetic-False|http://127\.0\.0\.1/-False|http://127\.0\.0\.1:43123/-True|http://127\.0\.0\.1:43123/api/health\?x=1-True|http://127\.0\.0\.1:43124/-False|http://127\.0\.0\.1:not-a-port/-False|http://\[::1\]:43123/-False|http://example\.invalid:43123/-False|http://localhost:43123/-False|http://user:pass@127\.0\.0\.1:43123/-False|https://127\.0\.0\.1:43123/-False)\]$ | 11 | 14
-browser | ^test_loopback_server_uses_disposable_resources$ | 1 | 1,14
-browser | ^test_child_page_registers_fail_closed_business_routes_before_navigation$ | 1 | 14
-browser | ^test_page_specific_routes_cannot_widen_loopback_policy$ | 1 | 14
-browser | ^test_browser_parent_logging_is_redirected_from_real_application_log$ | 1 | 1,14
-browser | ^test_release_teacher_action_persists_to_disposable_sqlite\[(1024x768|1440x900)\]$ | 2 | 14
-backend | ^test_runtime_context_is_public_static_exact_and_reads_date_once$ | 1 | 2,14
+_P6_SELECTOR_ADDITIONS_TEXT = r"""backend | ^test_runtime_context_is_public_static_exact_and_reads_date_once$ | 1 | 2,14
 backend | ^test_runtime_context_rejects_every_query_shape_before_reading_the_clock$ | 1 | 2,14
 backend | ^test_business_today_reads_the_provider_exactly_once$ | 1 | 2,14
 backend | ^test_upload_authentication_precedes_multipart_parsing_content_length_and_writes$ | 1 | 3,14
@@ -2621,14 +2524,60 @@ browser | ^test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds\[(102
 browser | ^test_release_avatar_upload_and_fallback_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 12,14"""
 
 
-def _frozen_manifest_rows():
+_P5_TASK9_BRIEF_SHA256 = "74b1ed539b8674daf4ddc32713d42767f12bad1e7508db43bcd2645fd18b6e37"
+
+
+def _selector_rows(text):
     rows = []
-    for line in _EXPECTED_SELECTOR_MANIFEST_TEXT.splitlines():
+    for line in text.splitlines():
         command_id, pattern, count, gates = line.split(" | ")
         rows.append(
             (command_id, pattern, int(count), tuple(int(gate) for gate in gates.split(",")))
         )
     return tuple(rows)
+
+
+def _p5_frozen_manifest_rows():
+    brief_path = (
+        Path(__file__).resolve().parents[1]
+        / ".superpowers"
+        / "sdd"
+        / "2026-08-23-teacher-workbench-and-acceptance"
+        / "task-9-brief.md"
+    )
+    brief_bytes = brief_path.read_bytes()
+    assert hashlib.sha256(brief_bytes).hexdigest() == _P5_TASK9_BRIEF_SHA256
+    brief = brief_bytes.decode("utf-8", errors="strict")
+    marker = "```text\nbackend |"
+    start = brief.index(marker, brief.index("complete machine-readable selector")) + len(
+        "```text\n"
+    )
+    end = brief.index("\n```", start)
+    return _selector_rows(brief[start:end])
+
+
+def _p6_frozen_manifest_rows():
+    return _selector_rows(_P6_SELECTOR_ADDITIONS_TEXT)
+
+
+def _frozen_manifest_rows():
+    return _p5_frozen_manifest_rows() + _p6_frozen_manifest_rows()
+
+
+def test_p5_task9_selector_oracle_is_an_exact_ordered_prefix_with_p6_additions_separate():
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+    p5_rows = _p5_frozen_manifest_rows()
+    p6_rows = _p6_frozen_manifest_rows()
+    actual_rows = tuple(
+        (row.command_id, row.node_pattern, row.expected_count, row.gates)
+        for row in module.SELECTOR_MANIFEST
+    )
+
+    assert len(p5_rows) == 97
+    assert len(p6_rows) == 56
+    assert actual_rows[: len(p5_rows)] == p5_rows
+    assert actual_rows[len(p5_rows) :] == p6_rows
+    assert _frozen_manifest_rows() == p5_rows + p6_rows
 
 
 def _concat_expansions(left, right):

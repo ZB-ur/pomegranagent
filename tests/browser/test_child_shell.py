@@ -406,9 +406,7 @@ def test_browser_subprocess_environment_is_minimal(tmp_path):
     }
 
 
-def test_real_resource_snapshots_include_physical_db_sidecars_and_media_read_only(
-    tmp_path,
-):
+def test_real_resource_snapshots_are_read_only(tmp_path):
     module = load_child_server_module()
     database = tmp_path / "real.db"
     log = tmp_path / "app.log"
@@ -466,11 +464,13 @@ def test_real_resource_snapshots_include_physical_db_sidecars_and_media_read_onl
             "media",
         )
         assert first == second
-        assert first.database == module.file_digest(database)
-        assert first.database_wal == module.file_digest(wal)
-        assert first.database_shm == module.file_digest(shm)
+        assert first.database == module.file_snapshot(database)
+        assert first.database_wal == module.file_snapshot(wal)
+        assert first.database_shm == module.file_snapshot(shm)
         assert first.database_logical == module.logical_sqlite_digest(database)
-        assert first.media == module.directory_digest(media)
+        assert first.log == module.file_snapshot(log)
+        assert first.tts_cache == module.directory_snapshot(cache)
+        assert first.media == module.directory_snapshot(media)
         assert calls and all(
             uri is True and "mode=ro" in database_uri
             for database_uri, uri in calls
@@ -483,6 +483,131 @@ def test_real_resource_snapshots_include_physical_db_sidecars_and_media_read_onl
             (cache / "synthetic.mp3").read_bytes(),
             (media / "synthetic.webp").read_bytes(),
         )
+
+
+def test_real_resource_snapshots_keep_stable_missing_resources_typed(tmp_path):
+    module = load_child_server_module()
+    paths = tuple(tmp_path / name for name in ("app.db", "app.log", "tts", "media"))
+
+    first = module.capture_resource_snapshots(*paths)
+    second = module.capture_resource_snapshots(*paths)
+
+    assert first == second
+    assert first.database.kind is module.FileKind.MISSING
+    assert first.database_wal.kind is module.FileKind.MISSING
+    assert first.database_shm.kind is module.FileKind.MISSING
+    assert first.database_logical is None
+    assert first.log.kind is module.FileKind.MISSING
+    assert first.tts_cache.root.kind is module.FileKind.MISSING
+    assert first.media.root.kind is module.FileKind.MISSING
+
+
+def test_real_resource_snapshots_detect_missing_to_dangling_symlink(tmp_path):
+    module = load_child_server_module()
+    database = tmp_path / "app.db"
+    log = tmp_path / "app.log"
+    tts = tmp_path / "tts"
+    media = tmp_path / "media"
+
+    before = module.capture_resource_snapshots(database, log, tts, media)
+    log.symlink_to("missing-target.log")
+    after = module.capture_resource_snapshots(database, log, tts, media)
+
+    assert before != after
+    assert before.log.kind is module.FileKind.MISSING
+    assert after.log.kind is module.FileKind.SYMLINK
+    assert after.log.symlink_target == "missing-target.log"
+    assert after.log.sha256 is None
+
+
+def test_real_resource_snapshots_detect_nested_empty_directory_addition(tmp_path):
+    module = load_child_server_module()
+    database = tmp_path / "app.db"
+    log = tmp_path / "app.log"
+    tts = tmp_path / "tts"
+    media = tmp_path / "media"
+    tts.mkdir()
+    media.mkdir()
+
+    before = module.capture_resource_snapshots(database, log, tts, media)
+    (tts / "nested" / "empty").mkdir(parents=True)
+    after = module.capture_resource_snapshots(database, log, tts, media)
+
+    assert before != after
+    assert tuple(entry.relative_path for entry in before.tts_cache.entries) == ()
+    assert tuple(entry.relative_path for entry in after.tts_cache.entries) == (
+        "nested",
+        "nested/empty",
+    )
+    assert all(
+        entry.snapshot.kind is module.FileKind.DIRECTORY
+        for entry in after.tts_cache.entries
+    )
+
+
+def test_real_resource_snapshots_detect_mode_change(tmp_path):
+    module = load_child_server_module()
+    database = tmp_path / "app.db"
+    log = tmp_path / "app.log"
+    tts = tmp_path / "tts"
+    media = tmp_path / "media"
+    tts.mkdir()
+    media.mkdir()
+    log.write_bytes(b"stable")
+    log.chmod(0o600)
+
+    before = module.capture_resource_snapshots(database, log, tts, media)
+    log.chmod(0o640)
+    after = module.capture_resource_snapshots(database, log, tts, media)
+
+    assert before != after
+    assert before.log.mode == 0o600
+    assert after.log.mode == 0o640
+    assert before.log.sha256 == after.log.sha256
+
+
+def test_real_resource_snapshots_detect_same_content_inode_replacement(tmp_path):
+    module = load_child_server_module()
+    database = tmp_path / "app.db"
+    log = tmp_path / "app.log"
+    replacement = tmp_path / "replacement.log"
+    tts = tmp_path / "tts"
+    media = tmp_path / "media"
+    tts.mkdir()
+    media.mkdir()
+    log.write_bytes(b"same-content")
+
+    before = module.capture_resource_snapshots(database, log, tts, media)
+    replacement.write_bytes(b"same-content")
+    replacement.replace(log)
+    after = module.capture_resource_snapshots(database, log, tts, media)
+
+    assert before != after
+    assert before.log.sha256 == after.log.sha256
+    assert before.log.inode != after.log.inode
+
+
+def test_real_resource_snapshots_fail_closed_without_no_follow_support(
+    monkeypatch,
+    tmp_path,
+):
+    module = load_child_server_module()
+    regular = tmp_path / "regular.log"
+    directory = tmp_path / "tts"
+    regular.write_bytes(b"must-not-be-read-without-no-follow")
+    directory.mkdir()
+    monkeypatch.delattr(module.os, "O_NOFOLLOW")
+
+    file_state = module.file_snapshot(regular)
+    directory_state = module.directory_snapshot(directory)
+
+    assert file_state.kind is module.FileKind.UNREADABLE
+    assert file_state.sha256 is None
+    assert file_state.error == "O_NOFOLLOW_UNAVAILABLE"
+    assert directory_state.root.kind is module.FileKind.DIRECTORY
+    assert directory_state.entries == ()
+    assert directory_state.scan_error == "O_NOFOLLOW_UNAVAILABLE"
+    assert directory_state.scan_source == "."
 
 
 def test_socket_guard_blocks_non_loopback(tmp_path):

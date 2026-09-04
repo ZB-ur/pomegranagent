@@ -5,6 +5,9 @@ import json
 import re
 import sqlite3
 import uuid
+from email import policy
+from email.parser import BytesParser
+from io import BytesIO
 from pathlib import Path
 
 import pytest
@@ -39,9 +42,71 @@ LIVE_AVATAR_FIXTURES = (
         / "fixtures/live_provider/avatars/duck.jpg",
         "JPEG",
         (128, 128),
-        "d2c0e097af4e7923ea87e79eb485907d3b7058e155bd15f62b075cad7e7104c2",
+        "a34318126cc0371919ee33751be4042897ee1e86b10070bbf454ef3b32956d22",
     ),
 )
+LIVE_AVATAR_PROVENANCE = (
+    Path(__file__).resolve().parents[1]
+    / "fixtures/live_provider/avatars/PROVENANCE.json"
+)
+
+
+def _parse_avatar_multipart(payload: bytes, content_type: str) -> tuple[str, str, bytes]:
+    assert isinstance(payload, bytes) and payload
+    assert isinstance(content_type, str) and "\r" not in content_type and "\n" not in content_type
+    message = BytesParser(policy=policy.default).parsebytes(
+        b"MIME-Version: 1.0\r\nContent-Type: "
+        + content_type.encode("ascii", errors="strict")
+        + b"\r\n\r\n"
+        + payload
+    )
+    assert message.defects == []
+    assert message.get_content_type() == "multipart/form-data"
+    assert message.is_multipart()
+    parts = list(message.iter_parts())
+    assert len(parts) == 1
+    part = parts[0]
+    assert part.defects == []
+    assert part.get_content_disposition() == "form-data"
+    assert part.get_param("name", header="content-disposition") == "file"
+    filename = part.get_filename()
+    mime_type = part.get_content_type()
+    content = part.get_payload(decode=True)
+    assert isinstance(filename, str) and filename
+    assert isinstance(content, bytes) and content
+    return filename, mime_type, content
+
+
+def _canonical_avatar_response(
+    avatar_id: str,
+    source_content: bytes,
+) -> tuple[bytes, dict[str, object]]:
+    parsed_id = uuid.UUID(avatar_id)
+    assert str(parsed_id) == avatar_id
+    assert parsed_id.version == 4 and parsed_id.variant == uuid.RFC_4122
+    with Image.open(BytesIO(source_content)) as source:
+        source.load()
+        width, height = source.size
+        assert 0 < width <= 1024 and 0 < height <= 1024
+        pixels = source.convert("RGBA")
+    encoded = BytesIO()
+    pixels.save(encoded, format="WEBP", lossless=True, method=6)
+    content = encoded.getvalue()
+    with Image.open(BytesIO(content)) as decoded:
+        decoded.load()
+        assert decoded.format == "WEBP"
+        assert decoded.size == (width, height)
+        assert not ({"exif", "photoshop", "icc_profile", "xmp"} & set(decoded.info))
+    dto = {
+        "id": avatar_id,
+        "url": f"/api/media/avatars/{avatar_id}",
+        "mime_type": "image/webp",
+        "width": width,
+        "height": height,
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+    return content, dto
 
 
 REVIEW_WORKSPACE_BREAKPOINTS = [
@@ -49,6 +114,72 @@ REVIEW_WORKSPACE_BREAKPOINTS = [
     pytest.param({"width": 1279, "height": 900}, False, id="1279-stacked"),
     pytest.param({"width": 1280, "height": 900}, True, id="1280-two-column"),
 ]
+
+
+def test_live_avatar_fixtures_have_provenance_and_no_unsafe_metadata():
+    provenance = json.loads(LIVE_AVATAR_PROVENANCE.read_text(encoding="utf-8"))
+    assert provenance["schema_version"] == 1
+    records = {item["path"]: item for item in provenance["fixtures"]}
+    assert set(records) == {fixture.name for _kind, fixture, *_rest in LIVE_AVATAR_FIXTURES}
+
+    for _kind, fixture, image_format, image_size, expected_sha256 in LIVE_AVATAR_FIXTURES:
+        record = records[fixture.name]
+        assert record["sha256"] == expected_sha256
+        assert record["origin"] == {
+            "introduced_commit": "7bc5934a0976d6189cc6481005be45fcd272fb7a",
+            "upstream_source": "unrecorded",
+        }
+        assert record["license"] == {
+            "scope": "repository acceptance testing only",
+            "status": "unverified",
+        }
+        assert isinstance(record["derivation"], str) and record["derivation"]
+        assert hashlib.sha256(fixture.read_bytes()).hexdigest() == expected_sha256
+        with Image.open(fixture) as decoded:
+            decoded.load()
+            assert decoded.format == image_format
+            assert decoded.size == image_size
+            assert not ({"exif", "photoshop", "icc_profile", "xmp"} & set(decoded.info))
+            assert dict(decoded.getexif()) == {}
+
+
+def test_avatar_multipart_parser_returns_exact_file_bytes_and_mime():
+    boundary = "----pomegranagent-avatar-boundary"
+    content = b"\x00tracked-fixture-bytes\xff"
+    payload = (
+        f"--{boundary}\r\n"
+        'Content-Disposition: form-data; name="file"; filename="child.png"\r\n'
+        "Content-Type: image/png\r\n"
+        "\r\n"
+    ).encode("ascii") + content + f"\r\n--{boundary}--\r\n".encode("ascii")
+
+    assert _parse_avatar_multipart(
+        payload,
+        f"multipart/form-data; boundary={boundary}",
+    ) == ("child.png", "image/png", content)
+
+
+def test_canonical_avatar_response_bytes_match_exact_webp_dto():
+    source = BytesIO()
+    Image.new("RGBA", (13, 17), (14, 90, 132, 255)).save(source, format="PNG")
+    avatar_id = "123e4567-e89b-42d3-a456-426614174001"
+
+    content, dto = _canonical_avatar_response(avatar_id, source.getvalue())
+
+    assert dto == {
+        "id": avatar_id,
+        "url": f"/api/media/avatars/{avatar_id}",
+        "mime_type": "image/webp",
+        "width": 13,
+        "height": 17,
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+    }
+    with Image.open(BytesIO(content)) as decoded:
+        decoded.load()
+        assert decoded.format == "WEBP"
+        assert decoded.size == (13, 17)
+        assert not ({"exif", "photoshop", "icc_profile", "xmp"} & set(decoded.info))
 
 
 def _rect(locator) -> dict:
@@ -1073,6 +1204,23 @@ def test_release_avatar_upload_and_fallback_stay_in_bounds(
         "child": f"/api/media/avatars/{child_avatar_id}",
         "duck": f"/api/media/avatars/{duck_avatar_id}",
     }
+    fixture_by_kind = {kind: fixture for kind, fixture, *_rest in LIVE_AVATAR_FIXTURES}
+    fixture_by_name = {
+        fixture.name: (
+            kind,
+            fixture,
+            "image/png" if image_format == "PNG" else "image/jpeg",
+        )
+        for kind, fixture, image_format, *_rest in LIVE_AVATAR_FIXTURES
+    }
+    canonical_responses = {
+        "child": _canonical_avatar_response(
+            child_avatar_id, fixture_by_kind["child"].read_bytes()
+        ),
+        "duck": _canonical_avatar_response(
+            duck_avatar_id, fixture_by_kind["duck"].read_bytes()
+        ),
+    }
     children = [{
         "id": 701,
         "name": "边界幼儿",
@@ -1159,37 +1307,36 @@ def test_release_avatar_upload_and_fallback_stay_in_bounds(
         )
         payload = request.post_data_buffer
         assert payload is not None
-        if b'filename="child.png"' in payload:
-            kind = "child"
-            avatar_id = child_avatar_id
-            width, height = 117, 128
-        elif b'filename="duck.jpg"' in payload:
-            kind = "duck"
-            avatar_id = duck_avatar_id
-            width, height = 128, 128
-        else:
-            raise AssertionError("avatar chooser did not send a tracked fixture")
+        filename, mime_type, uploaded_content = _parse_avatar_multipart(
+            payload,
+            request.headers["content-type"],
+        )
+        assert filename in fixture_by_name, "avatar chooser did not send a tracked fixture"
+        kind, fixture, expected_mime_type = fixture_by_name[filename]
+        assert mime_type == expected_mime_type
+        assert uploaded_content == fixture.read_bytes()
         uploads.append((kind, request.headers["x-request-id"]))
-        _fulfill_json(route, {
-            "id": avatar_id,
-            "url": canonical[kind],
-            "mime_type": "image/webp",
-            "width": width,
-            "height": height,
-            "size_bytes": len(payload),
-            "sha256": "ab" * 32,
-        })
+        _webp_content, dto = canonical_responses[kind]
+        assert dto["url"] == canonical[kind]
+        _fulfill_json(route, dto)
 
     page.route(f"{teacher_browser.server.base_url}/api/media/avatars", upload)
-    fixture_by_kind = {kind: fixture for kind, fixture, *_rest in LIVE_AVATAR_FIXTURES}
-    mime_by_kind = {"child": "image/png", "duck": "image/jpeg"}
 
     def avatar_bytes(selected):
         def handler(route):
+            content, dto = canonical_responses[selected]
+            _assert_fixture_request(
+                route,
+                teacher_browser,
+                method="GET",
+                path=canonical[selected],
+            )
+            assert dto["size_bytes"] == len(content)
+            assert dto["sha256"] == hashlib.sha256(content).hexdigest()
             route.fulfill(
                 status=200,
-                content_type=mime_by_kind[selected],
-                body=fixture_by_kind[selected].read_bytes(),
+                content_type="image/webp",
+                body=content,
             )
 
         return handler
@@ -1248,6 +1395,10 @@ def test_release_avatar_upload_and_fallback_stay_in_bounds(
             "node => node.complete && node.naturalWidth > 0 && node.naturalHeight > 0",
             arg=image.element_handle(),
         )
+        assert image.evaluate("node => [node.naturalWidth, node.naturalHeight]") == [
+            canonical_responses[kind][1]["width"],
+            canonical_responses[kind][1]["height"],
+        ]
         card_box = _rect(card)
         avatar_box = _rect(shell)
         assert card_box["left"] <= avatar_box["left"] < avatar_box["right"] <= card_box["right"]
