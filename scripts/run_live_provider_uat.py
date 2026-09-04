@@ -11,7 +11,7 @@ import argparse
 import base64
 from collections.abc import Callable, Mapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 import hashlib
 import http.client
@@ -30,6 +30,7 @@ import stat
 import struct
 import subprocess
 import sys
+import tarfile
 import tempfile
 import threading
 import time
@@ -57,17 +58,26 @@ FROZEN_RELEASE = {
     "api_version": "3",
     "schema_version": "3",
 }
+FROZEN_MAX_ROUNDS_REPLY = "谢谢你今天的分享，鸭鸭日记本都记好啦！我们下次再见～"
 APPROVED_VIEWPORTS = {
     "child": ["1024x576", "1280x720"],
     "teacher": ["1024x768", "1440x900"],
 }
 REQUIRED_SCREENSHOT_STATES = {
-    "child-avatar-selected": ("child", "child_duck_avatar_management"),
-    "child-conversation-complete": ("child", "child_conversation_real_provider_tts"),
-    "teacher-management": ("teacher", "child_duck_avatar_management"),
-    "teacher-review-confirmed": ("teacher", "review_edit_confirm"),
-    "teacher-search-deep-link": ("teacher", "advanced_search_pagination_deep_link"),
-    "teacher-weekly-growth": ("teacher", "weekly_metrics_growth"),
+    "child-avatar-selected": ("child", "child_duck_avatar_management", "1024x576"),
+    "child-conversation-complete": (
+        "child",
+        "child_conversation_real_provider_tts",
+        "1280x720",
+    ),
+    "teacher-management": ("teacher", "child_duck_avatar_management", "1024x768"),
+    "teacher-review-confirmed": ("teacher", "review_edit_confirm", "1440x900"),
+    "teacher-search-deep-link": (
+        "teacher",
+        "advanced_search_pagination_deep_link",
+        "1440x900",
+    ),
+    "teacher-weekly-growth": ("teacher", "weekly_metrics_growth", "1024x768"),
 }
 TELEMETRY_KEYS = {
     "audio_bytes",
@@ -84,6 +94,17 @@ TELEMETRY_KEYS = {
     "response_sha256",
     "status",
     "voice",
+}
+ROSTER_TELEMETRY_KEYS = {
+    "canonical_body_sha256",
+    "error_code",
+    "kind",
+    "method",
+    "order",
+    "path",
+    "replace_existing",
+    "request_id",
+    "status",
 }
 LATENCY_BUCKETS = {"<1s", "1-5s", "5-30s", "30-120s", ">=120s"}
 REQUIRED_JOURNEY_STEPS = (
@@ -120,8 +141,10 @@ _PROVENANCE_KEYS = {
     "live_child_id",
     "live_duck_id",
     "live_conversation_id",
+    "local_terminal_request_id",
     "monthly_pairs",
     "monthly_roster_attempts",
+    "provider_chat_request_ids",
     "search_cursor",
     "search_deep_link",
     "search_page_one_ids",
@@ -183,6 +206,11 @@ class RunPlan:
     run_id: str
     root: Path
     root_identity: tuple[int, int, int, int]
+    source_root: Path
+    source_root_identity: tuple[int, int, int, int] | None
+    source_tree_oid: str | None
+    source_inventory: tuple[tuple[str, str, int, int, str], ...]
+    source_manifest: Path
     database: Path
     media: Path
     tts_cache: Path
@@ -711,6 +739,11 @@ def create_run_plan(
         run_id=run_id,
         root=run_root,
         root_identity=root_identity,
+        source_root=run_root / "reviewed-source",
+        source_root_identity=None,
+        source_tree_oid=None,
+        source_inventory=(),
+        source_manifest=run_root / "reviewed-source.json",
         database=run_root / "duck-diary-uat.db",
         media=run_root / "media",
         tts_cache=run_root / "tts-cache",
@@ -730,6 +763,321 @@ def create_run_plan(
     )
 
 
+def _git_object_output(
+    plan: RunPlan,
+    argv: tuple[str, ...],
+    *,
+    max_bytes: int,
+    runner=subprocess.run,
+) -> bytes:
+    if (
+        not isinstance(argv, tuple)
+        or not argv
+        or type(max_bytes) is not int
+        or max_bytes < 1
+    ):
+        raise HarnessSafetyError("reviewed source Git command is invalid")
+    if (
+        _owned_directory_identity(plan.repository, label="repository root")
+        != plan.repository_identity
+    ):
+        raise HarnessSafetyError("reviewed source repository identity changed")
+    try:
+        completed = runner(
+            argv,
+            cwd=plan.repository,
+            capture_output=True,
+            check=False,
+        )
+    except (OSError, ValueError) as exc:
+        raise HarnessSafetyError("reviewed source Git object read failed") from exc
+    payload = completed.stdout
+    if (
+        completed.returncode != 0
+        or not isinstance(payload, bytes)
+        or len(payload) > max_bytes
+    ):
+        raise HarnessSafetyError("reviewed source Git object read failed")
+    if (
+        _owned_directory_identity(plan.repository, label="repository root")
+        != plan.repository_identity
+    ):
+        raise HarnessSafetyError("reviewed source repository identity changed")
+    return payload
+
+
+def _git_blob_oid(payload: bytes) -> str:
+    header = f"blob {len(payload)}\0".encode("ascii")
+    return hashlib.sha1(header + payload, usedforsecurity=False).hexdigest()
+
+
+def _source_manifest_value(plan: RunPlan) -> dict[str, object]:
+    if plan.source_tree_oid is None:
+        raise HarnessSafetyError("reviewed source is not materialized")
+    return {
+        "files": [
+            {
+                "blob_oid": blob_oid,
+                "git_mode": git_mode,
+                "path": relative,
+                "sha256": digest,
+                "size": size,
+            }
+            for relative, blob_oid, git_mode, size, digest in plan.source_inventory
+        ],
+        "object_format": "sha1",
+        "protocol": "pomegranagent-reviewed-source/v1",
+        "source_head": plan.source_head,
+        "tree_oid": plan.source_tree_oid,
+    }
+
+
+def materialize_reviewed_source(
+    plan: RunPlan,
+    *,
+    runner=subprocess.run,
+) -> RunPlan:
+    """Retain and pin the exact Git tree used by every executable UAT surface."""
+
+    if plan.source_root_identity is not None or plan.source_inventory:
+        raise HarnessSafetyError("reviewed source was already materialized")
+    resolved = _git_object_output(
+        plan,
+        ("git", "rev-parse", f"{plan.source_head}^{{commit}}"),
+        max_bytes=256,
+        runner=runner,
+    )
+    tree = _git_object_output(
+        plan,
+        ("git", "rev-parse", f"{plan.source_head}^{{tree}}"),
+        max_bytes=256,
+        runner=runner,
+    )
+    object_format = _git_object_output(
+        plan,
+        ("git", "rev-parse", "--show-object-format"),
+        max_bytes=64,
+        runner=runner,
+    )
+    try:
+        resolved_head = resolved.decode("ascii", errors="strict").strip()
+        tree_oid = tree.decode("ascii", errors="strict").strip()
+        object_name = object_format.decode("ascii", errors="strict").strip()
+    except UnicodeError as exc:
+        raise HarnessSafetyError("reviewed source Git identity is invalid") from exc
+    if (
+        resolved_head != plan.source_head
+        or HEAD_PATTERN.fullmatch(tree_oid) is None
+        or object_name != "sha1"
+    ):
+        raise HarnessSafetyError("reviewed source Git identity is invalid")
+
+    listing = _git_object_output(
+        plan,
+        ("git", "ls-tree", "-r", "-z", "--full-tree", plan.source_head),
+        max_bytes=64_000_000,
+        runner=runner,
+    )
+    expected: dict[str, tuple[int, str]] = {}
+    try:
+        records = listing[:-1].split(b"\0") if listing.endswith(b"\0") else ()
+        if not records:
+            raise ValueError
+        for record in records:
+            metadata, raw_path = record.split(b"\t", 1)
+            raw_mode, kind, raw_oid = metadata.split(b" ")
+            relative = raw_path.decode("utf-8", errors="strict")
+            path = Path(relative)
+            mode_text = raw_mode.decode("ascii", errors="strict")
+            oid = raw_oid.decode("ascii", errors="strict")
+            if (
+                kind != b"blob"
+                or mode_text not in {"100644", "100755"}
+                or HEAD_PATTERN.fullmatch(oid) is None
+                or not relative
+                or path.is_absolute()
+                or "\\" in relative
+                or any(part in {"", ".", ".."} for part in path.parts)
+                or relative in expected
+            ):
+                raise ValueError
+            expected[path.as_posix()] = (int(mode_text, 8), oid)
+    except (UnicodeError, ValueError) as exc:
+        raise HarnessSafetyError("reviewed source Git tree is invalid") from exc
+    required = {
+        "scripts/seed_demo_database.py",
+        "scripts/live_provider_uat_server.py",
+        "tests/fixtures/live_provider/avatars/child.png",
+        "tests/fixtures/live_provider/avatars/duck.jpg",
+        "version.json",
+    }
+    if (
+        not required.issubset(expected)
+        or not any(path.startswith("app/backend/") for path in expected)
+        or not any(path.startswith("app/frontend/") for path in expected)
+    ):
+        raise HarnessSafetyError("reviewed source execution surface is incomplete")
+
+    archive = _git_object_output(
+        plan,
+        ("git", "archive", "--format=tar", plan.source_head),
+        max_bytes=1_000_000_000,
+        runner=runner,
+    )
+    extracted: dict[str, tuple[int, bytes]] = {}
+    try:
+        with tarfile.open(fileobj=io.BytesIO(archive), mode="r:") as bundle:
+            for member in bundle.getmembers():
+                relative = member.name.rstrip("/")
+                candidate = Path(relative)
+                if (
+                    not relative
+                    or candidate.is_absolute()
+                    or "\\" in relative
+                    or any(part in {"", ".", ".."} for part in candidate.parts)
+                ):
+                    raise ValueError
+                if member.isdir():
+                    continue
+                if not member.isfile() or relative in extracted:
+                    raise ValueError
+                stream = bundle.extractfile(member)
+                if stream is None:
+                    raise ValueError
+                payload = stream.read(1_000_000_001)
+                if len(payload) > 1_000_000_000:
+                    raise ValueError
+                extracted[candidate.as_posix()] = (member.mode, payload)
+    except (OSError, tarfile.TarError, ValueError) as exc:
+        raise HarnessSafetyError("reviewed source archive is invalid") from exc
+    if set(extracted) != set(expected):
+        raise HarnessSafetyError("reviewed source archive does not match Git tree")
+
+    inventory: list[tuple[str, str, int, int, str]] = []
+    for relative in sorted(expected):
+        expected_mode, blob_oid = expected[relative]
+        archive_mode, payload = extracted[relative]
+        if (
+            bool(archive_mode & 0o111) != bool(expected_mode & 0o111)
+            or _git_blob_oid(payload) != blob_oid
+        ):
+            raise HarnessSafetyError("reviewed source archive does not match Git objects")
+        inventory.append(
+            (relative, blob_oid, expected_mode, len(payload), _hash_bytes(payload))
+        )
+
+    _ensure_run_directory(
+        plan.source_root,
+        label="reviewed source root",
+        pinned_plan=plan,
+    )
+    directories = sorted(
+        {
+            parent.as_posix()
+            for relative in expected
+            for parent in Path(relative).parents
+            if parent.as_posix() != "."
+        },
+        key=lambda value: (value.count("/"), value),
+    )
+    for relative in directories:
+        _ensure_run_directory(
+            plan.source_root.joinpath(*relative.split("/")),
+            label="reviewed source directory",
+            pinned_plan=plan,
+        )
+    for relative, _blob_oid, git_mode, _size, _digest in inventory:
+        destination = plan.source_root.joinpath(*relative.split("/"))
+        _write_owned_bytes(destination, extracted[relative][1], pinned_plan=plan)
+        os.chmod(destination, 0o500 if git_mode & 0o111 else 0o400)
+
+    reviewed = replace(
+        plan,
+        source_tree_oid=tree_oid,
+        source_inventory=tuple(inventory),
+    )
+    atomic_write_json(
+        reviewed.source_manifest,
+        _source_manifest_value(reviewed),
+        pinned_plan=reviewed,
+    )
+    for relative in sorted(directories, key=lambda value: (-value.count("/"), value)):
+        os.chmod(reviewed.source_root.joinpath(*relative.split("/")), 0o500)
+    os.chmod(reviewed.source_root, 0o500)
+    reviewed = replace(
+        reviewed,
+        source_root_identity=_owned_directory_identity(
+            reviewed.source_root,
+            label="reviewed source root",
+        ),
+    )
+    assert_reviewed_source_pinned(reviewed)
+    return reviewed
+
+
+def assert_reviewed_source_pinned(plan: RunPlan) -> None:
+    if (
+        plan.source_root != plan.root / "reviewed-source"
+        or plan.source_root_identity is None
+        or plan.source_tree_oid is None
+        or not plan.source_inventory
+        or _owned_directory_identity(plan.source_root, label="reviewed source root")
+        != plan.source_root_identity
+    ):
+        raise HarnessSafetyError("reviewed source identity changed")
+    try:
+        manifest_payload = _read_pinned_run_file(
+            plan,
+            plan.source_manifest,
+            max_bytes=128_000_000,
+        )
+        if manifest_payload != canonical_json_line(_source_manifest_value(plan)).encode(
+            "utf-8"
+        ):
+            raise HarnessSafetyError("reviewed source manifest changed")
+        candidates = sorted(
+            plan.source_root.rglob("*"),
+            key=lambda item: item.relative_to(plan.source_root).as_posix(),
+        )
+    except (OSError, ValueError) as exc:
+        raise HarnessSafetyError("reviewed source inventory is unavailable") from exc
+    expected = {item[0]: item for item in plan.source_inventory}
+    observed: set[str] = set()
+    for candidate in candidates:
+        relative = candidate.relative_to(plan.source_root).as_posix()
+        try:
+            entry = candidate.lstat()
+        except OSError as exc:
+            raise HarnessSafetyError("reviewed source inventory changed") from exc
+        if stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode):
+            if (
+                stat.S_IMODE(entry.st_mode) != 0o500
+                or entry.st_uid != os.geteuid()
+                or entry.st_nlink < 1
+            ):
+                raise HarnessSafetyError("reviewed source directory changed")
+            continue
+        if relative not in expected:
+            raise HarnessSafetyError("reviewed source inventory changed")
+        _relative, blob_oid, git_mode, size, digest = expected[relative]
+        payload = _read_pinned_run_file(plan, candidate, max_bytes=1_000_000_000)
+        if (
+            not stat.S_ISREG(entry.st_mode)
+            or entry.st_uid != os.geteuid()
+            or entry.st_nlink != 1
+            or stat.S_IMODE(entry.st_mode)
+            != (0o500 if git_mode & 0o111 else 0o400)
+            or len(payload) != size
+            or _hash_bytes(payload) != digest
+            or _git_blob_oid(payload) != blob_oid
+        ):
+            raise HarnessSafetyError("reviewed source file changed")
+        observed.add(relative)
+    if observed != set(expected):
+        raise HarnessSafetyError("reviewed source inventory changed")
+    assert_run_plan_identity(plan)
+
+
 def build_seed_argv(
     plan: RunPlan,
     *,
@@ -741,7 +1089,7 @@ def build_seed_argv(
         raise HarnessSafetyError("business date provider returned an invalid value")
     return (
         python_executable,
-        str(plan.repository / "scripts" / "seed_demo_database.py"),
+        str(plan.source_root / "scripts" / "seed_demo_database.py"),
         "full-demo",
         "--anchor-date",
         anchor.isoformat(),
@@ -779,6 +1127,12 @@ def run_seed_process(
     popen=subprocess.Popen,
     getpgid: Callable[[int], int] = os.getpgid,
     getsid: Callable[[int], int] = os.getsid,
+    group_members: Callable[[int], tuple[tuple[int, int], ...]] = lambda pgid: _process_group_members(pgid),
+    killpg: Callable[[int, int], None] = os.killpg,
+    peek_exit: Callable[[OwnedProcess], int | None] | None = None,
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+    source_validator: Callable[[RunPlan], None] = assert_reviewed_source_pinned,
 ) -> dict[str, object]:
     """Run the synthetic seed offline in one bounded, shell-free process group."""
 
@@ -801,6 +1155,7 @@ def run_seed_process(
         or any(not isinstance(part, str) or not part for part in argv)
     ):
         raise HarnessSafetyError("offline seed process contract is invalid")
+    source_validator(plan)
 
     with tempfile.TemporaryFile(mode="w+b") as stdout_file, tempfile.TemporaryFile(
         mode="w+b"
@@ -808,7 +1163,7 @@ def run_seed_process(
         try:
             process = popen(
                 argv,
-                cwd=plan.repository,
+                cwd=plan.source_root,
                 env=dict(environment),
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_file,
@@ -826,13 +1181,39 @@ def run_seed_process(
             sid=process.pid,
         )
         _owned_identity(owned, getpgid=getpgid, getsid=getsid)
-        try:
-            returncode = process.wait(timeout=120)
-        except subprocess.TimeoutExpired as exc:
-            stop_owned_process_group(owned, getpgid=getpgid)
-            raise HarnessSafetyError("offline seed process timed out") from exc
+        observe = _peek_owned_exit if peek_exit is None else peek_exit
+        observed = _wait_owned_exit_unreaped(
+            owned,
+            timeout=120,
+            peek_exit=observe,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
+        if observed is None:
+            stop_owned_process_group(
+                owned,
+                getpgid=getpgid,
+                getsid=getsid,
+                group_members=group_members,
+                killpg=killpg,
+                peek_exit=observe,
+                monotonic=monotonic,
+                sleep=sleep,
+            )
+            raise HarnessSafetyError("offline seed process timed out")
+        returncode = stop_owned_process_group(
+            owned,
+            getpgid=getpgid,
+            getsid=getsid,
+            group_members=group_members,
+            killpg=killpg,
+            peek_exit=observe,
+            monotonic=monotonic,
+            sleep=sleep,
+        )
         if returncode != 0:
             raise HarnessSafetyError("offline seed process failed")
+        source_validator(plan)
         stdout_file.seek(0, os.SEEK_END)
         stderr_file.seek(0, os.SEEK_END)
         if stdout_file.tell() > 65_536 or stderr_file.tell() > 65_536:
@@ -932,6 +1313,10 @@ def build_backend_environment(
             "APP_DB_PATH": str(plan.database),
             "APP_LOG_PATH": str(plan.app_log),
             "APP_MEDIA_ROOT": str(plan.media),
+            "APP_REVIEWED_SOURCE_HEAD": plan.source_head,
+            "APP_REVIEWED_SOURCE_MANIFEST": str(plan.source_manifest),
+            "APP_REVIEWED_SOURCE_ROOT": str(plan.source_root),
+            "APP_REVIEWED_SOURCE_TREE_OID": str(plan.source_tree_oid),
             "APP_TTS_CACHE_PATH": str(plan.tts_cache),
             "PYTHONNOUSERSITE": "1",
             "PYTHON_DOTENV_DISABLED": "1",
@@ -1061,10 +1446,10 @@ def build_runtime_object(plan: RunPlan, *, port: int) -> dict[str, object]:
         "controller_evidence_path": str(plan.controller_evidence),
         "fixtures": {
             "child_avatar": str(
-                plan.repository / "tests/fixtures/live_provider/avatars/child.png"
+                plan.source_root / "tests/fixtures/live_provider/avatars/child.png"
             ),
             "duck_avatar": str(
-                plan.repository / "tests/fixtures/live_provider/avatars/duck.jpg"
+                plan.source_root / "tests/fixtures/live_provider/avatars/duck.jpg"
             ),
             "invalid_avatar": str(plan.invalid_avatar),
         },
@@ -1153,11 +1538,33 @@ def parse_telemetry_line(payload: bytes) -> dict[str, object]:
         value = json.loads(text)
     except (UnicodeError, ValueError, TypeError) as exc:
         raise HarnessSafetyError("provider telemetry is invalid") from exc
-    if (
-        not isinstance(value, dict)
-        or set(value) != TELEMETRY_KEYS
-        or canonical_json_line(value) != text
-    ):
+    if not isinstance(value, dict) or canonical_json_line(value) != text:
+        raise HarnessSafetyError("provider telemetry is invalid")
+    if set(value) == ROSTER_TELEMETRY_KEYS:
+        if (
+            value["kind"] != "roster_attempt"
+            or value["method"] != "POST"
+            or value["path"] != "/api/roster/month"
+            or type(value["order"]) is not int
+            or value["order"] <= 0
+            or not isinstance(value["request_id"], str)
+            or UUID4_PATTERN.fullmatch(value["request_id"]) is None
+            or not isinstance(value["canonical_body_sha256"], str)
+            or SHA256_PATTERN.fullmatch(value["canonical_body_sha256"]) is None
+            or type(value["replace_existing"]) is not bool
+            or type(value["status"]) is not int
+            or not 100 <= value["status"] <= 599
+            or not (
+                value["status"] < 400 and value["error_code"] is None
+                or value["status"] >= 400
+                and isinstance(value["error_code"], str)
+                and re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", value["error_code"])
+                is not None
+            )
+        ):
+            raise HarnessSafetyError("provider telemetry is invalid")
+        return value
+    if set(value) != TELEMETRY_KEYS:
         raise HarnessSafetyError("provider telemetry is invalid")
     operation = value["operation"]
     provider = value["provider"]
@@ -1165,7 +1572,7 @@ def parse_telemetry_line(payload: bytes) -> dict[str, object]:
     voice = value["voice"]
     if operation in {"chat_reply", "extract_info", "assess_conversation"}:
         expected_correlation = (
-            r"conversation:[1-9][0-9]*"
+            r"chat-request:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"
             if operation == "chat_reply"
             else r"analysis-job:[1-9][0-9]*"
         )
@@ -1258,7 +1665,7 @@ def summarize_provider_events(events: tuple[Mapping[str, object], ...]) -> dict[
         validated = parse_telemetry_line(canonical_json_line(dict(event)).encode("utf-8"))
         safe_events.append(validated)
     return {
-        "protocol": "pomegranagent-live-uat-provider-summary/v1",
+        "protocol": "pomegranagent-live-uat-telemetry-summary/v1",
         "events": safe_events,
     }
 
@@ -1400,6 +1807,7 @@ def launch_server_process(
     popen=subprocess.Popen,
     getpgid=os.getpgid,
     getsid=os.getsid,
+    source_validator: Callable[[RunPlan], None] = assert_reviewed_source_pinned,
 ) -> OwnedProcess:
     listen_fd = bound_socket.fileno()
     if (
@@ -1410,9 +1818,10 @@ def launch_server_process(
         or listen_fd == telemetry_fd
     ):
         raise HarnessSafetyError("inherited server descriptors are invalid")
+    source_validator(plan)
     argv = (
         python_executable,
-        str(plan.repository / "scripts" / "live_provider_uat_server.py"),
+        str(plan.source_root / "scripts" / "live_provider_uat_server.py"),
         "--listen-fd",
         str(listen_fd),
         "--telemetry-fd",
@@ -1421,7 +1830,7 @@ def launch_server_process(
     try:
         process = popen(
             argv,
-            cwd=plan.repository,
+            cwd=plan.source_root,
             env=dict(environment),
             stdin=subprocess.DEVNULL,
             stdout=output,
@@ -1440,6 +1849,7 @@ def launch_server_process(
         sid=process.pid,
     )
     _owned_identity(owned, getpgid=getpgid, getsid=getsid)
+    source_validator(plan)
     return owned
 
 
@@ -1448,10 +1858,68 @@ def require_owned_process_alive(
     *,
     getpgid: Callable[[int], int] = os.getpgid,
     getsid: Callable[[int], int] = os.getsid,
+    peek_exit: Callable[[OwnedProcess], int | None] | None = None,
 ) -> None:
     _owned_identity(owned, getpgid=getpgid, getsid=getsid)
-    if owned.process.poll() is not None:
+    observed_exit = _peek_owned_exit(owned) if peek_exit is None else peek_exit(owned)
+    if observed_exit is not None:
         raise HarnessSafetyError("live server exited before readiness")
+
+
+def _peek_owned_exit(
+    owned: OwnedProcess,
+    *,
+    waitid: Callable[[int, int, int], object | None] = os.waitid,
+) -> int | None:
+    """Observe child exit while deliberately retaining its kernel PID/PGID identity."""
+
+    if getattr(owned.process, "returncode", None) is not None:
+        return owned.process.returncode
+    required = ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
+    if any(not hasattr(os, name) for name in required):
+        raise HarnessSafetyError("unreaped process observation is unavailable")
+    try:
+        result = waitid(
+            os.P_PID,
+            owned.pid,
+            os.WEXITED | os.WNOHANG | os.WNOWAIT,
+        )
+    except (ChildProcessError, OSError, ValueError) as exc:
+        raise HarnessSafetyError("owned child identity is unavailable") from exc
+    if result is None:
+        return None
+    if getattr(result, "si_pid", None) != owned.pid:
+        raise HarnessSafetyError("owned child identity is invalid")
+    code = getattr(result, "si_code", None)
+    status_value = getattr(result, "si_status", None)
+    if type(status_value) is not int:
+        raise HarnessSafetyError("owned child exit status is invalid")
+    if code == getattr(os, "CLD_EXITED", 1):
+        return status_value
+    if code in {
+        getattr(os, "CLD_KILLED", 2),
+        getattr(os, "CLD_DUMPED", 3),
+    }:
+        return -status_value
+    raise HarnessSafetyError("owned child exit status is invalid")
+
+
+def _wait_owned_exit_unreaped(
+    owned: OwnedProcess,
+    *,
+    timeout: float,
+    peek_exit: Callable[[OwnedProcess], int | None],
+    monotonic: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
+) -> int | None:
+    deadline = monotonic() + timeout
+    while True:
+        observed = peek_exit(owned)
+        if observed is not None:
+            return observed
+        if monotonic() >= deadline:
+            return None
+        sleep(0.05)
 
 
 def _process_group_members(
@@ -1499,26 +1967,26 @@ def _verified_group_members(
         or type(sid) is not int
         or sid != expected_sid
         for pid, sid in members
-    ) or (
-        owned.process.poll() is not None
-        and any(pid == owned.pid for pid, _sid in members)
     ):
         raise HarnessSafetyError("process-group ownership is invalid")
     return members
 
 
-def _wait_owned_group_absent(
+def _wait_owned_group_quiescent(
     owned: OwnedProcess,
     *,
     group_members: Callable[[int], tuple[tuple[int, int], ...]],
+    peek_exit: Callable[[OwnedProcess], int | None],
     timeout: float,
     monotonic: Callable[[], float],
     sleep: Callable[[float], None],
 ) -> bool:
     deadline = monotonic() + timeout
     while True:
+        exit_status = peek_exit(owned)
         members = _verified_group_members(owned, tuple(group_members(owned.pgid)))
-        if not members:
+        remaining = [pid for pid, _sid in members if pid != owned.pid]
+        if exit_status is not None and not remaining:
             return True
         if monotonic() >= deadline:
             return False
@@ -1532,61 +2000,58 @@ def stop_owned_process_group(
     getsid: Callable[[int], int] = os.getsid,
     group_members: Callable[[int], tuple[tuple[int, int], ...]] = _process_group_members,
     killpg: Callable[[int, int], None] = os.killpg,
+    peek_exit: Callable[[OwnedProcess], int | None] | None = None,
     monotonic: Callable[[], float] = time.monotonic,
     sleep: Callable[[float], None] = time.sleep,
-) -> None:
+) -> int:
     """Stop the retained session and prove every owned PGID member is absent."""
 
-    leader_alive = owned.process.poll() is None
-    if leader_alive:
-        _owned_identity(owned, getpgid=getpgid, getsid=getsid)
-    elif (
-        type(owned.pid) is not int
-        or owned.pid <= 1
-        or owned.pgid != owned.pid
-        or (owned.sid is not None and owned.sid != owned.pid)
-    ):
-        raise HarnessSafetyError("process-group ownership is invalid")
+    observe = _peek_owned_exit if peek_exit is None else peek_exit
+    if getattr(owned.process, "returncode", None) is not None:
+        raise HarnessSafetyError("process-group leader was reaped before cleanup")
+    _owned_identity(owned, getpgid=getpgid, getsid=getsid)
+    exit_status = observe(owned)
     members = _verified_group_members(owned, tuple(group_members(owned.pgid)))
-    if not members:
-        if leader_alive:
-            raise HarnessSafetyError("process-group ownership is invalid")
-        return
+    if not any(pid == owned.pid for pid, _sid in members):
+        raise HarnessSafetyError("process-group ownership is invalid")
     try:
-        killpg(owned.pgid, signal.SIGTERM)
-        if leader_alive:
-            try:
-                owned.process.wait(timeout=8)
-            except subprocess.TimeoutExpired:
-                pass
-        if not _wait_owned_group_absent(
+        if exit_status is None or any(pid != owned.pid for pid, _sid in members):
+            _owned_identity(owned, getpgid=getpgid, getsid=getsid)
+            killpg(owned.pgid, signal.SIGTERM)
+        if not _wait_owned_group_quiescent(
             owned,
             group_members=group_members,
+            peek_exit=observe,
             timeout=2,
             monotonic=monotonic,
             sleep=sleep,
         ):
+            _owned_identity(owned, getpgid=getpgid, getsid=getsid)
             _verified_group_members(owned, tuple(group_members(owned.pgid)))
             killpg(owned.pgid, signal.SIGKILL)
-            if owned.process.poll() is None:
-                try:
-                    owned.process.wait(timeout=5)
-                except subprocess.TimeoutExpired as exc:
-                    raise HarnessSafetyError("owned process group could not be reaped") from exc
-            if not _wait_owned_group_absent(
+            if not _wait_owned_group_quiescent(
                 owned,
                 group_members=group_members,
+                peek_exit=observe,
                 timeout=5,
                 monotonic=monotonic,
                 sleep=sleep,
             ):
                 raise HarnessSafetyError("owned process group could not be reaped")
-        elif owned.process.poll() is None:
-            owned.process.wait(timeout=5)
+        observed_status = observe(owned)
+        if observed_status is None:
+            raise HarnessSafetyError("owned process group leader did not exit")
+        try:
+            returncode = owned.process.wait(timeout=5)
+        except subprocess.TimeoutExpired as exc:
+            raise HarnessSafetyError("owned process group could not be reaped") from exc
     except (OSError, ValueError) as exc:
         raise HarnessSafetyError("owned process group could not be stopped") from exc
-    if owned.process.poll() is None:
+    if returncode != observed_status:
+        raise HarnessSafetyError("owned process group exit status changed")
+    if _verified_group_members(owned, tuple(group_members(owned.pgid))):
         raise HarnessSafetyError("owned process group could not be reaped")
+    return returncode
 
 
 def start_live_server(
@@ -1664,6 +2129,7 @@ def finish_live_server(
     session: LiveServerSession,
     *,
     stopper: Callable[[OwnedProcess], None] = stop_owned_process_group,
+    peek_exit: Callable[[OwnedProcess], int | None] | None = None,
 ) -> tuple[Mapping[str, object], ...]:
     """Stop, reap, flush, and drain the one session exactly once."""
 
@@ -1672,7 +2138,8 @@ def finish_live_server(
     if session.finished:
         return session.provider_events
     error: BaseException | None = None
-    if session.owned.process.poll() is not None:
+    observe = _peek_owned_exit if peek_exit is None else peek_exit
+    if observe(session.owned) is not None:
         error = HarnessSafetyError("live server exited unexpectedly")
     try:
         stopper(session.owned)
@@ -1812,7 +2279,12 @@ def atomic_write_json(
         assert_run_plan_identity(pinned_plan)
 
 
-def finalize_failed_run(plan: RunPlan, *, reason_code: str) -> None:
+def finalize_failed_run(
+    plan: RunPlan,
+    *,
+    reason_code: str,
+    replace_unverified_complete: bool = False,
+) -> None:
     if re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", reason_code) is None:
         raise HarnessSafetyError("failed-run reason code is invalid")
     payload = {
@@ -1822,12 +2294,31 @@ def finalize_failed_run(plan: RunPlan, *, reason_code: str) -> None:
         "source_head": plan.source_head,
         "status": "FAILED",
     }
-    if plan.manifest.exists():
+    state = _file_evidence(plan.manifest)
+    if state["kind"] != "missing":
+        if state["kind"] != "regular":
+            raise HarnessSafetyError("existing retained manifest is invalid")
         try:
-            existing = json.loads(plan.manifest.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as exc:
+            existing_payload = _read_pinned_run_file(
+                plan,
+                plan.manifest,
+                max_bytes=10_000_000,
+            )
+            existing_text = existing_payload.decode("utf-8", errors="strict")
+            existing = json.loads(existing_text)
+        except (HarnessSafetyError, UnicodeError, ValueError) as exc:
             raise HarnessSafetyError("existing retained manifest is invalid") from exc
         if existing == payload:
+            return
+        if (
+            replace_unverified_complete
+            and isinstance(existing, Mapping)
+            and existing.get("protocol") == payload["protocol"]
+            and existing.get("run_id") == plan.run_id
+            and existing.get("source_head") == plan.source_head
+            and existing.get("status") == "COMPLETE"
+        ):
+            atomic_write_json(plan.manifest, payload, pinned_plan=plan)
             return
         raise HarnessSafetyError("existing retained manifest cannot be replaced")
     atomic_write_json(plan.manifest, payload, pinned_plan=plan)
@@ -1837,13 +2328,7 @@ def _hash_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
-def _file_evidence(path: Path) -> dict[str, object]:
-    try:
-        entry = path.lstat()
-    except FileNotFoundError:
-        return {"kind": "missing"}
-    except OSError as exc:
-        raise HarnessSafetyError("protected resource snapshot failed") from exc
+def _entry_evidence(entry: os.stat_result) -> dict[str, object]:
     common = {
         "device": entry.st_dev,
         "inode": entry.st_ino,
@@ -1852,55 +2337,254 @@ def _file_evidence(path: Path) -> dict[str, object]:
         "nlink": entry.st_nlink,
         "size": entry.st_size,
     }
-    if stat.S_ISREG(entry.st_mode) and entry.st_nlink == 1:
-        try:
-            payload = path.read_bytes()
-        except OSError as exc:
-            raise HarnessSafetyError("protected resource snapshot failed") from exc
-        after = path.lstat()
-        if (
-            after.st_dev,
-            after.st_ino,
-            after.st_mode,
-            after.st_nlink,
-            after.st_size,
-            after.st_mtime_ns,
-        ) != (
-            entry.st_dev,
-            entry.st_ino,
-            entry.st_mode,
-            entry.st_nlink,
-            entry.st_size,
-            entry.st_mtime_ns,
-        ):
-            raise HarnessSafetyError("protected resource changed during snapshot")
-        return {"kind": "regular", **common, "sha256": _hash_bytes(payload)}
-    if stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode):
+    if stat.S_ISREG(entry.st_mode):
+        return {"kind": "regular", **common}
+    if stat.S_ISDIR(entry.st_mode):
         return {"kind": "directory", **common}
     if stat.S_ISLNK(entry.st_mode):
         return {"kind": "symlink", **common}
     return {"kind": "special", **common}
 
 
-def _directory_evidence(path: Path) -> dict[str, object]:
-    root = _file_evidence(path)
-    if root["kind"] == "missing":
-        return {"root": root, "entries": [], "digest": _hash_bytes(b"[]")}
-    if root["kind"] != "directory":
-        raise HarnessSafetyError("protected resource tree is unsafe")
-    entries = []
+def _read_absolute_regular_nofollow(
+    path: Path,
+    *,
+    max_bytes: int = 2_000_000_000,
+) -> tuple[bytes, dict[str, object]]:
+    absolute = _absolute(path)
+    parent_descriptor = None
+    descriptor = None
     try:
-        candidates = sorted(path.rglob("*"), key=lambda item: item.relative_to(path).as_posix())
+        parent_descriptor = _open_absolute_directory_nofollow(absolute.parent)
+    except FileNotFoundError:
+        raise HarnessSafetyError("protected resource is unavailable") from None
+    except OSError as exc:
+        raise HarnessSafetyError("protected resource snapshot failed") from exc
+    try:
+        parent_identity = _directory_descriptor_identity(os.fstat(parent_descriptor))
+        entry = os.stat(absolute.name, dir_fd=parent_descriptor, follow_symlinks=False)
+        evidence = _entry_evidence(entry)
+        if (
+            evidence["kind"] != "regular"
+            or entry.st_nlink != 1
+            or entry.st_uid != os.geteuid()
+            or entry.st_mode & 0o022
+            or entry.st_size > max_bytes
+        ):
+            raise HarnessSafetyError("protected resource is not a safe regular file")
+        flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(absolute.name, flags, dir_fd=parent_descriptor)
+        before_identity = _regular_descriptor_identity(os.fstat(descriptor))
+        if before_identity != _regular_descriptor_identity(entry):
+            raise HarnessSafetyError("protected resource identity changed")
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise HarnessSafetyError("protected resource exceeds its bound")
+            chunks.append(chunk)
+        if _regular_descriptor_identity(os.fstat(descriptor)) != before_identity:
+            raise HarnessSafetyError("protected resource changed during snapshot")
+    except HarnessSafetyError:
+        raise
+    except (OSError, ValueError) as exc:
+        raise HarnessSafetyError("protected resource snapshot failed") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+    current_parent = None
+    try:
+        current_parent = _open_absolute_directory_nofollow(absolute.parent)
+        if _directory_descriptor_identity(os.fstat(current_parent)) != parent_identity:
+            raise HarnessSafetyError("protected resource ancestor identity changed")
+        current = os.stat(
+            absolute.name,
+            dir_fd=current_parent,
+            follow_symlinks=False,
+        )
+        if _regular_descriptor_identity(current) != before_identity:
+            raise HarnessSafetyError("protected resource identity changed")
+    except HarnessSafetyError:
+        raise
+    except OSError as exc:
+        raise HarnessSafetyError("protected resource identity changed") from exc
+    finally:
+        if current_parent is not None:
+            os.close(current_parent)
+    payload = b"".join(chunks)
+    return payload, {**evidence, "sha256": _hash_bytes(payload)}
+
+
+def _file_evidence(path: Path) -> dict[str, object]:
+    absolute = _absolute(path)
+    parent_descriptor = None
+    try:
+        parent_descriptor = _open_absolute_directory_nofollow(absolute.parent)
+        parent_identity = _directory_descriptor_identity(os.fstat(parent_descriptor))
+        entry = os.stat(absolute.name, dir_fd=parent_descriptor, follow_symlinks=False)
+    except FileNotFoundError:
+        return {"kind": "missing"}
+    except OSError as exc:
+        raise HarnessSafetyError("protected resource snapshot failed") from exc
+    finally:
+        if parent_descriptor is not None:
+            os.close(parent_descriptor)
+    evidence = _entry_evidence(entry)
+    if evidence["kind"] == "regular":
+        _payload, regular = _read_absolute_regular_nofollow(absolute)
+        if any(regular.get(key) != value for key, value in evidence.items()):
+            raise HarnessSafetyError("protected resource changed during snapshot")
+        return regular
+    current_parent = None
+    try:
+        current_parent = _open_absolute_directory_nofollow(absolute.parent)
+        if _directory_descriptor_identity(os.fstat(current_parent)) != parent_identity:
+            raise HarnessSafetyError("protected resource ancestor identity changed")
+        current = os.stat(
+            absolute.name,
+            dir_fd=current_parent,
+            follow_symlinks=False,
+        )
+        if _entry_evidence(current) != evidence:
+            raise HarnessSafetyError("protected resource changed during snapshot")
+    except HarnessSafetyError:
+        raise
+    except OSError as exc:
+        raise HarnessSafetyError("protected resource changed during snapshot") from exc
+    finally:
+        if current_parent is not None:
+            os.close(current_parent)
+    return evidence
+
+
+def _directory_evidence(path: Path) -> dict[str, object]:
+    absolute = _absolute(path)
+    descriptor = None
+    try:
+        descriptor = _open_absolute_directory_nofollow(absolute)
+    except FileNotFoundError:
+        missing = {"kind": "missing"}
+        return {"root": missing, "entries": [], "digest": _hash_bytes(b"[]")}
     except OSError as exc:
         raise HarnessSafetyError("protected resource tree scan failed") from exc
-    for candidate in candidates:
-        relative = candidate.relative_to(path).as_posix()
-        if any(part in {"", ".", ".."} for part in relative.split("/")):
+    entries: list[dict[str, object]] = []
+
+    def snapshot_directory(parent_descriptor: int, prefix: str) -> None:
+        try:
+            names = sorted(os.listdir(parent_descriptor))
+        except OSError as exc:
+            raise HarnessSafetyError("protected resource tree scan failed") from exc
+        for name in names:
+            if not name or name in {".", ".."} or "/" in name or "\\" in name:
+                raise HarnessSafetyError("protected resource tree is unsafe")
+            relative = f"{prefix}/{name}" if prefix else name
+            child_descriptor = None
+            try:
+                entry = os.stat(name, dir_fd=parent_descriptor, follow_symlinks=False)
+                evidence = _entry_evidence(entry)
+                if evidence["kind"] == "regular":
+                    if entry.st_nlink != 1 or entry.st_uid != os.geteuid() or entry.st_mode & 0o022:
+                        raise HarnessSafetyError("protected resource tree is unsafe")
+                    child_descriptor = os.open(
+                        name,
+                        os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
+                        dir_fd=parent_descriptor,
+                    )
+                    before_identity = _regular_descriptor_identity(
+                        os.fstat(child_descriptor)
+                    )
+                    if before_identity != _regular_descriptor_identity(entry):
+                        raise HarnessSafetyError("protected resource tree changed")
+                    chunks = []
+                    total = 0
+                    while True:
+                        chunk = os.read(child_descriptor, 1024 * 1024)
+                        if not chunk:
+                            break
+                        total += len(chunk)
+                        if total > 2_000_000_000:
+                            raise HarnessSafetyError("protected resource tree is too large")
+                        chunks.append(chunk)
+                    if (
+                        _regular_descriptor_identity(os.fstat(child_descriptor))
+                        != before_identity
+                        or _regular_descriptor_identity(
+                            os.stat(
+                                name,
+                                dir_fd=parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                        )
+                        != before_identity
+                    ):
+                        raise HarnessSafetyError("protected resource tree changed")
+                    evidence = {**evidence, "sha256": _hash_bytes(b"".join(chunks))}
+                    entries.append(
+                        {"relative_path": relative, "snapshot": evidence}
+                    )
+                elif evidence["kind"] == "directory":
+                    if entry.st_uid != os.geteuid() or entry.st_mode & 0o022 or entry.st_nlink < 1:
+                        raise HarnessSafetyError("protected resource tree is unsafe")
+                    child_descriptor = os.open(
+                        name,
+                        _directory_open_flags(),
+                        dir_fd=parent_descriptor,
+                    )
+                    before_identity = _directory_descriptor_identity(
+                        os.fstat(child_descriptor)
+                    )
+                    if before_identity != _directory_descriptor_identity(entry):
+                        raise HarnessSafetyError("protected resource tree changed")
+                    entries.append(
+                        {"relative_path": relative, "snapshot": evidence}
+                    )
+                    snapshot_directory(child_descriptor, relative)
+                    if (
+                        _directory_descriptor_identity(os.fstat(child_descriptor))
+                        != before_identity
+                        or _directory_descriptor_identity(
+                            os.stat(
+                                name,
+                                dir_fd=parent_descriptor,
+                                follow_symlinks=False,
+                            )
+                        )
+                        != before_identity
+                    ):
+                        raise HarnessSafetyError("protected resource tree changed")
+                else:
+                    raise HarnessSafetyError("protected resource tree is unsafe")
+            except HarnessSafetyError:
+                raise
+            except (OSError, ValueError) as exc:
+                raise HarnessSafetyError("protected resource tree scan failed") from exc
+            finally:
+                if child_descriptor is not None:
+                    os.close(child_descriptor)
+
+    try:
+        root_entry = os.fstat(descriptor)
+        root = _entry_evidence(root_entry)
+        if (
+            root["kind"] != "directory"
+            or root_entry.st_uid != os.geteuid()
+            or root_entry.st_mode & 0o022
+            or root_entry.st_nlink < 1
+        ):
             raise HarnessSafetyError("protected resource tree is unsafe")
-        evidence = _file_evidence(candidate)
-        if evidence["kind"] not in {"regular", "directory"}:
-            raise HarnessSafetyError("protected resource tree is unsafe")
-        entries.append({"relative_path": relative, "snapshot": evidence})
+        root_identity = _directory_descriptor_identity(root_entry)
+        snapshot_directory(descriptor, "")
+        if _directory_descriptor_identity(os.fstat(descriptor)) != root_identity:
+            raise HarnessSafetyError("protected resource tree changed")
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
     digest_payload = json.dumps(
         entries, ensure_ascii=True, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -1926,10 +2610,10 @@ def _sqlite_shadow(path: Path):
             if before["kind"] != "regular":
                 raise HarnessSafetyError("protected database snapshot failed")
             try:
-                payload = source.read_bytes()
-            except OSError as exc:
+                payload, pinned = _read_absolute_regular_nofollow(source)
+            except HarnessSafetyError as exc:
                 raise HarnessSafetyError("protected database snapshot failed") from exc
-            if _file_evidence(source) != before:
+            if pinned != before or _file_evidence(source) != before:
                 raise HarnessSafetyError("protected database changed during snapshot")
             try:
                 Path(f"{shadow}{suffix}").write_bytes(payload)
@@ -1939,8 +2623,11 @@ def _sqlite_shadow(path: Path):
 
 
 def _database_logical_digest(path: Path) -> str | None:
-    if not path.exists():
+    evidence = _file_evidence(path)
+    if evidence["kind"] == "missing":
         return None
+    if evidence["kind"] != "regular":
+        raise HarnessSafetyError("protected database snapshot failed")
     try:
         with _sqlite_shadow(path) as shadow:
             uri = f"{shadow.as_uri()}?mode=ro"
@@ -1975,27 +2662,36 @@ def _git_capture(root: Path, runner, argv: tuple[str, ...]) -> bytes:
     return completed.stdout
 
 
-def _dirty_path_names(status: bytes) -> tuple[str, ...]:
+def _dirty_path_records(status: bytes) -> tuple[tuple[str, str, str], ...]:
     if not status:
         return ()
     if not status.endswith(b"\0"):
         raise HarnessSafetyError("protected Git porcelain is invalid")
     records = list(status[:-1].split(b"\0"))
-    paths: list[str] = []
+    paths: list[tuple[str, str, str]] = []
     index = 0
     while index < len(records):
         record = records[index]
         if len(record) < 4 or record[2:3] != b" ":
             raise HarnessSafetyError("protected Git porcelain is invalid")
         status_code = record[:2]
-        raw_paths = [record[3:]]
+        try:
+            decoded_status = status_code.decode("ascii", errors="strict")
+        except UnicodeError as exc:
+            raise HarnessSafetyError("protected Git porcelain is invalid") from exc
+        if (
+            re.fullmatch(r"[ MADRCUT?!]{2}", decoded_status) is None
+            or decoded_status == "  "
+        ):
+            raise HarnessSafetyError("protected Git porcelain is invalid")
+        raw_paths = [(record[3:], "path")]
         index += 1
         if b"R" in status_code or b"C" in status_code:
             if index >= len(records):
                 raise HarnessSafetyError("protected Git porcelain is invalid")
-            raw_paths.append(records[index])
+            raw_paths = [(record[3:], "current"), (records[index], "original")]
             index += 1
-        for raw_path in raw_paths:
+        for raw_path, role in raw_paths:
             try:
                 relative = raw_path.decode("utf-8", errors="strict")
             except UnicodeError as exc:
@@ -2008,18 +2704,32 @@ def _dirty_path_names(status: bytes) -> tuple[str, ...]:
                 or any(part in {"", ".", ".."} for part in candidate.parts)
             ):
                 raise HarnessSafetyError("protected Git porcelain is invalid")
-            paths.append(candidate.as_posix())
-    return tuple(sorted(set(paths)))
+            paths.append((candidate.as_posix(), decoded_status, role))
+    result = tuple(sorted(paths))
+    if len(set(result)) != len(result):
+        raise HarnessSafetyError("protected Git porcelain contains duplicate records")
+    return result
 
 
-def _dirty_path_evidence(root: Path, relative: str) -> dict[str, object]:
+def _dirty_path_names(status: bytes) -> tuple[str, ...]:
+    return tuple(relative for relative, _status, _role in _dirty_path_records(status))
+
+
+def _dirty_path_evidence(
+    root: Path,
+    relative: str,
+    porcelain_status: str,
+    porcelain_role: str,
+) -> dict[str, object]:
     path = root.joinpath(*relative.split("/"))
     file_state = _file_evidence(path)
     directory = _directory_evidence(path) if file_state["kind"] == "directory" else None
-    if file_state["kind"] not in {"regular", "directory"}:
+    if file_state["kind"] not in {"missing", "regular", "directory"}:
         raise HarnessSafetyError("pre-existing dirty path is unsafe")
     return {
         "relative_path": relative,
+        "porcelain_status": porcelain_status,
+        "porcelain_role": porcelain_role,
         "file": file_state,
         "directory": directory,
     }
@@ -2044,7 +2754,7 @@ def capture_protected_resources(
         runner,
         ("git", "status", "--porcelain=v1", "-z", "--untracked-files=all"),
     )
-    dirty_names = _dirty_path_names(porcelain)
+    dirty_records = _dirty_path_records(porcelain)
     return {
         "database": _database_evidence(root / "data" / "duck_diary.db"),
         "log": _file_evidence(root / "logs" / "app.log"),
@@ -2053,7 +2763,8 @@ def capture_protected_resources(
         "git_head": head,
         "git_porcelain": {"sha256": _hash_bytes(porcelain), "size": len(porcelain)},
         "dirty_paths": [
-            _dirty_path_evidence(root, relative) for relative in dirty_names
+            _dirty_path_evidence(root, relative, porcelain_status, porcelain_role)
+            for relative, porcelain_status, porcelain_role in dirty_records
         ],
     }
 
@@ -2079,7 +2790,36 @@ def validate_reviewed_checkout(
         raise HarnessSafetyError("reviewed checkout identity is invalid")
     observed: list[str] = []
     for item in dirty:
-        if not isinstance(item, Mapping):
+        if (
+            not isinstance(item, Mapping)
+            or set(item)
+            != {
+                "directory",
+                "file",
+                "porcelain_role",
+                "porcelain_status",
+                "relative_path",
+            }
+            or not isinstance(item.get("file"), Mapping)
+            or item["file"].get("kind") not in {"missing", "regular", "directory"}
+            or (
+                item["file"].get("kind") == "directory"
+                and not isinstance(item.get("directory"), Mapping)
+            )
+            or (
+                item["file"].get("kind") != "directory"
+                and item.get("directory") is not None
+            )
+            or not isinstance(item.get("porcelain_status"), str)
+            or re.fullmatch(r"[ MADRCUT?!]{2}", item["porcelain_status"]) is None
+            or not isinstance(item.get("porcelain_role"), str)
+        ):
+            raise HarnessSafetyError("reviewed checkout dirty state is invalid")
+        rename_or_copy = "R" in item["porcelain_status"] or "C" in item["porcelain_status"]
+        if (
+            rename_or_copy
+            and item["porcelain_role"] not in {"current", "original"}
+        ) or (not rename_or_copy and item["porcelain_role"] != "path"):
             raise HarnessSafetyError("reviewed checkout dirty state is invalid")
         relative = item.get("relative_path")
         try:
@@ -2087,7 +2827,7 @@ def validate_reviewed_checkout(
         except HarnessSafetyError as exc:
             raise HarnessSafetyError("reviewed checkout contains runtime or UAT dirt") from exc
         observed.append(canonical)
-    if len(set(observed)) != len(observed) or tuple(sorted(observed)) != allowed:
+    if tuple(sorted(set(observed))) != allowed:
         raise HarnessSafetyError("reviewed checkout dirty paths are not explicitly classified")
 
 
@@ -2118,6 +2858,28 @@ _SECRET_PATTERNS = (
 )
 
 
+def _assert_secret_free_payload(
+    payload: bytes,
+    *,
+    actual_secrets: tuple[str, ...],
+    role: str,
+    apply_patterns: bool = True,
+) -> None:
+    if (
+        not isinstance(payload, bytes)
+        or not isinstance(role, str)
+        or re.fullmatch(r"[A-Za-z0-9._/-]{1,500}", role) is None
+        or any(not isinstance(secret, str) for secret in actual_secrets)
+    ):
+        raise HarnessSafetyError("secret scan failed: invalid scanner input")
+    encoded_secrets = tuple(secret.encode("utf-8") for secret in actual_secrets if secret)
+    if any(secret in payload for secret in encoded_secrets) or (
+        apply_patterns
+        and any(pattern.search(payload) is not None for pattern in _SECRET_PATTERNS)
+    ):
+        raise HarnessSafetyError(f"secret scan failed: {role}")
+
+
 def scan_retained_artifacts(
     root: Path,
     *,
@@ -2130,11 +2892,8 @@ def scan_retained_artifacts(
             raise HarnessSafetyError("secret scan failed: retained root identity")
         assert_run_plan_identity(pinned_plan)
     _safe_owned_directory(base, label="retained artifact root")
-    encoded_secrets = tuple(
-        secret.encode("utf-8")
-        for secret in actual_secrets
-        if isinstance(secret, str) and secret
-    )
+    if any(not isinstance(secret, str) for secret in actual_secrets):
+        raise HarnessSafetyError("secret scan failed: invalid scanner input")
     try:
         candidates = sorted(base.rglob("*"), key=lambda item: item.relative_to(base).as_posix())
     except OSError as exc:
@@ -2166,11 +2925,16 @@ def scan_retained_artifacts(
         total += len(payload)
         if total > 2_000_000_000:
             raise HarnessSafetyError("secret scan failed: artifact bound")
-        if any(secret in payload for secret in encoded_secrets) or any(
-            pattern.search(payload) is not None for pattern in _SECRET_PATTERNS
-        ):
-            role = path.relative_to(base).as_posix()
-            raise HarnessSafetyError(f"secret scan failed: {role}")
+        role = path.relative_to(base).as_posix()
+        _assert_secret_free_payload(
+            payload,
+            actual_secrets=actual_secrets,
+            role=role,
+            # The retained source tree is already pinned byte-for-byte to the
+            # reviewed Git objects and necessarily contains the scanner's own
+            # detector literals.  Registered live secrets remain forbidden.
+            apply_patterns=not role.startswith("reviewed-source/"),
+        )
         if payload.startswith(b"\x89PNG\r\n\x1a\n"):
             try:
                 _validate_png_container(payload)
@@ -2282,7 +3046,8 @@ def _validated_screenshot(
         or state_id not in REQUIRED_SCREENSHOT_STATES
         or semantic != state_id
         or not isinstance(surface, str)
-        or (surface, item["journey_step"]) != REQUIRED_SCREENSHOT_STATES[state_id]
+        or (surface, item["journey_step"], viewport)
+        != REQUIRED_SCREENSHOT_STATES[state_id]
         or viewport not in APPROVED_VIEWPORTS[surface]
         or not _safe_assertions(item["visible_assertions"])
     ):
@@ -2639,17 +3404,23 @@ def _avatar_provenance(
     ):
         raise HarnessSafetyError("database provenance avatar metadata mismatch")
     path = plan.media / filename
-    evidence = _file_evidence(path)
+    try:
+        payload = _read_pinned_run_file(
+            plan,
+            path,
+            max_bytes=100_000_000,
+        )
+    except HarnessSafetyError as exc:
+        raise HarnessSafetyError("database provenance avatar file mismatch") from exc
     if (
-        evidence.get("kind") != "regular"
-        or evidence.get("size") != size_bytes
-        or evidence.get("sha256") != expected_sha
+        len(payload) != size_bytes
+        or _hash_bytes(payload) != expected_sha
     ):
         raise HarnessSafetyError("database provenance avatar file mismatch")
     try:
         from PIL import Image
 
-        with Image.open(path) as image:
+        with Image.open(io.BytesIO(payload)) as image:
             image.load()
             decoded = (image.format, image.size)
     except Exception as exc:
@@ -2900,18 +3671,27 @@ def validate_database_provenance(
             if (
                 not isinstance(attempts, list)
                 or len(attempts) != 2
-                or attempts[0]
-                != {
-                    "http_status": 409,
-                    "outcome": "ROSTER_DATE_CONFLICT",
-                    "request_id": attempts[0].get("request_id") if isinstance(attempts[0], dict) else None,
-                }
-                or attempts[1]
-                != {
-                    "http_status": 200,
-                    "outcome": "SUCCEEDED",
-                    "request_id": attempts[1].get("request_id") if isinstance(attempts[1], dict) else None,
-                }
+                or any(
+                    not isinstance(attempt, Mapping)
+                    or set(attempt) != ROSTER_TELEMETRY_KEYS
+                    for attempt in attempts
+                )
+                or [attempt["kind"] for attempt in attempts]
+                != ["roster_attempt", "roster_attempt"]
+                or [attempt["method"] for attempt in attempts] != ["POST", "POST"]
+                or [attempt["path"] for attempt in attempts]
+                != ["/api/roster/month", "/api/roster/month"]
+                or [attempt["order"] for attempt in attempts] != [1, 2]
+                or [attempt["status"] for attempt in attempts] != [409, 200]
+                or [attempt["error_code"] for attempt in attempts]
+                != ["ROSTER_DATE_CONFLICT", None]
+                or [attempt["replace_existing"] for attempt in attempts]
+                != [False, True]
+                or attempts[0]["canonical_body_sha256"]
+                != attempts[1]["canonical_body_sha256"]
+                or not isinstance(attempts[0]["canonical_body_sha256"], str)
+                or SHA256_PATTERN.fullmatch(attempts[0]["canonical_body_sha256"])
+                is None
             ):
                 raise HarnessSafetyError("database provenance roster retry evidence is invalid")
             conflict_request_id = attempts[0]["request_id"]
@@ -2932,7 +3712,7 @@ def validate_database_provenance(
             ):
                 raise HarnessSafetyError("database provenance roster retry identity mismatch")
             retry_row = connection.execute(
-                "SELECT operation, status, response_json, last_error_code, last_error_message "
+                "SELECT operation, status, response_json, last_error_code, last_error_message, payload_hash "
                 "FROM roster_requests WHERE request_id = ?",
                 (retry_request_id,),
             ).fetchone()
@@ -2954,10 +3734,40 @@ def validate_database_provenance(
                 }
                 for roster_date, expected_children in sorted(monthly.items())
             ]
+            expected_body = {
+                "cycle": next(iter(cycles)) if len(cycles) == 1 else None,
+                "entries": [
+                    {"child_ids": item["child_ids"], "date": item["date"]}
+                    for item in expected_schedule
+                ],
+                "month": retry_response.get("month")
+                if isinstance(retry_response, dict)
+                else None,
+            }
+            expected_body_sha = _hash_bytes(
+                json.dumps(
+                    expected_body,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            )
+            expected_retry_hash = _hash_bytes(
+                json.dumps(
+                    {
+                        **expected_body,
+                        "operation": "monthly_roster",
+                        "replace_existing": True,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ).encode("utf-8")
+            )
             if (
                 retry_row is None
                 or retry_row[:2] != ("monthly_roster", "succeeded")
-                or retry_row[3:] != (None, None)
+                or retry_row[3:5] != (None, None)
                 or not isinstance(retry_response, dict)
                 or retry_response.get("request_id") != retry_request_id
                 or retry_response.get("replayed") is not False
@@ -2965,6 +3775,8 @@ def validate_database_provenance(
                 or not isinstance(next(iter(cycles)), str)
                 or not next(iter(cycles))
                 or retry_response.get("schedule") != expected_schedule
+                or attempts[0]["canonical_body_sha256"] != expected_body_sha
+                or retry_row[5] != expected_retry_hash
             ):
                 raise HarnessSafetyError("database provenance roster retry mismatch")
             conversation = connection.execute(
@@ -2977,7 +3789,7 @@ def validate_database_provenance(
                 or conversation[0] != child_id
                 or conversation[2] is None
                 or conversation[3] != "ended"
-                or conversation[4] not in {"complete", "manual", "max_rounds"}
+                or conversation[4] != "max_rounds"
                 or type(conversation[5]) is not int
             ):
                 raise HarnessSafetyError("database provenance conversation mismatch")
@@ -2986,8 +3798,7 @@ def validate_database_provenance(
                 (conversation_id,),
             ).fetchall()
             if (
-                len(messages) < 6
-                or len(messages) % 2
+                len(messages) != 6
                 or messages[-1][0] != conversation[5]
                 or any(row[0] in baseline_ids["messages"] for row in messages)
                 or [row[1] for row in messages] != ["child", "diary"] * (len(messages) // 2)
@@ -2995,32 +3806,58 @@ def validate_database_provenance(
             ):
                 raise HarnessSafetyError("database provenance frozen messages mismatch")
             tts_evidence = entity_ids["tts_evidence"]
-            if (
-                not isinstance(tts_evidence, Mapping)
-                or set(tts_evidence)
-                != {
-                    "audio_sha256",
-                    "cache_relative_path",
-                    "source_message_id",
-                    "text_sha256",
-                }
-                or tts_evidence["source_message_id"] != messages[-1][0]
-                or tts_evidence["text_sha256"]
-                != _hash_bytes(messages[-1][2].encode("utf-8"))
-                or not isinstance(tts_evidence["audio_sha256"], str)
-                or SHA256_PATTERN.fullmatch(tts_evidence["audio_sha256"]) is None
-                or tts_evidence["cache_relative_path"]
-                != "tts-cache/"
-                + hashlib.md5(messages[-1][2].encode("utf-8"), usedforsecurity=False).hexdigest()
-                + ".mp3"
-                or str(tts_evidence["cache_relative_path"]).removeprefix("tts-cache/")
-                in baseline_tts_files
-            ):
+            child_name_row = connection.execute(
+                "SELECT name FROM children WHERE id = ?", (child_id,)
+            ).fetchone()
+            if child_name_row is None or not isinstance(child_name_row[0], str):
                 raise HarnessSafetyError("database provenance TTS source mismatch")
+            greeting = (
+                f"你好呀，{child_name_row[0]}！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～"
+            )
+            expected_tts = [
+                ("opening_greeting", None, greeting),
+                *[
+                    ("diary_reply", message[0], message[2])
+                    for message in messages[1::2]
+                ],
+            ]
+            if not isinstance(tts_evidence, list) or len(tts_evidence) != len(expected_tts):
+                raise HarnessSafetyError("database provenance TTS source mismatch")
+            for evidence, (kind, source_message_id, text) in zip(
+                tts_evidence, expected_tts, strict=True
+            ):
+                expected_cache = (
+                    "tts-cache/"
+                    + hashlib.md5(
+                        text.encode("utf-8"), usedforsecurity=False
+                    ).hexdigest()
+                    + ".mp3"
+                )
+                if (
+                    not isinstance(evidence, Mapping)
+                    or set(evidence)
+                    != {
+                        "audio_sha256",
+                        "cache_relative_path",
+                        "kind",
+                        "source_message_id",
+                        "text_sha256",
+                    }
+                    or evidence["kind"] != kind
+                    or evidence["source_message_id"] != source_message_id
+                    or evidence["text_sha256"] != _hash_bytes(text.encode("utf-8"))
+                    or not isinstance(evidence["audio_sha256"], str)
+                    or SHA256_PATTERN.fullmatch(evidence["audio_sha256"]) is None
+                    or evidence["cache_relative_path"] != expected_cache
+                    or expected_cache.removeprefix("tts-cache/") in baseline_tts_files
+                    or _file_evidence(plan.root / expected_cache).get("sha256")
+                    != evidence["audio_sha256"]
+                ):
+                    raise HarnessSafetyError("database provenance TTS source mismatch")
             chat_request_ids = entity_ids["chat_request_ids"]
             if (
                 not isinstance(chat_request_ids, list)
-                or len(chat_request_ids) != len(messages) // 2
+                or len(chat_request_ids) != 3
                 or len(set(chat_request_ids)) != len(chat_request_ids)
                 or any(
                     not isinstance(value, str)
@@ -3030,6 +3867,11 @@ def validate_database_provenance(
                 )
             ):
                 raise HarnessSafetyError("database provenance chat request identities are invalid")
+            if (
+                entity_ids["provider_chat_request_ids"] != chat_request_ids[:2]
+                or entity_ids["local_terminal_request_id"] != chat_request_ids[2]
+            ):
+                raise HarnessSafetyError("database provenance chat provider boundary mismatch")
             for index, request_id in enumerate(chat_request_ids):
                 child_message = messages[index * 2]
                 diary_message = messages[index * 2 + 1]
@@ -3061,9 +3903,29 @@ def validate_database_provenance(
                     raise HarnessSafetyError("database provenance chat response mismatch") from exc
                 if (
                     not isinstance(response, dict)
+                    or set(response)
+                    != {
+                        "child_message_id",
+                        "conversation_id",
+                        "diary_message_id",
+                        "end_reason",
+                        "ended",
+                        "replayed",
+                        "reply",
+                        "request_id",
+                        "round",
+                    }
+                    or response.get("request_id") != request_id
                     or response.get("conversation_id") != conversation_id
+                    or response.get("child_message_id") != child_message[0]
                     or response.get("diary_message_id") != diary_message[0]
                     or response.get("reply") != diary_message[2]
+                    or response.get("round") != index + 1
+                    or response.get("replayed") is not False
+                    or response.get("ended") is not (index == 2)
+                    or response.get("end_reason")
+                    != ("max_rounds" if index == 2 else None)
+                    or (index == 2 and response.get("reply") != FROZEN_MAX_ROUNDS_REPLY)
                 ):
                     raise HarnessSafetyError("database provenance chat response mismatch")
             jobs = connection.execute(
@@ -3209,6 +4071,8 @@ def validate_database_provenance(
                 or not page_one
                 or not page_two
                 or any(type(value) is not int or value <= 0 for value in page_one + page_two)
+                or len(set(page_one)) != len(page_one)
+                or len(set(page_two)) != len(page_two)
                 or set(page_one) & set(page_two)
                 or result_id != conversation_id
                 or result_id not in set(page_one + page_two)
@@ -3428,6 +4292,9 @@ def _validate_provider_completion(
     conversation_id = entity_ids.get("live_conversation_id")
     analysis_job_id = entity_ids.get("analysis_job_id")
     chat_request_ids = entity_ids.get("chat_request_ids")
+    provider_chat_request_ids = entity_ids.get("provider_chat_request_ids")
+    local_terminal_request_id = entity_ids.get("local_terminal_request_id")
+    roster_attempts = entity_ids.get("monthly_roster_attempts")
     tts_evidence = entity_ids.get("tts_evidence")
     if (
         type(conversation_id) is not int
@@ -3435,55 +4302,126 @@ def _validate_provider_completion(
         or type(analysis_job_id) is not int
         or analysis_job_id <= 0
         or not isinstance(chat_request_ids, list)
-        or not chat_request_ids
-        or not isinstance(tts_evidence, Mapping)
+        or len(chat_request_ids) != 3
+        or len(set(chat_request_ids)) != 3
+        or any(
+            not isinstance(request_id, str)
+            or UUID4_PATTERN.fullmatch(request_id) is None
+            for request_id in chat_request_ids
+        )
+        or provider_chat_request_ids != chat_request_ids[:2]
+        or local_terminal_request_id != chat_request_ids[2]
+        or not isinstance(roster_attempts, list)
+        or len(roster_attempts) != 2
+        or not isinstance(tts_evidence, list)
+        or len(tts_evidence) != 4
     ):
         raise HarnessSafetyError("provider telemetry is incomplete")
-    expected_correlations = {
-        "chat_reply": f"conversation:{conversation_id}",
-        "extract_info": f"analysis-job:{analysis_job_id}",
-        "assess_conversation": f"analysis-job:{analysis_job_id}",
-        "tts": f"message-text:{tts_evidence.get('text_sha256')}",
-    }
-    counts = {operation: 0 for operation in expected_correlations}
-    for event in summary["events"]:
-        operation = event["operation"]
+    roster_events = [
+        event for event in summary["events"] if event.get("kind") == "roster_attempt"
+    ]
+    provider_events = [
+        event for event in summary["events"] if event.get("kind") != "roster_attempt"
+    ]
+    if (
+        summary["events"][:2] != roster_events
+        or roster_events != roster_attempts
+        or [event["order"] for event in roster_events] != [1, 2]
+        or [event["method"] for event in roster_events] != ["POST", "POST"]
+        or [event["path"] for event in roster_events]
+        != ["/api/roster/month", "/api/roster/month"]
+        or [event["status"] for event in roster_events] != [409, 200]
+        or [event["error_code"] for event in roster_events]
+        != ["ROSTER_DATE_CONFLICT", None]
+        or [event["replace_existing"] for event in roster_events] != [False, True]
+        or roster_events[0]["request_id"] == roster_events[1]["request_id"]
+        or roster_events[0]["canonical_body_sha256"]
+        != roster_events[1]["canonical_body_sha256"]
+    ):
+        raise HarnessSafetyError("provider telemetry roster evidence mismatch")
+    validated_tts: list[Mapping[str, object]] = []
+    for index, evidence in enumerate(tts_evidence):
         if (
-            event["status"] != "ok"
-            or event["correlation_id"] != expected_correlations[operation]
+            not isinstance(evidence, Mapping)
+            or set(evidence)
+            != {
+                "audio_sha256",
+                "cache_relative_path",
+                "kind",
+                "source_message_id",
+                "text_sha256",
+            }
+            or evidence["kind"]
+            != ("opening_greeting" if index == 0 else "diary_reply")
+            or (index == 0 and evidence["source_message_id"] is not None)
+            or (
+                index > 0
+                and (
+                    type(evidence["source_message_id"]) is not int
+                    or evidence["source_message_id"] <= 0
+                )
+            )
+            or not isinstance(evidence["text_sha256"], str)
+            or SHA256_PATTERN.fullmatch(evidence["text_sha256"]) is None
+            or not isinstance(evidence["audio_sha256"], str)
+            or SHA256_PATTERN.fullmatch(evidence["audio_sha256"]) is None
+            or not isinstance(evidence["cache_relative_path"], str)
+            or re.fullmatch(
+                r"tts-cache/[0-9a-f]{32}\.mp3",
+                evidence["cache_relative_path"],
+            )
+            is None
+        ):
+            raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
+        validated_tts.append(evidence)
+    if (
+        len({item["text_sha256"] for item in validated_tts}) != 4
+        or len({item["cache_relative_path"] for item in validated_tts}) != 4
+    ):
+        raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
+
+    expected = [
+        ("tts", f"message-text:{validated_tts[0]['text_sha256']}", validated_tts[0]),
+        ("chat_reply", f"chat-request:{chat_request_ids[0]}", None),
+        ("tts", f"message-text:{validated_tts[1]['text_sha256']}", validated_tts[1]),
+        ("chat_reply", f"chat-request:{chat_request_ids[1]}", None),
+        ("tts", f"message-text:{validated_tts[2]['text_sha256']}", validated_tts[2]),
+        ("tts", f"message-text:{validated_tts[3]['text_sha256']}", validated_tts[3]),
+        ("extract_info", f"analysis-job:{analysis_job_id}", None),
+        ("assess_conversation", f"analysis-job:{analysis_job_id}", None),
+    ]
+    if len(provider_events) != len(expected):
+        raise HarnessSafetyError("provider telemetry is incomplete")
+    for event, (operation, correlation, evidence) in zip(
+        provider_events, expected, strict=True
+    ):
+        if (
+            event["operation"] != operation
+            or event["status"] != "ok"
+            or event["correlation_id"] != correlation
         ):
             raise HarnessSafetyError("provider telemetry is incomplete or unrelated")
         if operation == "tts":
+            assert evidence is not None
             if (
                 event["voice"] != "zh-CN-XiaoxiaoNeural"
-                or event["cache_relative_path"] != tts_evidence.get("cache_relative_path")
-                or event["cache_sha256"] != tts_evidence.get("audio_sha256")
+                or event["cache_relative_path"] != evidence["cache_relative_path"]
+                or event["cache_sha256"] != evidence["audio_sha256"]
             ):
                 raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
         elif event["model"] != selected["DEEPSEEK_MODEL"] or event["parse_valid"] is not True:
             raise HarnessSafetyError("provider telemetry model or parse boundary mismatch")
-        counts[operation] += 1
-    if counts != {
-        "chat_reply": len(chat_request_ids),
-        "extract_info": 1,
-        "assess_conversation": 1,
-        "tts": 1,
-    }:
-        raise HarnessSafetyError("provider telemetry is incomplete")
-    cache_relative = tts_evidence.get("cache_relative_path")
-    if not isinstance(cache_relative, str):
-        raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
-    cache_path = plan.root / cache_relative
-    if cache_path.parent != plan.tts_cache:
-        raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
-    cache = _file_evidence(cache_path)
-    tts_event = next(event for event in summary["events"] if event["operation"] == "tts")
-    if (
-        cache.get("kind") != "regular"
-        or cache.get("size") != tts_event["audio_bytes"]
-        or cache.get("sha256") != tts_event["cache_sha256"]
-    ):
-        raise HarnessSafetyError("provider telemetry TTS cache mismatch")
+        if evidence is not None:
+            cache_path = plan.root / str(evidence["cache_relative_path"])
+            if cache_path.parent != plan.tts_cache:
+                raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
+            cache = _file_evidence(cache_path)
+            if (
+                cache.get("kind") != "regular"
+                or cache.get("size") != event["audio_bytes"]
+                or cache.get("sha256") != event["cache_sha256"]
+            ):
+                raise HarnessSafetyError("provider telemetry TTS cache mismatch")
     return summary
 
 
@@ -3527,6 +4465,109 @@ def _checksum_lines(plan: RunPlan, manifest_payload: bytes) -> bytes:
     )
     assert_run_plan_identity(plan)
     return result
+
+
+def _checksum_inventory(payload: bytes) -> dict[str, str]:
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeError as exc:
+        raise HarnessSafetyError("terminal inventory is invalid") from exc
+    if not text or not text.endswith("\n"):
+        raise HarnessSafetyError("terminal inventory is invalid")
+    inventory: dict[str, str] = {}
+    observed_order: list[str] = []
+    for line in text.splitlines():
+        if len(line) < 67 or line[64:66] != "  ":
+            raise HarnessSafetyError("terminal inventory is invalid")
+        digest = line[:64]
+        relative = line[66:]
+        candidate = Path(relative)
+        if (
+            SHA256_PATTERN.fullmatch(digest) is None
+            or not relative
+            or candidate.is_absolute()
+            or "\\" in relative
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+            or relative in inventory
+        ):
+            raise HarnessSafetyError("terminal inventory is invalid")
+        inventory[relative] = digest
+        observed_order.append(relative)
+    if observed_order != sorted(observed_order):
+        raise HarnessSafetyError("terminal inventory is invalid")
+    return inventory
+
+
+def _verify_complete_terminal_state(
+    plan: RunPlan,
+    *,
+    manifest_payload: bytes,
+    checksums_payload: bytes,
+    provider_summary: Mapping[str, object],
+) -> None:
+    """Re-read the terminal files and bind embedded hashes to exact inventory bytes."""
+
+    try:
+        retained_manifest = _read_pinned_run_file(
+            plan,
+            plan.manifest,
+            max_bytes=10_000_000,
+        )
+        retained_checksums = _read_pinned_run_file(
+            plan,
+            plan.checksums,
+            max_bytes=100_000_000,
+        )
+        retained_provider = _read_pinned_run_file(
+            plan,
+            plan.provider_summary,
+            max_bytes=100_000_000,
+        )
+    except HarnessSafetyError as exc:
+        raise HarnessSafetyError("terminal inventory is unavailable") from exc
+    expected_provider = canonical_json_line(dict(provider_summary)).encode("utf-8")
+    if (
+        retained_manifest != manifest_payload
+        or retained_checksums != checksums_payload
+        or retained_provider != expected_provider
+        or _checksum_lines(plan, manifest_payload) != checksums_payload
+    ):
+        raise HarnessSafetyError("terminal inventory bytes are inconsistent")
+    inventory = _checksum_inventory(checksums_payload)
+    try:
+        manifest = json.loads(manifest_payload.decode("utf-8", errors="strict"))
+    except (UnicodeError, ValueError) as exc:
+        raise HarnessSafetyError("terminal inventory manifest is invalid") from exc
+    if not isinstance(manifest, Mapping):
+        raise HarnessSafetyError("terminal inventory manifest is invalid")
+    screenshots = manifest.get("screenshots")
+    events = provider_summary.get("events")
+    if not isinstance(screenshots, list) or not isinstance(events, list):
+        raise HarnessSafetyError("terminal inventory evidence is invalid")
+    for screenshot in screenshots:
+        if (
+            not isinstance(screenshot, Mapping)
+            or not isinstance(screenshot.get("relative_path"), str)
+            or not isinstance(screenshot.get("sha256"), str)
+            or inventory.get(screenshot["relative_path"]) != screenshot["sha256"]
+        ):
+            raise HarnessSafetyError("terminal inventory screenshot mismatch")
+    for event in events:
+        if not isinstance(event, Mapping):
+            raise HarnessSafetyError("terminal inventory provider evidence is invalid")
+        relative = event.get("cache_relative_path")
+        digest = event.get("cache_sha256")
+        if relative is None and digest is None:
+            continue
+        if (
+            not isinstance(relative, str)
+            or not isinstance(digest, str)
+            or inventory.get(relative) != digest
+        ):
+            raise HarnessSafetyError("terminal inventory provider cache mismatch")
+    if inventory.get(plan.manifest.name) != _hash_bytes(manifest_payload):
+        raise HarnessSafetyError("terminal inventory manifest checksum mismatch")
+    assert_run_plan_identity(plan)
 
 
 def _complete_manifest(
@@ -3574,6 +4615,7 @@ def execute_retained_uat(
     now: Callable[[], datetime] = _default_now,
     nonce: Callable[[], str] = _default_nonce,
     business_today: Callable[[], date],
+    source_materializer: Callable[[RunPlan], RunPlan] = materialize_reviewed_source,
     capture_resources: Callable[[Path], Mapping[str, object]] = capture_protected_resources,
     seed_runner: Callable[..., Mapping[str, object]],
     server_starter: Callable[..., object],
@@ -3590,6 +4632,7 @@ def execute_retained_uat(
     plan = None
     session = None
     session_finished = False
+    unverified_complete_possible = False
     try:
         before_first = capture_resources(repository)
         before_second = capture_resources(repository)
@@ -3607,6 +4650,9 @@ def execute_retained_uat(
             nonce=nonce,
         )
         atomic_write_json(plan.resources_before, before_second, pinned_plan=plan)
+        plan = source_materializer(plan)
+        if plan.source_root_identity is not None:
+            assert_reviewed_source_pinned(plan)
 
         provider = select_provider_settings(environ, dotenv_values)
         seed_argv = build_seed_argv(
@@ -3667,6 +4713,8 @@ def execute_retained_uat(
             raise HarnessSafetyError("controller teacher credential was not registered")
         provider_events = server_finisher(session)
         session_finished = True
+        if plan.source_root_identity is not None:
+            assert_reviewed_source_pinned(plan)
 
         controller = controller_validator(plan)
         if any(
@@ -3711,11 +4759,12 @@ def execute_retained_uat(
         atomic_write_json(plan.resources_after, after, pinned_plan=plan)
         assert_protected_resources_equal(before_second, after)
         actual_secrets = (provider["DEEPSEEK_API_KEY"], control.secret_for_scan())
+        registered_secrets = tuple(
+            secret for secret in actual_secrets if isinstance(secret, str) and secret
+        )
         scan_retained_artifacts(
             plan.root,
-            actual_secrets=tuple(
-                secret for secret in actual_secrets if isinstance(secret, str)
-            ),
+            actual_secrets=registered_secrets,
             pinned_plan=plan,
         )
         manifest = _complete_manifest(
@@ -3726,21 +4775,50 @@ def execute_retained_uat(
             provenance=provenance,
         )
         manifest_payload = canonical_json_line(manifest).encode("utf-8")
-        if any(secret.encode("utf-8") in manifest_payload for secret in actual_secrets):
-            raise HarnessSafetyError("complete manifest contains a registered secret")
+        _assert_secret_free_payload(
+            manifest_payload,
+            actual_secrets=registered_secrets,
+            role="manifest.json",
+        )
+        checksums_payload = _checksum_lines(plan, manifest_payload)
         _write_owned_bytes(
             plan.checksums,
-            _checksum_lines(plan, manifest_payload),
+            checksums_payload,
             pinned_plan=plan,
         )
         scan_retained_artifacts(
             plan.root,
-            actual_secrets=tuple(
-                secret for secret in actual_secrets if isinstance(secret, str)
-            ),
+            actual_secrets=registered_secrets,
             pinned_plan=plan,
         )
+        unverified_complete_possible = True
         atomic_write_json(plan.manifest, manifest, pinned_plan=plan)
+        retained_manifest = _read_pinned_run_file(
+            plan,
+            plan.manifest,
+            max_bytes=10_000_000,
+        )
+        if retained_manifest != manifest_payload:
+            raise HarnessSafetyError("complete manifest terminal bytes are inconsistent")
+        _assert_secret_free_payload(
+            retained_manifest,
+            actual_secrets=registered_secrets,
+            role="manifest.json",
+        )
+        scan_retained_artifacts(
+            plan.root,
+            actual_secrets=registered_secrets,
+            pinned_plan=plan,
+        )
+        _verify_complete_terminal_state(
+            plan,
+            manifest_payload=manifest_payload,
+            checksums_payload=checksums_payload,
+            provider_summary=provider_summary,
+        )
+        if plan.source_root_identity is not None:
+            assert_reviewed_source_pinned(plan)
+        unverified_complete_possible = False
         return plan
     except KeyboardInterrupt as exc:
         error: BaseException = HarnessSafetyError("controller interrupted the retained run")
@@ -3770,7 +4848,11 @@ def execute_retained_uat(
             assert_protected_resources_equal(before_second, after)
         except BaseException:
             reason = "SAFETY_FAILURE"
-        finalize_failed_run(plan, reason_code=reason)
+        finalize_failed_run(
+            plan,
+            reason_code=reason,
+            replace_unverified_complete=unverified_complete_possible,
+        )
     if isinstance(error, HarnessSafetyError):
         raise error
     raise HarnessSafetyError("retained live UAT failed safely") from error
@@ -3841,26 +4923,28 @@ def read_dotenv_values(
 
     path = _absolute(repository) / ".env"
     try:
-        entry = path.lstat()
-    except FileNotFoundError:
-        return {}
-    except OSError as exc:
-        raise HarnessSafetyError("provider configuration file is unavailable") from exc
-    if (
-        not stat.S_ISREG(entry.st_mode)
-        or stat.S_ISLNK(entry.st_mode)
-        or entry.st_nlink != 1
-        or entry.st_uid != os.geteuid()
-        or entry.st_size > 1_048_576
-    ):
-        raise HarnessSafetyError("provider configuration file is unsafe")
+        evidence = _file_evidence(path)
+        if evidence["kind"] == "missing":
+            return {}
+        if evidence["kind"] != "regular" or evidence.get("size", 0) > 1_048_576:
+            raise HarnessSafetyError("provider configuration file is unsafe")
+        payload, pinned = _read_absolute_regular_nofollow(
+            path,
+            max_bytes=1_048_576,
+        )
+        if pinned != evidence:
+            raise HarnessSafetyError("provider configuration file changed")
+        decoded = payload.decode("utf-8", errors="strict")
+    except HarnessSafetyError as exc:
+        raise HarnessSafetyError("provider configuration file is unsafe") from exc
+    except UnicodeError as exc:
+        raise HarnessSafetyError("provider configuration file is invalid") from exc
     if loader is None:
         from dotenv import dotenv_values as loader
 
     try:
         values = loader(
-            dotenv_path=path,
-            encoding="utf-8",
+            stream=io.StringIO(decoded),
             interpolate=False,
             verbose=False,
         )

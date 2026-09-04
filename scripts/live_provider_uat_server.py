@@ -39,6 +39,10 @@ APP_KEYS = {
     "APP_DB_PATH",
     "APP_LOG_PATH",
     "APP_MEDIA_ROOT",
+    "APP_REVIEWED_SOURCE_HEAD",
+    "APP_REVIEWED_SOURCE_MANIFEST",
+    "APP_REVIEWED_SOURCE_ROOT",
+    "APP_REVIEWED_SOURCE_TREE_OID",
     "APP_TTS_CACHE_PATH",
 }
 NEUTRAL_KEYS = {
@@ -68,6 +72,17 @@ TELEMETRY_KEYS = {
     "status",
     "voice",
 }
+ROSTER_TELEMETRY_KEYS = {
+    "canonical_body_sha256",
+    "error_code",
+    "kind",
+    "method",
+    "order",
+    "path",
+    "replace_existing",
+    "request_id",
+    "status",
+}
 
 
 class ServerSafetyError(RuntimeError):
@@ -85,6 +100,13 @@ class RuntimePaths:
     media: Path
     tts_cache: Path
     app_log: Path
+    source_root: Path
+    source_manifest: Path
+    source_head: str
+    source_tree_oid: str
+    source_inventory: tuple[tuple[str, int, int, str], ...]
+    source_root_identity: tuple[str, int, int, int, int, int]
+    source_manifest_identity: tuple[str, int, int, int, int, int]
     identities: tuple[tuple[str, int, int, int, int, int], ...]
 
 
@@ -176,6 +198,169 @@ def _resource_identity(path: Path, *, directory: bool) -> tuple[str, int, int, i
         os.close(descriptor)
 
 
+def _read_regular_nofollow(path: Path, *, max_bytes: int) -> bytes:
+    before = _resource_identity(path, directory=False)
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    parent = os.open(os.path.sep, directory_flags)
+    descriptor = None
+    try:
+        for component in absolute.parts[1:-1]:
+            next_parent = os.open(component, directory_flags, dir_fd=parent)
+            os.close(parent)
+            parent = next_parent
+        descriptor = os.open(absolute.name, flags, dir_fd=parent)
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(descriptor, min(1024 * 1024, max_bytes - total + 1))
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise ServerSafetyError("live server source file exceeds its bound")
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            str(path),
+            after.st_dev,
+            after.st_ino,
+            stat.S_IMODE(after.st_mode),
+            after.st_nlink,
+            after.st_uid,
+        ) != before:
+            raise ServerSafetyError("live server source file changed")
+    except ServerSafetyError:
+        raise
+    except OSError as exc:
+        raise ServerSafetyError("live server source file is unavailable") from exc
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        os.close(parent)
+    if _resource_identity(path, directory=False) != before:
+        raise ServerSafetyError("live server source file identity changed")
+    return b"".join(chunks)
+
+
+def _strict_source_manifest(
+    payload: bytes,
+    *,
+    source_head: str,
+    tree_oid: str,
+) -> tuple[tuple[str, int, int, str], ...]:
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+
+    try:
+        text = payload.decode("utf-8", errors="strict")
+        value = json.loads(text, object_pairs_hook=reject_duplicates)
+    except (UnicodeError, TypeError, ValueError) as exc:
+        raise ServerSafetyError("live server reviewed source manifest is invalid") from exc
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {
+            "files",
+            "object_format",
+            "protocol",
+            "source_head",
+            "tree_oid",
+        }
+        or value["protocol"] != "pomegranagent-reviewed-source/v1"
+        or value["object_format"] != "sha1"
+        or value["source_head"] != source_head
+        or value["tree_oid"] != tree_oid
+        or not isinstance(value["files"], list)
+        or not value["files"]
+        or json.dumps(
+            value,
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n"
+        != text
+    ):
+        raise ServerSafetyError("live server reviewed source manifest is invalid")
+    inventory: list[tuple[str, int, int, str]] = []
+    for item in value["files"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"blob_oid", "git_mode", "path", "sha256", "size"}
+            or not isinstance(item["path"], str)
+            or not item["path"]
+            or Path(item["path"]).is_absolute()
+            or "\\" in item["path"]
+            or any(part in {"", ".", ".."} for part in Path(item["path"]).parts)
+            or not isinstance(item["git_mode"], int)
+            or item["git_mode"] not in {0o100644, 0o100755}
+            or type(item["size"]) is not int
+            or not 0 <= item["size"] <= 1_000_000_000
+            or not isinstance(item["sha256"], str)
+            or re.fullmatch(r"[0-9a-f]{64}", item["sha256"]) is None
+            or not isinstance(item["blob_oid"], str)
+            or re.fullmatch(r"[0-9a-f]{40}", item["blob_oid"]) is None
+        ):
+            raise ServerSafetyError("live server reviewed source manifest is invalid")
+        inventory.append(
+            (item["path"], item["git_mode"], item["size"], item["sha256"])
+        )
+    if len({item[0] for item in inventory}) != len(inventory):
+        raise ServerSafetyError("live server reviewed source manifest is invalid")
+    return tuple(inventory)
+
+
+def _assert_source_inventory(paths: RuntimePaths) -> None:
+    try:
+        candidates = sorted(
+            paths.source_root.rglob("*"),
+            key=lambda item: item.relative_to(paths.source_root).as_posix(),
+        )
+    except OSError as exc:
+        raise ServerSafetyError("live server reviewed source inventory is unavailable") from exc
+    expected = {item[0]: item for item in paths.source_inventory}
+    observed: set[str] = set()
+    for candidate in candidates:
+        relative = candidate.relative_to(paths.source_root).as_posix()
+        try:
+            entry = candidate.lstat()
+        except OSError as exc:
+            raise ServerSafetyError("live server reviewed source inventory changed") from exc
+        if stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode):
+            if (
+                stat.S_IMODE(entry.st_mode) != 0o500
+                or entry.st_uid != os.geteuid()
+                or entry.st_nlink < 1
+            ):
+                raise ServerSafetyError("live server reviewed source directory changed")
+            continue
+        item = expected.get(relative)
+        if item is None:
+            raise ServerSafetyError("live server reviewed source inventory changed")
+        _path, git_mode, size, digest = item
+        payload = _read_regular_nofollow(candidate, max_bytes=1_000_000_000)
+        if (
+            stat.S_IMODE(entry.st_mode) != (0o500 if git_mode & 0o111 else 0o400)
+            or len(payload) != size
+            or hashlib.sha256(payload).hexdigest() != digest
+        ):
+            raise ServerSafetyError("live server reviewed source file changed")
+        observed.add(relative)
+    if observed != set(expected):
+        raise ServerSafetyError("live server reviewed source inventory changed")
+
+
 def assert_runtime_paths_pinned(paths: RuntimePaths) -> None:
     expected_paths = (
         (paths.root, True),
@@ -191,6 +376,24 @@ def assert_runtime_paths_pinned(paths: RuntimePaths) -> None:
     )
     if observed != paths.identities:
         raise ServerSafetyError("live server runtime identity changed")
+    if _resource_identity(paths.source_root, directory=True) != paths.source_root_identity:
+        raise ServerSafetyError("live server reviewed source identity changed")
+    if (
+        _resource_identity(paths.source_manifest, directory=False)
+        != paths.source_manifest_identity
+    ):
+        raise ServerSafetyError("live server reviewed source manifest changed")
+    manifest_payload = _read_regular_nofollow(
+        paths.source_manifest,
+        max_bytes=128_000_000,
+    )
+    if _strict_source_manifest(
+        manifest_payload,
+        source_head=paths.source_head,
+        tree_oid=paths.source_tree_oid,
+    ) != paths.source_inventory:
+        raise ServerSafetyError("live server reviewed source manifest changed")
+    _assert_source_inventory(paths)
 
 
 def validate_child_environment(
@@ -220,6 +423,8 @@ def validate_child_environment(
             "APP_DB_PATH",
             "APP_LOG_PATH",
             "APP_MEDIA_ROOT",
+            "APP_REVIEWED_SOURCE_MANIFEST",
+            "APP_REVIEWED_SOURCE_ROOT",
             "APP_TTS_CACHE_PATH",
         )
     }
@@ -235,19 +440,36 @@ def validate_child_environment(
     media = paths["APP_MEDIA_ROOT"]
     tts_cache = paths["APP_TTS_CACHE_PATH"]
     app_log = paths["APP_LOG_PATH"]
+    source_root = paths["APP_REVIEWED_SOURCE_ROOT"]
+    source_manifest = paths["APP_REVIEWED_SOURCE_MANIFEST"]
+    source_head = source["APP_REVIEWED_SOURCE_HEAD"]
+    source_tree_oid = source["APP_REVIEWED_SOURCE_TREE_OID"]
     if (
         database.name != "duck-diary-uat.db"
         or media != root / "media"
         or tts_cache != root / "tts-cache"
         or app_log != root / "logs/app.log"
+        or source_root != root / "reviewed-source"
+        or source_manifest != root / "reviewed-source.json"
+        or re.fullmatch(r"[0-9a-f]{40}", source_head) is None
+        or re.fullmatch(r"[0-9a-f]{40}", source_tree_oid) is None
         or not _directory_owned(root)
         or not _directory_owned(media)
         or not _directory_owned(tts_cache)
         or not _directory_owned(app_log.parent)
+        or not _directory_owned(source_root)
         or not _regular_owned(database)
         or not _regular_owned(app_log)
+        or not _regular_owned(source_manifest)
     ):
         raise ServerSafetyError("live server environment resources are invalid")
+    source_manifest_identity = _resource_identity(source_manifest, directory=False)
+    source_root_identity = _resource_identity(source_root, directory=True)
+    source_inventory = _strict_source_manifest(
+        _read_regular_nofollow(source_manifest, max_bytes=128_000_000),
+        source_head=source_head,
+        tree_oid=source_tree_oid,
+    )
     identities = tuple(
         _resource_identity(path, directory=directory)
         for path, directory in (
@@ -265,6 +487,13 @@ def validate_child_environment(
         media=media,
         tts_cache=tts_cache,
         app_log=app_log,
+        source_root=source_root,
+        source_manifest=source_manifest,
+        source_head=source_head,
+        source_tree_oid=source_tree_oid,
+        source_inventory=source_inventory,
+        source_root_identity=source_root_identity,
+        source_manifest_identity=source_manifest_identity,
         identities=identities,
     )
     assert_runtime_paths_pinned(runtime)
@@ -408,7 +637,10 @@ def _provider_event(
 class ProviderTelemetryContext:
     """Thread-local operation/correlation scope for raw provider calls."""
 
-    _CORRELATION = re.compile(r"(?:conversation|analysis-job):[1-9][0-9]*")
+    _CORRELATION = re.compile(
+        r"(?:analysis-job:[1-9][0-9]*|chat-request:"
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})"
+    )
 
     def __init__(self) -> None:
         self._local = threading.local()
@@ -481,7 +713,7 @@ def instrument_ai_engine(
         if operation is None:
             return original_llm(*args, **kwargs)
         if correlation is None:
-            correlation = "conversation:0"
+            raise ServerSafetyError("provider correlation is unavailable")
         started = monotonic()
         try:
             raw = original_llm(*args, **kwargs)
@@ -557,7 +789,10 @@ class TelemetryWriter:
         self._lock = threading.Lock()
 
     def emit(self, event: Mapping[str, object]) -> None:
-        if set(event) != TELEMETRY_KEYS:
+        if frozenset(event) not in {
+            frozenset(TELEMETRY_KEYS),
+            frozenset(ROSTER_TELEMETRY_KEYS),
+        }:
             raise ServerSafetyError("telemetry event shape is invalid")
         payload = (
             json.dumps(
@@ -577,6 +812,181 @@ class TelemetryWriter:
                 if written <= 0:
                     raise ServerSafetyError("telemetry pipe write failed")
                 offset += written
+
+
+def _roster_request_evidence(payload: bytes) -> dict[str, object]:
+    def reject_duplicates(pairs):
+        result = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            payload.decode("utf-8", errors="strict"),
+            object_pairs_hook=reject_duplicates,
+        )
+        if (
+            not isinstance(value, dict)
+            or set(value)
+            != {"cycle", "entries", "month", "replace_existing", "request_id"}
+            or not isinstance(value["request_id"], str)
+            or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                value["request_id"],
+            )
+            is None
+            or not isinstance(value["month"], str)
+            or re.fullmatch(r"[0-9]{4}-(?:0[1-9]|1[0-2])", value["month"]) is None
+            or not isinstance(value["cycle"], str)
+            or not value["cycle"].strip()
+            or len(value["cycle"].strip()) > 64
+            or type(value["replace_existing"]) is not bool
+            or not isinstance(value["entries"], list)
+            or not 1 <= len(value["entries"]) <= 31
+        ):
+            raise ValueError
+        entries = []
+        for item in value["entries"]:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"child_ids", "date"}
+                or not isinstance(item["date"], str)
+                or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", item["date"]) is None
+                or item["date"][:7] != value["month"]
+                or not isinstance(item["child_ids"], list)
+                or len(item["child_ids"]) != 2
+                or any(type(child_id) is not int or child_id <= 0 for child_id in item["child_ids"])
+                or len(set(item["child_ids"])) != 2
+            ):
+                raise ValueError
+            entries.append(
+                {
+                    "child_ids": sorted(item["child_ids"]),
+                    "date": item["date"],
+                }
+            )
+        entries.sort(key=lambda item: item["date"])
+        if len({item["date"] for item in entries}) != len(entries):
+            raise ValueError
+    except (KeyError, TypeError, UnicodeError, ValueError) as exc:
+        raise ServerSafetyError("monthly roster telemetry request is invalid") from exc
+    canonical = json.dumps(
+        {
+            "cycle": value["cycle"].strip(),
+            "entries": entries,
+            "month": value["month"],
+        },
+        ensure_ascii=False,
+        separators=(",", ":"),
+        sort_keys=True,
+    ).encode("utf-8")
+    return {
+        "canonical_body_sha256": hashlib.sha256(canonical).hexdigest(),
+        "replace_existing": value["replace_existing"],
+        "request_id": value["request_id"],
+    }
+
+
+def _response_error_code(payload: bytes, *, status: int) -> str | None:
+    if status < 400:
+        return None
+    try:
+        value = json.loads(payload.decode("utf-8", errors="strict"))
+        code = value["error"]["code"]
+    except (KeyError, TypeError, UnicodeError, ValueError) as exc:
+        raise ServerSafetyError("monthly roster telemetry response is invalid") from exc
+    if not isinstance(code, str) or re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", code) is None:
+        raise ServerSafetyError("monthly roster telemetry response is invalid")
+    return code
+
+
+class RosterAttemptTelemetry:
+    """ASGI boundary retaining only canonical monthly-attempt facts."""
+
+    def __init__(self, app, *, emit: Callable[[Mapping[str, object]], None]) -> None:
+        if not callable(app) or not callable(emit):
+            raise ServerSafetyError("monthly roster telemetry target is invalid")
+        self._app = app
+        self._emit = emit
+        self._order = 0
+        self._lock = threading.Lock()
+
+    async def __call__(self, scope, receive, send):
+        if (
+            not isinstance(scope, Mapping)
+            or scope.get("type") != "http"
+            or scope.get("method") != "POST"
+            or scope.get("path") != "/api/roster/month"
+        ):
+            return await self._app(scope, receive, send)
+        request_messages = []
+        request_body = bytearray()
+        while True:
+            message = await receive()
+            if not isinstance(message, Mapping) or message.get("type") != "http.request":
+                raise ServerSafetyError("monthly roster telemetry request is invalid")
+            chunk = message.get("body", b"")
+            if not isinstance(chunk, bytes):
+                raise ServerSafetyError("monthly roster telemetry request is invalid")
+            request_body.extend(chunk)
+            if len(request_body) > 1_000_000:
+                raise ServerSafetyError("monthly roster telemetry request is invalid")
+            request_messages.append(dict(message))
+            if not message.get("more_body", False):
+                break
+        evidence = _roster_request_evidence(bytes(request_body))
+        with self._lock:
+            self._order += 1
+            order = self._order
+
+        async def replay_receive():
+            if request_messages:
+                return request_messages.pop(0)
+            return {"type": "http.disconnect"}
+
+        response_status = None
+        response_body = bytearray()
+        response_complete = False
+
+        async def measured_send(message):
+            nonlocal response_status, response_complete
+            if not isinstance(message, Mapping):
+                raise ServerSafetyError("monthly roster telemetry response is invalid")
+            if message.get("type") == "http.response.start":
+                status = message.get("status")
+                if type(status) is not int or not 100 <= status <= 599 or response_status is not None:
+                    raise ServerSafetyError("monthly roster telemetry response is invalid")
+                response_status = status
+            elif message.get("type") == "http.response.body":
+                chunk = message.get("body", b"")
+                if not isinstance(chunk, bytes) or response_status is None:
+                    raise ServerSafetyError("monthly roster telemetry response is invalid")
+                response_body.extend(chunk)
+                if len(response_body) > 1_000_000:
+                    raise ServerSafetyError("monthly roster telemetry response is invalid")
+                if not message.get("more_body", False):
+                    response_complete = True
+            await send(message)
+
+        await self._app(scope, replay_receive, measured_send)
+        if response_status is None or not response_complete:
+            raise ServerSafetyError("monthly roster telemetry response is incomplete")
+        self._emit(
+            {
+                **evidence,
+                "error_code": _response_error_code(
+                    bytes(response_body), status=response_status
+                ),
+                "kind": "roster_attempt",
+                "method": "POST",
+                "order": order,
+                "path": "/api/roster/month",
+                "status": response_status,
+            }
+        )
 
 
 def instrument_edge_tts(
@@ -669,10 +1079,20 @@ def install_chat_correlation(backend, context: ProviderTelemetryContext) -> None
     @functools.wraps(original)
     def correlated(*args, **kwargs):
         result = original(*args, **kwargs)
-        conversation_id = getattr(result, "conversation_id", None)
-        if type(conversation_id) is not int or conversation_id <= 0:
+        claim = kwargs.get("claim") if "claim" in kwargs else (
+            args[1] if len(args) > 1 else None
+        )
+        request_id = getattr(claim, "request_id", None)
+        if (
+            not isinstance(request_id, str)
+            or re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+                request_id,
+            )
+            is None
+        ):
             raise ServerSafetyError("chat provider correlation is unavailable")
-        context.set_next_correlation(f"conversation:{conversation_id}")
+        context.set_next_correlation(f"chat-request:{request_id}")
         return result
 
     conversations.build_chat_context = correlated
@@ -751,6 +1171,8 @@ def _validated_listen_socket(descriptor: int) -> socket.socket:
 def main(argv: list[str] | None = None) -> int:
     parsed = parse_args(argv)
     paths = validate_child_environment()
+    if paths.source_root != PROJECT_ROOT:
+        raise ServerSafetyError("live server is not executing from reviewed source")
     assert_runtime_paths_pinned(paths)
     configure_safe_logging(paths, secrets=(os.environ["DEEPSEEK_API_KEY"],))
     assert_runtime_paths_pinned(paths)
@@ -768,7 +1190,7 @@ def main(argv: list[str] | None = None) -> int:
     import uvicorn
 
     config = uvicorn.Config(
-        backend.app,
+        RosterAttemptTelemetry(backend.app, emit=telemetry.emit),
         access_log=False,
         log_config=None,
         proxy_headers=False,

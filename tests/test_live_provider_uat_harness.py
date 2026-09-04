@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import asyncio
+from dataclasses import replace
 from datetime import date, datetime, timezone
 import hashlib
 import importlib
@@ -127,6 +128,8 @@ def test_reviewed_checkout_rejects_dirty_runtime_before_launch_and_preserves_exp
     module = _module()
     unrelated = {
         "relative_path": "notes/release-observation.md",
+        "porcelain_role": "path",
+        "porcelain_status": "??",
         "file": {"kind": "regular", "sha256": "1" * 64},
         "directory": None,
     }
@@ -146,6 +149,8 @@ def test_reviewed_checkout_rejects_dirty_runtime_before_launch_and_preserves_exp
         "dirty_paths": [
             {
                 "relative_path": "app/backend/main.py",
+                "porcelain_role": "path",
+                "porcelain_status": " M",
                 "file": {"kind": "regular", "sha256": "2" * 64},
                 "directory": None,
             }
@@ -200,23 +205,97 @@ def test_reviewed_checkout_rejects_dirty_runtime_before_launch_and_preserves_exp
 def test_reviewed_checkout_preserves_both_rename_paths_and_rejects_runtime_endpoint():
     module = _module()
 
-    paths = module._dirty_path_names(
+    records = module._dirty_path_records(
         b"R  notes/release-observation.md\0app/backend/main.py\0"
     )
+    paths = tuple(sorted(record[0] for record in records))
 
     assert paths == ("app/backend/main.py", "notes/release-observation.md")
+    assert records == (
+        ("app/backend/main.py", "R ", "original"),
+        ("notes/release-observation.md", "R ", "current"),
+    )
     with pytest.raises(module.HarnessSafetyError, match="runtime or UAT dirt"):
         module.validate_reviewed_checkout(
             {
                 "git_head": HEAD,
                 "dirty_paths": [
-                    {"relative_path": path, "file": {}, "directory": None}
-                    for path in paths
+                    {
+                        "relative_path": path,
+                        "porcelain_role": role,
+                        "porcelain_status": status,
+                        "file": {"kind": "missing"},
+                        "directory": None,
+                    }
+                    for path, status, role in records
                 ],
             },
             expected_head=HEAD,
             allowed_unrelated_dirty_paths=("notes/release-observation.md",),
         )
+
+
+def test_dirty_porcelain_records_preserve_copy_and_deleted_missing_roles():
+    module = _module()
+
+    assert module._dirty_path_records(
+        b"C  notes/copied.md\0notes/source.md\0 D notes/deleted.md\0"
+    ) == (
+        ("notes/copied.md", "C ", "current"),
+        ("notes/deleted.md", " D", "path"),
+        ("notes/source.md", "C ", "original"),
+    )
+
+
+def test_real_git_capture_types_rename_copy_and_deletion_endpoints(tmp_path):
+    module = _module()
+    repository = tmp_path / "repository"
+    repository.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=repository, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "uat@example.invalid"),
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.name", "UAT Test"),
+        cwd=repository,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "status.renames", "copies"),
+        cwd=repository,
+        check=True,
+    )
+    (repository / "rename-source.txt").write_text("rename source\n", encoding="utf-8")
+    (repository / "copy-source.txt").write_text("copy source\n", encoding="utf-8")
+    (repository / "deleted.txt").write_text("deleted\n", encoding="utf-8")
+    subprocess.run(("git", "add", "."), cwd=repository, check=True)
+    subprocess.run(("git", "commit", "-qm", "fixture"), cwd=repository, check=True)
+    subprocess.run(
+        ("git", "mv", "rename-source.txt", "renamed.txt"),
+        cwd=repository,
+        check=True,
+    )
+    (repository / "copied.txt").write_text("copy source\n", encoding="utf-8")
+    (repository / "copy-source.txt").write_text(
+        "copy source modified\n",
+        encoding="utf-8",
+    )
+    (repository / "deleted.txt").unlink()
+    subprocess.run(("git", "add", "-A"), cwd=repository, check=True)
+
+    snapshot = module.capture_protected_resources(repository)
+    evidence = {
+        (item["relative_path"], item["porcelain_role"]): item
+        for item in snapshot["dirty_paths"]
+    }
+    assert evidence[("renamed.txt", "current")]["porcelain_status"] == "R "
+    assert evidence[("rename-source.txt", "original")]["file"] == {"kind": "missing"}
+    assert evidence[("copied.txt", "current")]["porcelain_status"] == "C "
+    assert evidence[("copy-source.txt", "original")]["file"]["kind"] == "regular"
+    assert evidence[("deleted.txt", "path")]["porcelain_status"] == "D "
+    assert evidence[("deleted.txt", "path")]["file"] == {"kind": "missing"}
 
 
 def test_run_plan_creation_is_exclusive_unique_and_retained(tmp_path):
@@ -255,6 +334,100 @@ def test_run_plan_creation_is_exclusive_unique_and_retained(tmp_path):
     assert first.checksums == first.root / "SHA256SUMS"
 
 
+def test_reviewed_source_is_materialized_from_literal_git_commit_and_never_worktree(
+    tmp_path,
+):
+    module = _module()
+    root = tmp_path / "repository"
+    root.mkdir()
+    subprocess.run(("git", "init", "-q"), cwd=root, check=True)
+    subprocess.run(
+        ("git", "config", "user.email", "uat@example.invalid"),
+        cwd=root,
+        check=True,
+    )
+    subprocess.run(
+        ("git", "config", "user.name", "Retained UAT"), cwd=root, check=True
+    )
+    seed = root / "scripts" / "seed_demo_database.py"
+    seed.parent.mkdir()
+    seed.write_text("REVIEWED = 'seed-v1'\n", encoding="utf-8")
+    server = root / "scripts" / "live_provider_uat_server.py"
+    server.write_text("REVIEWED = 'server-v1'\n", encoding="utf-8")
+    frontend = root / "app" / "frontend" / "index.html"
+    frontend.parent.mkdir(parents=True)
+    frontend.write_text("reviewed frontend\n", encoding="utf-8")
+    backend = root / "app" / "backend" / "__init__.py"
+    backend.parent.mkdir(parents=True)
+    backend.write_text("REVIEWED = True\n", encoding="utf-8")
+    fixtures = root / "tests" / "fixtures" / "live_provider" / "avatars"
+    fixtures.mkdir(parents=True)
+    (fixtures / "child.png").write_bytes(b"reviewed-child")
+    (fixtures / "duck.jpg").write_bytes(b"reviewed-duck")
+    (root / "version.json").write_text('{"version":"reviewed"}\n', encoding="utf-8")
+    subprocess.run(("git", "add", "."), cwd=root, check=True)
+    subprocess.run(("git", "commit", "-qm", "reviewed"), cwd=root, check=True)
+    source_head = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    plan = module.create_run_plan(root, source_head)
+
+    # A transient working-tree substitute must never become executable input.
+    seed.write_text("MALICIOUS = 'temporary import'\n", encoding="utf-8")
+    reviewed = module.materialize_reviewed_source(plan)
+    seed.write_text("REVIEWED = 'seed-v1'\n", encoding="utf-8")
+
+    assert reviewed.source_root == reviewed.root / "reviewed-source"
+    assert reviewed.source_head == source_head
+    assert reviewed.source_tree_oid == subprocess.run(
+        ("git", "rev-parse", f"{source_head}^{{tree}}"),
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert (reviewed.source_root / "scripts/seed_demo_database.py").read_text(
+        encoding="utf-8"
+    ) == "REVIEWED = 'seed-v1'\n"
+    assert module.build_seed_argv(
+        reviewed,
+        python_executable=PYTHON,
+        business_today=lambda: date(2026, 9, 4),
+    )[1] == str(reviewed.source_root / "scripts/seed_demo_database.py")
+    assert module.build_runtime_object(reviewed, port=43123)["fixtures"] == {
+        "child_avatar": str(
+            reviewed.source_root
+            / "tests/fixtures/live_provider/avatars/child.png"
+        ),
+        "duck_avatar": str(
+            reviewed.source_root
+            / "tests/fixtures/live_provider/avatars/duck.jpg"
+        ),
+        "invalid_avatar": str(reviewed.invalid_avatar),
+    }
+    source_manifest = json.loads(reviewed.source_manifest.read_text(encoding="utf-8"))
+    assert source_manifest["source_head"] == source_head
+    assert source_manifest["tree_oid"] == reviewed.source_tree_oid
+    assert any(
+        item["path"] == "scripts/seed_demo_database.py"
+        and item["blob_oid"]
+        == hashlib.sha1(
+            b"blob 21\0REVIEWED = 'seed-v1'\n", usedforsecurity=False
+        ).hexdigest()
+        for item in source_manifest["files"]
+    )
+    module.assert_reviewed_source_pinned(reviewed)
+    source_seed = reviewed.source_root / "scripts/seed_demo_database.py"
+    os.chmod(source_seed, 0o600)
+    source_seed.write_text("MALICIOUS = 'inside source'\n", encoding="utf-8")
+    with pytest.raises(module.HarnessSafetyError, match="reviewed source"):
+        module.assert_reviewed_source_pinned(reviewed)
+
+
 def test_run_plan_rejects_symlinked_artifact_ancestry(tmp_path):
     module = _module()
     root = _repository(tmp_path)
@@ -287,7 +460,7 @@ def test_seed_boundary_samples_date_once_and_uses_exact_full_demo_contract(tmp_p
     assert calls == 1
     assert argv == (
         PYTHON,
-        str(plan.repository / "scripts" / "seed_demo_database.py"),
+        str(plan.source_root / "scripts" / "seed_demo_database.py"),
         "full-demo",
         "--anchor-date",
         "2026-09-03",
@@ -367,9 +540,9 @@ def test_default_seed_runner_is_shell_free_owned_offline_and_bounded(tmp_path):
         "record_sha256": "c" * 64,
     }
     calls = []
-
-    class SeedProcess(_FakeProcess):
-        pass
+    process = _FakeProcess()
+    group = [(process.pid, process.pid), (process.pid + 1, process.pid)]
+    signals = []
 
     def popen(actual_argv, **kwargs):
         calls.append((tuple(actual_argv), kwargs))
@@ -377,7 +550,7 @@ def test_default_seed_runner_is_shell_free_owned_offline_and_bounded(tmp_path):
         kwargs["stdout"].flush()
         kwargs["stderr"].write(b"safe synthetic seed diagnostic\n")
         kwargs["stderr"].flush()
-        return SeedProcess()
+        return process
 
     result = module.run_seed_process(
         plan,
@@ -386,16 +559,28 @@ def test_default_seed_runner_is_shell_free_owned_offline_and_bounded(tmp_path):
         popen=popen,
         getpgid=lambda pid: pid,
         getsid=lambda pid: pid,
+        group_members=lambda _pgid: tuple(group)
+        if process.returncode is None
+        else (),
+        killpg=lambda pgid, signum: (
+            signals.append((pgid, signum)),
+            group.__setitem__(slice(None), [(43210, 43210)]),
+        ),
+        peek_exit=lambda _owned: 0,
+        monotonic=lambda: 0.0,
+        sleep=lambda _seconds: None,
+        source_validator=lambda _plan: None,
     )
 
     assert result == payload
     assert calls[0][0] == argv
-    assert calls[0][1]["cwd"] == plan.repository
+    assert calls[0][1]["cwd"] == plan.source_root
     assert calls[0][1]["env"] == environment
     assert calls[0][1]["shell"] is False
     assert calls[0][1]["start_new_session"] is True
     assert calls[0][1]["stdin"] is subprocess.DEVNULL
     assert not any(name.startswith("DEEPSEEK_") for name in calls[0][1]["env"])
+    assert signals == [(43210, signal.SIGTERM)]
 
 
 def test_telemetry_collector_reads_one_bounded_pipe_and_rejects_truncation():
@@ -404,7 +589,7 @@ def test_telemetry_collector_reads_one_bounded_pipe_and_rejects_truncation():
         "audio_bytes": 0,
         "cache_relative_path": None,
         "cache_sha256": None,
-        "correlation_id": "conversation:301",
+        "correlation_id": "chat-request:00000000-0000-4000-8000-000000000301",
         "error_class": None,
         "latency_bucket": "1-5s",
         "model": "deepseek-chat",
@@ -484,7 +669,10 @@ def test_provider_settings_use_exact_allowlist_and_reject_unsafe_values():
 
 def test_backend_environment_binds_every_disposable_path_and_nothing_else(tmp_path):
     module = _module()
-    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan = replace(
+        module.create_run_plan(_repository(tmp_path), HEAD),
+        source_tree_oid="b" * 40,
+    )
     parent = {
         "PATH": "/safe/bin",
         "LANG": "C.UTF-8",
@@ -501,6 +689,10 @@ def test_backend_environment_binds_every_disposable_path_and_nothing_else(tmp_pa
         "APP_DB_PATH": str(plan.database),
         "APP_LOG_PATH": str(plan.app_log),
         "APP_MEDIA_ROOT": str(plan.media),
+        "APP_REVIEWED_SOURCE_HEAD": HEAD,
+        "APP_REVIEWED_SOURCE_MANIFEST": str(plan.source_manifest),
+        "APP_REVIEWED_SOURCE_ROOT": str(plan.source_root),
+        "APP_REVIEWED_SOURCE_TREE_OID": "b" * 40,
         "APP_TTS_CACHE_PATH": str(plan.tts_cache),
         "DEEPSEEK_API_KEY": "sk-sentinel-provider-secret-123456",
         "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
@@ -539,8 +731,8 @@ def test_readiness_is_exact_before_safe_runtime_object_is_rendered(tmp_path):
         "child_url": "http://127.0.0.1:43123/",
         "controller_evidence_path": str(plan.controller_evidence),
         "fixtures": {
-            "child_avatar": str(plan.repository / "tests/fixtures/live_provider/avatars/child.png"),
-            "duck_avatar": str(plan.repository / "tests/fixtures/live_provider/avatars/duck.jpg"),
+            "child_avatar": str(plan.source_root / "tests/fixtures/live_provider/avatars/child.png"),
+            "duck_avatar": str(plan.source_root / "tests/fixtures/live_provider/avatars/duck.jpg"),
             "invalid_avatar": str(plan.invalid_avatar),
         },
         "protocol": "pomegranagent-live-uat/v1",
@@ -682,7 +874,7 @@ def test_telemetry_accepts_only_bounded_safe_provider_metadata():
         "audio_bytes": 0,
         "cache_relative_path": None,
         "cache_sha256": None,
-        "correlation_id": "conversation:301",
+        "correlation_id": "chat-request:00000000-0000-4000-8000-000000000301",
         "error_class": None,
         "latency_bucket": "1-5s",
         "model": "deepseek-chat",
@@ -700,7 +892,7 @@ def test_telemetry_accepts_only_bounded_safe_provider_metadata():
     summary = module.summarize_provider_events((event,))
 
     assert summary == {
-        "protocol": "pomegranagent-live-uat-provider-summary/v1",
+        "protocol": "pomegranagent-live-uat-telemetry-summary/v1",
         "events": [safe],
     }
     assert all(set(item) == module.TELEMETRY_KEYS for item in summary["events"])
@@ -762,6 +954,46 @@ def test_live_server_validates_exact_runtime_paths_and_redacts_log_records(tmp_p
     logs.mkdir()
     app_log = logs / "app.log"
     app_log.write_bytes(b"")
+    source_root = run_root / "reviewed-source"
+    source_file = source_root / "app" / "backend" / "__init__.py"
+    source_file.parent.mkdir(parents=True)
+    source_payload = b"REVIEWED = True\n"
+    source_file.write_bytes(source_payload)
+    os.chmod(source_file, 0o400)
+    os.chmod(source_file.parent, 0o500)
+    os.chmod(source_file.parent.parent, 0o500)
+    os.chmod(source_root, 0o500)
+    source_head = "b" * 40
+    source_tree = "c" * 40
+    source_manifest = run_root / "reviewed-source.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "blob_oid": hashlib.sha1(
+                            f"blob {len(source_payload)}\0".encode("ascii")
+                            + source_payload,
+                            usedforsecurity=False,
+                        ).hexdigest(),
+                        "git_mode": 0o100644,
+                        "path": "app/backend/__init__.py",
+                        "sha256": hashlib.sha256(source_payload).hexdigest(),
+                        "size": len(source_payload),
+                    }
+                ],
+                "object_format": "sha1",
+                "protocol": "pomegranagent-reviewed-source/v1",
+                "source_head": source_head,
+                "tree_oid": source_tree,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
     secret = "sk-server-secret-1234567890"
     environment = {
         "APP_BUSINESS_TIMEZONE": "Asia/Shanghai",
@@ -769,6 +1001,10 @@ def test_live_server_validates_exact_runtime_paths_and_redacts_log_records(tmp_p
         "APP_DB_PATH": str(database),
         "APP_LOG_PATH": str(app_log),
         "APP_MEDIA_ROOT": str(media),
+        "APP_REVIEWED_SOURCE_HEAD": source_head,
+        "APP_REVIEWED_SOURCE_MANIFEST": str(source_manifest),
+        "APP_REVIEWED_SOURCE_ROOT": str(source_root),
+        "APP_REVIEWED_SOURCE_TREE_OID": source_tree,
         "APP_TTS_CACHE_PATH": str(tts),
         "DEEPSEEK_API_KEY": secret,
         "DEEPSEEK_BASE_URL": "https://api.deepseek.example/v1",
@@ -789,6 +1025,16 @@ def test_live_server_validates_exact_runtime_paths_and_redacts_log_records(tmp_p
     assert paths.media == media
     assert paths.tts_cache == tts
     assert paths.app_log == app_log
+    assert paths.source_root == source_root
+    assert paths.source_manifest == source_manifest
+    server.assert_runtime_paths_pinned(paths)
+    os.chmod(source_root, 0o700)
+    os.chmod(source_file.parent.parent, 0o700)
+    os.chmod(source_file.parent, 0o700)
+    os.chmod(source_file, 0o600)
+    source_file.write_bytes(b"MUTATED = True\n")
+    with pytest.raises(server.ServerSafetyError, match="source"):
+        server.assert_runtime_paths_pinned(paths)
     assert (parsed.listen_fd, parsed.telemetry_fd) == (71, 72)
     with pytest.raises(server.ServerSafetyError, match="environment"):
         server.validate_child_environment({**environment, "HTTPS_PROXY": "secret"})
@@ -853,7 +1099,8 @@ def test_live_server_ai_telemetry_is_bounded_metadata_without_exception_text():
         monotonic=lambda: next(ticks),
     )
 
-    context.set_next_correlation("conversation:301")
+    request_id = "55555555-5555-4555-8555-555555555551"
+    context.set_next_correlation(f"chat-request:{request_id}")
     assert ai_engine.chat_reply(child={})["reply"] == "safe synthetic response"
     with context.correlate("analysis-job:501"):
         with pytest.raises(RuntimeError, match="never-retain"):
@@ -894,16 +1141,54 @@ def test_live_server_marks_malformed_raw_provider_json_as_error_before_local_fal
         emit=events.append,
         monotonic=lambda: next(ticks),
     )
-    context.set_next_correlation("conversation:301")
+    request_id = "55555555-5555-4555-8555-555555555551"
+    context.set_next_correlation(f"chat-request:{request_id}")
 
     assert ai_engine.chat_reply()["reply"] == "local fallback"
     assert len(events) == 1
     assert events[0]["operation"] == "chat_reply"
-    assert events[0]["correlation_id"] == "conversation:301"
+    assert events[0]["correlation_id"] == f"chat-request:{request_id}"
     assert events[0]["parse_valid"] is False
     assert events[0]["status"] == "error"
     assert events[0]["error_class"] == "ProviderPayloadInvalid"
     assert "not-json" not in json.dumps(events)
+
+
+def test_live_server_chat_correlation_uses_exact_claim_request_uuid(monkeypatch):
+    server = importlib.import_module("scripts.live_provider_uat_server")
+    request_id = "55555555-5555-4555-8555-555555555551"
+    contexts = []
+
+    class Correlation:
+        def set_next_correlation(self, value):
+            contexts.append(value)
+
+    conversations = types.SimpleNamespace(
+        ai_engine=object(),
+        build_chat_context=lambda _db, _claim, _payload: types.SimpleNamespace(
+            conversation_id=301
+        ),
+    )
+    backend = types.SimpleNamespace(ai_engine=conversations.ai_engine)
+    original_import = server.importlib.import_module
+    monkeypatch.setattr(
+        server.importlib,
+        "import_module",
+        lambda name: conversations
+        if name == "app.backend.routes.conversations"
+        else original_import(name),
+    )
+
+    server.install_chat_correlation(backend, Correlation())
+    claim = types.SimpleNamespace(request_id=request_id)
+    result = conversations.build_chat_context(object(), claim, object())
+
+    assert result.conversation_id == 301
+    assert contexts == [f"chat-request:{request_id}"]
+    with pytest.raises(server.ServerSafetyError, match="correlation"):
+        conversations.build_chat_context(
+            object(), types.SimpleNamespace(request_id="not-a-uuid"), object()
+        )
 
 
 def test_provider_completion_requires_exact_model_voice_correlation_and_run_owned_audio(
@@ -912,20 +1197,64 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
     module = _module()
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
     plan.tts_cache.mkdir(mode=0o700)
-    audio = b"ID3 synthetic exact audio"
-    cache_relative = "tts-cache/0123456789abcdef0123456789abcdef.mp3"
-    (plan.root / cache_relative).write_bytes(audio)
-    audio_sha = hashlib.sha256(audio).hexdigest()
+    request_ids = [
+        "55555555-5555-4555-8555-555555555551",
+        "55555555-5555-4555-8555-555555555552",
+        "55555555-5555-4555-8555-555555555553",
+    ]
+    texts = [
+        "你好呀，Live Child！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～",
+        "你观察到小鸭有什么变化？",
+        "你照顾得很认真，还有什么感受？",
+        "这是一份很完整的池塘日记。",
+    ]
+    tts_evidence = []
+    for index, text in enumerate(texts):
+        audio = f"ID3 synthetic exact audio {index}".encode("ascii")
+        cache_name = hashlib.md5(
+            text.encode("utf-8"), usedforsecurity=False
+        ).hexdigest() + ".mp3"
+        (plan.tts_cache / cache_name).write_bytes(audio)
+        tts_evidence.append(
+            {
+                "audio_sha256": hashlib.sha256(audio).hexdigest(),
+                "cache_relative_path": f"tts-cache/{cache_name}",
+                "kind": "opening_greeting" if index == 0 else "diary_reply",
+                "source_message_id": None if index == 0 else 400 + index * 2,
+                "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            }
+        )
     entity_ids = {
         "analysis_job_id": 501,
-        "chat_request_ids": ["one", "two", "three"],
+        "chat_request_ids": request_ids,
         "live_conversation_id": 301,
-        "tts_evidence": {
-            "audio_sha256": audio_sha,
-            "cache_relative_path": cache_relative,
-            "source_message_id": 406,
-            "text_sha256": "f" * 64,
-        },
+        "local_terminal_request_id": request_ids[2],
+        "monthly_roster_attempts": [
+            {
+                "canonical_body_sha256": "a" * 64,
+                "error_code": "ROSTER_DATE_CONFLICT",
+                "kind": "roster_attempt",
+                "method": "POST",
+                "order": 1,
+                "path": "/api/roster/month",
+                "replace_existing": False,
+                "request_id": "33333333-3333-4333-8333-333333333333",
+                "status": 409,
+            },
+            {
+                "canonical_body_sha256": "a" * 64,
+                "error_code": None,
+                "kind": "roster_attempt",
+                "method": "POST",
+                "order": 2,
+                "path": "/api/roster/month",
+                "replace_existing": True,
+                "request_id": "44444444-4444-4444-8444-444444444444",
+                "status": 200,
+            },
+        ],
+        "provider_chat_request_ids": request_ids[:2],
+        "tts_evidence": tts_evidence,
     }
 
     def ai_event(operation, correlation):
@@ -946,17 +1275,13 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
             "voice": None,
         }
 
-    events = (
-        ai_event("chat_reply", "conversation:301"),
-        ai_event("chat_reply", "conversation:301"),
-        ai_event("chat_reply", "conversation:301"),
-        ai_event("extract_info", "analysis-job:501"),
-        ai_event("assess_conversation", "analysis-job:501"),
-        {
-            "audio_bytes": len(audio),
-            "cache_relative_path": cache_relative,
-            "cache_sha256": audio_sha,
-            "correlation_id": "message-text:" + "f" * 64,
+    def tts_event(evidence):
+        cache = plan.root / evidence["cache_relative_path"]
+        return {
+            "audio_bytes": cache.stat().st_size,
+            "cache_relative_path": evidence["cache_relative_path"],
+            "cache_sha256": evidence["audio_sha256"],
+            "correlation_id": "message-text:" + evidence["text_sha256"],
             "error_class": None,
             "latency_bucket": "1-5s",
             "model": None,
@@ -967,7 +1292,18 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
             "response_sha256": None,
             "status": "ok",
             "voice": "zh-CN-XiaoxiaoNeural",
-        },
+        }
+
+    events = (
+        *entity_ids["monthly_roster_attempts"],
+        tts_event(tts_evidence[0]),
+        ai_event("chat_reply", f"chat-request:{request_ids[0]}"),
+        tts_event(tts_evidence[1]),
+        ai_event("chat_reply", f"chat-request:{request_ids[1]}"),
+        tts_event(tts_evidence[2]),
+        tts_event(tts_evidence[3]),
+        ai_event("extract_info", "analysis-job:501"),
+        ai_event("assess_conversation", "analysis-job:501"),
     )
 
     summary = module._validate_provider_completion(
@@ -976,13 +1312,16 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
         provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
         entity_ids=entity_ids,
     )
-    assert len(summary["events"]) == 6
+    assert len(summary["events"]) == 10
 
     mutations = (
-        (*events[:3], {**events[3], "model": "wrong-model"}, *events[4:]),
-        (*events[:-1], {**events[-1], "voice": "zh-CN-YunxiNeural"}),
-        ({**events[0], "correlation_id": "conversation:999"}, *events[1:]),
-        (*events[:-1], {**events[-1], "cache_sha256": "0" * 64}),
+        (*events[:8], {**events[8], "model": "wrong-model"}, events[9]),
+        (*events[:7], {**events[7], "voice": "zh-CN-YunxiNeural"}, *events[8:]),
+        (*events[:3], {**events[3], "correlation_id": f"chat-request:{request_ids[2]}"}, *events[4:]),
+        (*events[:7], {**events[7], "cache_sha256": "0" * 64}, *events[8:]),
+        (*events[:7], *events[8:]),
+        (*events[:6], ai_event("chat_reply", f"chat-request:{request_ids[2]}"), *events[6:]),
+        ({**events[0], "canonical_body_sha256": "b" * 64}, *events[1:]),
     )
     for mutation in mutations:
         with pytest.raises(module.HarnessSafetyError, match="provider telemetry"):
@@ -992,7 +1331,7 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
                 provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
                 entity_ids=entity_ids,
             )
-    (plan.root / cache_relative).unlink()
+    (plan.root / tts_evidence[-1]["cache_relative_path"]).unlink()
     with pytest.raises(module.HarnessSafetyError, match="provider telemetry"):
         module._validate_provider_completion(
             events,
@@ -1048,6 +1387,111 @@ def test_edge_tts_telemetry_hashes_exact_audio_and_run_cache_name():
             "voice": "zh-CN-XiaoxiaoNeural",
         }
     ]
+
+
+def test_live_server_emits_safe_ordered_monthly_roster_attempt_telemetry():
+    server = importlib.import_module("scripts.live_provider_uat_server")
+    harness = _module()
+    events = []
+    calls = []
+
+    async def app(scope, receive, send):
+        body = b""
+        while True:
+            message = await receive()
+            body += message.get("body", b"")
+            if not message.get("more_body", False):
+                break
+        value = json.loads(body)
+        calls.append(value)
+        if value["replace_existing"]:
+            status = 200
+            response = {"request_id": value["request_id"], "schedule": []}
+        else:
+            status = 409
+            response = {"error": {"code": "ROSTER_DATE_CONFLICT"}}
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        await send(
+            {
+                "type": "http.response.body",
+                "body": json.dumps(response).encode("utf-8"),
+                "more_body": False,
+            }
+        )
+
+    wrapped = server.RosterAttemptTelemetry(app, emit=events.append)
+    base = {
+        "month": "2026-09",
+        "cycle": "2026-09",
+        "entries": [
+            {"date": "2026-09-03", "child_ids": [10, 101]},
+            {"date": "2026-09-04", "child_ids": [10, 101]},
+        ],
+    }
+    request_ids = (
+        "33333333-3333-4333-8333-333333333333",
+        "44444444-4444-4444-8444-444444444444",
+    )
+
+    async def invoke(body):
+        request_messages = [
+            {
+                "type": "http.request",
+                "body": json.dumps(body).encode("utf-8"),
+                "more_body": False,
+            }
+        ]
+        responses = []
+
+        async def receive():
+            return request_messages.pop(0)
+
+        async def send(message):
+            responses.append(message)
+
+        await wrapped(
+            {
+                "type": "http",
+                "method": "POST",
+                "path": "/api/roster/month",
+            },
+            receive,
+            send,
+        )
+        return responses
+
+    asyncio.run(invoke({**base, "replace_existing": False, "request_id": request_ids[0]}))
+    asyncio.run(invoke({**base, "replace_existing": True, "request_id": request_ids[1]}))
+
+    assert calls[0]["entries"] == calls[1]["entries"]
+    assert events == [
+        {
+            "canonical_body_sha256": events[0]["canonical_body_sha256"],
+            "error_code": "ROSTER_DATE_CONFLICT",
+            "kind": "roster_attempt",
+            "method": "POST",
+            "order": 1,
+            "path": "/api/roster/month",
+            "replace_existing": False,
+            "request_id": request_ids[0],
+            "status": 409,
+        },
+        {
+            "canonical_body_sha256": events[0]["canonical_body_sha256"],
+            "error_code": None,
+            "kind": "roster_attempt",
+            "method": "POST",
+            "order": 2,
+            "path": "/api/roster/month",
+            "replace_existing": True,
+            "request_id": request_ids[1],
+            "status": 200,
+        },
+    ]
+    for event in events:
+        assert harness.parse_telemetry_line(
+            harness.canonical_json_line(event).encode("utf-8")
+        ) == event
 
 
 class _FakeBoundSocket:
@@ -1118,6 +1562,7 @@ def test_server_launch_uses_parent_prebound_random_socket_and_direct_group(tmp_p
         popen=popen,
         getpgid=lambda pid: pid,
         getsid=lambda pid: pid,
+        source_validator=lambda _plan: None,
     )
 
     assert created.port == 43123
@@ -1129,7 +1574,7 @@ def test_server_launch_uses_parent_prebound_random_socket_and_direct_group(tmp_p
         (
             (
                 PYTHON,
-                str(plan.repository / "scripts" / "live_provider_uat_server.py"),
+                str(plan.source_root / "scripts" / "live_provider_uat_server.py"),
                 "--listen-fd",
                 "71",
                 "--telemetry-fd",
@@ -1137,7 +1582,7 @@ def test_server_launch_uses_parent_prebound_random_socket_and_direct_group(tmp_p
             ),
             {
                 "close_fds": True,
-                "cwd": plan.repository,
+                "cwd": plan.source_root,
                 "env": {"APP_DB_MODE": "app"},
                 "pass_fds": (71, 72),
                 "shell": False,
@@ -1204,6 +1649,7 @@ def test_live_server_session_closes_parent_fds_and_finishes_once(tmp_path):
             stopped.append(owned.pgid),
             setattr(owned.process, "returncode", 0),
         ),
+        peek_exit=lambda _owned: None,
     )
     repeated = module.finish_live_server(session, stopper=lambda _owned: pytest.fail())
 
@@ -1246,8 +1692,7 @@ def test_finish_live_server_still_cleans_owned_group_when_leader_already_exited(
 
 def test_owned_process_group_stops_term_then_bounded_kill_without_foreign_signal():
     module = _module()
-    timeout = subprocess.TimeoutExpired(cmd="fake", timeout=8)
-    process = _FakeProcess(waits=(timeout, -signal.SIGKILL))
+    process = _FakeProcess(waits=(-signal.SIGKILL,))
     owned = module.OwnedProcess(
         process=process,
         pid=process.pid,
@@ -1256,18 +1701,24 @@ def test_owned_process_group_stops_term_then_bounded_kill_without_foreign_signal
     )
     signals = []
     group = [(process.pid, process.pid)]
+    killed = False
 
     def killpg(pgid, signum):
+        nonlocal killed
         signals.append((pgid, signum))
         if signum == signal.SIGKILL:
-            group.clear()
+            killed = True
+
+    def members(_pgid):
+        return tuple(group) if process.returncode is None else ()
 
     module.stop_owned_process_group(
         owned,
         getpgid=lambda pid: pid,
         getsid=lambda pid: pid,
-        group_members=lambda _pgid: tuple(group),
+        group_members=members,
         killpg=killpg,
+        peek_exit=lambda _owned: -signal.SIGKILL if killed else None,
         monotonic=iter((0.0, 3.0, 4.0)).__next__,
         sleep=lambda _seconds: None,
     )
@@ -1276,7 +1727,7 @@ def test_owned_process_group_stops_term_then_bounded_kill_without_foreign_signal
         (process.pid, signal.SIGTERM),
         (process.pid, signal.SIGKILL),
     ]
-    assert process.wait_timeouts == [8, 5]
+    assert process.wait_timeouts == [5]
 
     foreign = _FakeProcess(pid=54321)
     foreign_owned = module.OwnedProcess(
@@ -1295,7 +1746,6 @@ def test_owned_process_group_stops_term_then_bounded_kill_without_foreign_signal
             killpg=lambda pgid, signum: signals.append((pgid, signum)),
         )
     assert signals == []
-
     assert foreign.poll() is None
 
     undiscovered = _FakeProcess(pid=54322)
@@ -1311,11 +1761,87 @@ def test_owned_process_group_stops_term_then_bounded_kill_without_foreign_signal
             getsid=lambda pid: pid,
             group_members=lambda _pgid: (),
             killpg=lambda pgid, signum: signals.append((pgid, signum)),
+            peek_exit=lambda _owned: None,
         )
     assert signals == []
 
 
-def test_owned_process_group_kills_surviving_descendant_after_leader_exit_without_reused_group():
+def test_owned_process_group_keeps_leader_unreaped_until_descendants_are_absent():
+    module = _module()
+    process = _FakeProcess(pid=43210)
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
+    stage = {"value": "running"}
+    observations = []
+
+    def peek_exit(_owned):
+        return None if stage["value"] == "running" else 0
+
+    def members(_pgid):
+        observations.append((stage["value"], process.returncode))
+        if process.returncode is not None:
+            return ()
+        if stage["value"] == "running":
+            return ((43210, 43210), (43211, 43210))
+        return ((43210, 43210),)
+
+    signals = []
+
+    def killpg(pgid, signum):
+        signals.append((pgid, signum, process.returncode))
+        stage["value"] = "leader-zombie"
+
+    returncode = module.stop_owned_process_group(
+        owned,
+        getpgid=lambda pid: pid,
+        getsid=lambda pid: pid,
+        group_members=members,
+        killpg=killpg,
+        peek_exit=peek_exit,
+        monotonic=iter((0.0, 0.1)).__next__,
+        sleep=lambda _seconds: None,
+    )
+
+    assert returncode == 0
+    assert signals == [(43210, signal.SIGTERM, None)]
+    assert observations == [
+        ("running", None),
+        ("leader-zombie", None),
+        ("leader-zombie", 0),
+    ]
+    assert process.wait_timeouts == [5]
+
+
+def test_waitid_exit_peek_uses_wnowait_and_never_reaps():
+    module = _module()
+    process = _FakeProcess(pid=43210)
+    owned = module.OwnedProcess(process, process.pid, process.pid, process.pid)
+    calls = []
+    result = types.SimpleNamespace(
+        si_pid=process.pid,
+        si_code=getattr(os, "CLD_EXITED", 1),
+        si_status=7,
+    )
+
+    observed = module._peek_owned_exit(
+        owned,
+        waitid=lambda idtype, pid, options: (
+            calls.append((idtype, pid, options)), result
+        )[1],
+    )
+
+    assert observed == 7
+    assert calls[0][0] == os.P_PID
+    assert calls[0][1] == process.pid
+    assert calls[0][2] & os.WNOWAIT
+    assert calls[0][2] & os.WNOHANG
+    assert process.returncode is None
+
+def test_owned_process_group_rejects_already_reaped_leader_before_any_group_signal():
     module = _module()
     leader = _FakeProcess(pid=43210)
     leader.returncode = 0
@@ -1325,44 +1851,14 @@ def test_owned_process_group_kills_surviving_descendant_after_leader_exit_withou
         pgid=leader.pid,
         sid=leader.pid,
     )
-    group = [(43211, 43210)]
     signals = []
 
-    def killpg(pgid, signum):
-        signals.append((pgid, signum))
-        group.clear()
-
-    module.stop_owned_process_group(
-        owned,
-        getpgid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
-        getsid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
-        group_members=lambda _pgid: tuple(group),
-        killpg=killpg,
-        monotonic=iter((0.0, 0.1)).__next__,
-        sleep=lambda _seconds: None,
-    )
-
-    assert signals == [(43210, signal.SIGTERM)]
-
-    group[:] = [(99999, 99999)]
-    signals.clear()
-    with pytest.raises(module.HarnessSafetyError, match="process-group ownership"):
+    with pytest.raises(module.HarnessSafetyError, match="reaped before cleanup"):
         module.stop_owned_process_group(
             owned,
-            getpgid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
-            getsid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
-            group_members=lambda _pgid: tuple(group),
-            killpg=lambda pgid, signum: signals.append((pgid, signum)),
-        )
-    assert signals == []
-
-    group[:] = [(leader.pid, leader.pid)]
-    with pytest.raises(module.HarnessSafetyError, match="process-group ownership"):
-        module.stop_owned_process_group(
-            owned,
-            getpgid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
-            getsid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
-            group_members=lambda _pgid: tuple(group),
+            getpgid=lambda _pid: pytest.fail("must not inspect a reused PID"),
+            getsid=lambda _pid: pytest.fail("must not inspect a reused PID"),
+            group_members=lambda _pgid: ((99999, 99999),),
             killpg=lambda pgid, signum: signals.append((pgid, signum)),
         )
     assert signals == []
@@ -1384,6 +1880,7 @@ def test_server_startup_exit_is_detected_without_group_discovery():
             owned,
             getpgid=lambda pid: pid,
             getsid=lambda pid: pid,
+            peek_exit=lambda _owned: 7,
         )
     with pytest.raises(module.HarnessSafetyError, match="process-group ownership"):
         module.require_owned_process_alive(
@@ -1472,6 +1969,160 @@ def test_pinned_run_file_read_rejects_nested_ancestor_swap(tmp_path):
         )
 
 
+def test_protected_resource_and_dotenv_reads_are_descriptor_safe_and_nofollow(
+    tmp_path,
+):
+    module = _module()
+    repository = _repository(tmp_path)
+    dotenv = repository / ".env"
+    dotenv.write_text("DEEPSEEK_API_KEY=reviewed-value\n", encoding="utf-8")
+    loader_calls = []
+
+    def loader(**kwargs):
+        loader_calls.append(kwargs)
+        dotenv.write_text("DEEPSEEK_API_KEY=substituted-value\n", encoding="utf-8")
+        return {
+            line.split("=", 1)[0]: line.split("=", 1)[1]
+            for line in kwargs["stream"].read().splitlines()
+        }
+
+    assert module.read_dotenv_values(repository, loader=loader) == {
+        "DEEPSEEK_API_KEY": "reviewed-value"
+    }
+    assert set(loader_calls[0]) == {"interpolate", "stream", "verbose"}
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "protected.db").write_bytes(b"outside")
+    (repository / "linked").symlink_to(outside, target_is_directory=True)
+    with pytest.raises(module.HarnessSafetyError, match="protected resource"):
+        module._file_evidence(repository / "linked" / "protected.db")
+
+    dotenv.unlink()
+    dotenv.symlink_to(outside / "protected.db")
+    with pytest.raises(module.HarnessSafetyError, match="configuration file"):
+        module.read_dotenv_values(repository, loader=loader)
+
+
+def test_sqlite_shadow_copies_descriptor_pinned_bytes_without_path_read(
+    tmp_path,
+    monkeypatch,
+):
+    module = _module()
+    database = tmp_path / "protected.db"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE proof (value TEXT NOT NULL)")
+        connection.execute("INSERT INTO proof VALUES ('reviewed')")
+
+    def reject_path_read(_path):
+        raise AssertionError("protected SQLite bytes must be read through a descriptor")
+
+    monkeypatch.setattr(Path, "read_bytes", reject_path_read)
+    with module._sqlite_shadow(database) as shadow, sqlite3.connect(
+        f"{shadow.as_uri()}?mode=ro",
+        uri=True,
+    ) as connection:
+        assert connection.execute("SELECT value FROM proof").fetchone() == ("reviewed",)
+
+
+def test_avatar_provenance_decodes_the_same_pinned_bytes_it_hashes(tmp_path, monkeypatch):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.media.mkdir(mode=0o700)
+    avatar_id = "00000000-0000-4000-8000-000000000099"
+    avatar_path = plan.media / f"{avatar_id}.webp"
+    from PIL import Image
+
+    Image.new("RGB", (9, 7), (17, 31, 47)).save(avatar_path, "WEBP", lossless=True)
+    payload = avatar_path.read_bytes()
+    connection = sqlite3.connect(":memory:")
+    connection.executescript(
+        "CREATE TABLE children (id INTEGER PRIMARY KEY, avatar TEXT);"
+        "CREATE TABLE avatar_media (id TEXT PRIMARY KEY, file_name TEXT, "
+        "mime_type TEXT, width INTEGER, height INTEGER, size_bytes INTEGER, "
+        "sha256 TEXT);"
+    )
+    connection.execute(
+        "INSERT INTO children VALUES (?, ?)",
+        (1, f"/api/media/avatars/{avatar_id}"),
+    )
+    connection.execute(
+        "INSERT INTO avatar_media VALUES (?, ?, ?, ?, ?, ?, ?)",
+        (
+            avatar_id,
+            avatar_path.name,
+            "image/webp",
+            9,
+            7,
+            len(payload),
+            hashlib.sha256(payload).hexdigest(),
+        ),
+    )
+    original_open = Image.open
+
+    def pinned_open(source, *args, **kwargs):
+        assert isinstance(source, io.BytesIO)
+        return original_open(source, *args, **kwargs)
+
+    monkeypatch.setattr(Image, "open", pinned_open)
+    module._avatar_provenance(
+        connection,
+        plan,
+        owner_table="children",
+        owner_id=1,
+        avatar_id=avatar_id,
+    )
+
+
+def _install_server_source_boundary(run_root: Path) -> dict[str, str]:
+    source_root = run_root / "reviewed-source"
+    source_file = source_root / "app/backend/__init__.py"
+    source_file.parent.mkdir(parents=True)
+    source_payload = b"REVIEWED = True\n"
+    source_file.write_bytes(source_payload)
+    source_head = "b" * 40
+    source_tree = "c" * 40
+    source_manifest = run_root / "reviewed-source.json"
+    source_manifest.write_text(
+        json.dumps(
+            {
+                "files": [
+                    {
+                        "blob_oid": hashlib.sha1(
+                            f"blob {len(source_payload)}\0".encode("ascii")
+                            + source_payload,
+                            usedforsecurity=False,
+                        ).hexdigest(),
+                        "git_mode": 0o100644,
+                        "path": "app/backend/__init__.py",
+                        "sha256": hashlib.sha256(source_payload).hexdigest(),
+                        "size": len(source_payload),
+                    }
+                ],
+                "object_format": "sha1",
+                "protocol": "pomegranagent-reviewed-source/v1",
+                "source_head": source_head,
+                "tree_oid": source_tree,
+            },
+            ensure_ascii=True,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    os.chmod(source_file, 0o400)
+    os.chmod(source_file.parent, 0o500)
+    os.chmod(source_file.parent.parent, 0o500)
+    os.chmod(source_root, 0o500)
+    return {
+        "APP_REVIEWED_SOURCE_HEAD": source_head,
+        "APP_REVIEWED_SOURCE_MANIFEST": str(source_manifest),
+        "APP_REVIEWED_SOURCE_ROOT": str(source_root),
+        "APP_REVIEWED_SOURCE_TREE_OID": source_tree,
+    }
+
+
 def test_live_server_retains_runtime_root_and_resource_inode_identity(tmp_path):
     server = importlib.import_module("scripts.live_provider_uat_server")
     run_root = (tmp_path / "retained-run").resolve()
@@ -1488,6 +2139,7 @@ def test_live_server_retains_runtime_root_and_resource_inode_identity(tmp_path):
         "APP_DB_PATH": str(database),
         "APP_LOG_PATH": str(run_root / "logs/app.log"),
         "APP_MEDIA_ROOT": str(run_root / "media"),
+        **_install_server_source_boundary(run_root),
         "APP_TTS_CACHE_PATH": str(run_root / "tts-cache"),
         "DEEPSEEK_API_KEY": "sk-server-secret-1234567890",
         "DEEPSEEK_BASE_URL": "https://api.deepseek.example/v1",
@@ -1535,6 +2187,36 @@ def test_failed_finalization_retains_run_and_never_claims_complete(tmp_path):
         module.finalize_failed_run(plan, reason_code="secret provider error text")
 
 
+def test_post_write_terminal_failure_atomically_downgrades_unverified_complete(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    unverified = {
+        "protocol": "pomegranagent-live-uat-manifest/v1",
+        "run_id": plan.run_id,
+        "source_head": HEAD,
+        "status": "COMPLETE",
+    }
+    module.atomic_write_json(plan.manifest, unverified, pinned_plan=plan)
+
+    with pytest.raises(module.HarnessSafetyError, match="cannot be replaced"):
+        module.finalize_failed_run(plan, reason_code="SAFETY_FAILURE")
+    module.finalize_failed_run(
+        plan,
+        reason_code="SAFETY_FAILURE",
+        replace_unverified_complete=True,
+    )
+
+    assert json.loads(plan.manifest.read_text(encoding="utf-8")) == {
+        "protocol": "pomegranagent-live-uat-manifest/v1",
+        "reason_code": "SAFETY_FAILURE",
+        "run_id": plan.run_id,
+        "source_head": HEAD,
+        "status": "FAILED",
+    }
+
+
 def test_complete_manifest_rejects_blocker_issue_even_after_controller_validation(tmp_path):
     module = _module()
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
@@ -1557,6 +2239,108 @@ def test_complete_manifest_rejects_blocker_issue_even_after_controller_validatio
             provider_summary={"events": []},
             provenance={"status": "PROVEN"},
         )
+
+
+def test_terminal_inventory_crosslinks_exact_manifest_screenshot_and_provider_bytes(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.screenshots.mkdir(mode=0o700)
+    plan.tts_cache.mkdir(mode=0o700)
+    screenshot = plan.screenshots / "reviewed.png"
+    screenshot.write_bytes(_png(16, 9))
+    cache = plan.tts_cache / "reviewed.mp3"
+    cache.write_bytes(b"reviewed audio bytes")
+    screenshot_sha = hashlib.sha256(screenshot.read_bytes()).hexdigest()
+    cache_sha = hashlib.sha256(cache.read_bytes()).hexdigest()
+    provider_summary = {
+        "events": [
+            {
+                "cache_relative_path": "tts-cache/reviewed.mp3",
+                "cache_sha256": cache_sha,
+                "operation": "tts",
+            }
+        ],
+        "protocol": "pomegranagent-live-uat-telemetry-summary/v1",
+    }
+    module.atomic_write_json(
+        plan.provider_summary,
+        provider_summary,
+        pinned_plan=plan,
+    )
+    manifest = {
+        "screenshots": [
+            {
+                "relative_path": "screenshots/reviewed.png",
+                "sha256": screenshot_sha,
+            }
+        ],
+        "status": "COMPLETE",
+    }
+    manifest_payload = module.canonical_json_line(manifest).encode("utf-8")
+    checksums_payload = module._checksum_lines(plan, manifest_payload)
+    module._write_owned_bytes(plan.checksums, checksums_payload, pinned_plan=plan)
+    module.atomic_write_json(plan.manifest, manifest, pinned_plan=plan)
+
+    module._verify_complete_terminal_state(
+        plan,
+        manifest_payload=manifest_payload,
+        checksums_payload=checksums_payload,
+        provider_summary=provider_summary,
+    )
+
+    forged = json.loads(json.dumps(provider_summary))
+    forged["events"][0]["cache_sha256"] = "f" * 64
+    with pytest.raises(module.HarnessSafetyError, match="terminal inventory"):
+        module._verify_complete_terminal_state(
+            plan,
+            manifest_payload=manifest_payload,
+            checksums_payload=checksums_payload,
+            provider_summary=forged,
+        )
+
+
+def test_manifest_payload_uses_full_secret_scanner_before_and_after_write(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    secret = "sk-manifest-only-secret-value"
+    unsafe_payloads = (
+        module.canonical_json_line(
+            {"status": "COMPLETE", "safe_summary": "Authorization: redacted"}
+        ).encode("utf-8"),
+        module.canonical_json_line(
+            {"status": "COMPLETE", "safe_summary": secret}
+        ).encode("utf-8"),
+    )
+    for payload in unsafe_payloads:
+        with pytest.raises(module.HarnessSafetyError, match="manifest") as caught:
+            module._assert_secret_free_payload(
+                payload,
+                actual_secrets=(secret,),
+                role="manifest",
+            )
+        assert secret not in str(caught.value)
+
+    safe_manifest = {"status": "COMPLETE", "safe_summary": "reviewed"}
+    safe_payload = module.canonical_json_line(safe_manifest).encode("utf-8")
+    module._assert_secret_free_payload(
+        safe_payload,
+        actual_secrets=(secret,),
+        role="manifest",
+    )
+    module.atomic_write_json(plan.manifest, safe_manifest, pinned_plan=plan)
+    written = module._read_pinned_run_file(
+        plan,
+        plan.manifest,
+        max_bytes=1_000_000,
+    )
+    assert written == safe_payload
+    module._assert_secret_free_payload(
+        written,
+        actual_secrets=(secret,),
+        role="manifest",
+    )
 
 
 class _GitState:
@@ -1853,6 +2637,35 @@ def test_controller_evidence_requires_exact_human_gate_and_screenshot_state_mapp
         module.validate_controller_evidence(plan)
 
 
+@pytest.mark.parametrize(
+    "first_state,second_state",
+    (
+        ("teacher-management", "teacher-review-confirmed"),
+        ("child-avatar-selected", "child-conversation-complete"),
+    ),
+)
+def test_controller_evidence_rejects_state_viewport_swaps_even_when_global_set_matches(
+    tmp_path,
+    first_state,
+    second_state,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.screenshots.mkdir(mode=0o700)
+    payload = _controller_payload(module, plan)
+    by_state = {item["state_id"]: item for item in payload["screenshots"]}
+    first = by_state[first_state]
+    second = by_state[second_state]
+    first["viewport"], second["viewport"] = second["viewport"], first["viewport"]
+    for item in (first, second):
+        width, height = (int(part) for part in item["viewport"].split("x"))
+        (plan.root / item["relative_path"]).write_bytes(_png(width, height))
+    module.atomic_write_json(plan.controller_evidence, payload, pinned_plan=plan)
+
+    with pytest.raises(module.HarnessSafetyError, match="screenshot"):
+        module.validate_controller_evidence(plan)
+
+
 def test_compressed_png_metadata_secret_is_rejected_without_echo(tmp_path):
     module = _module()
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
@@ -1937,7 +2750,7 @@ def _create_seed_provenance_database(plan):
             ),
         )
         connection.execute(
-            "INSERT INTO conversations VALUES (30, 10, '2026-09-01', '2026-09-01T02:00:00.000000', 'ended', 'complete', 41)"
+            "INSERT INTO conversations VALUES (30, 10, '2026-09-01', '2026-09-01T02:00:00.000000', 'ended', 'max_rounds', 41)"
         )
         connection.executemany(
             "INSERT INTO messages VALUES (?, 30, ?, ?)",
@@ -1996,6 +2809,7 @@ def _search_cursor(search_request, *, conversation_id: int, snapshot_max_id: int
 
 def _apply_live_provenance(plan):
     from PIL import Image
+    module = _module()
 
     avatar_rows = (
         ("11111111-1111-4111-8111-111111111111", "11111111-1111-4111-8111-111111111111.webp"),
@@ -2009,6 +2823,38 @@ def _apply_live_provenance(plan):
         avatar_metadata.append((avatar_id, filename, 16, 12, len(content), __import__("hashlib").sha256(content).hexdigest()))
     conflict_request = "33333333-3333-4333-8333-333333333333"
     retry_request = "44444444-4444-4444-8444-444444444444"
+    roster_body_sha = hashlib.sha256(
+        json.dumps(
+            {
+                "cycle": "2026-09",
+                "entries": [
+                    {"child_ids": [10, 101], "date": "2026-09-03"},
+                    {"child_ids": [10, 101], "date": "2026-09-04"},
+                ],
+                "month": "2026-09",
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
+    roster_retry_hash = hashlib.sha256(
+        json.dumps(
+            {
+                "cycle": "2026-09",
+                "entries": [
+                    {"child_ids": [10, 101], "date": "2026-09-03"},
+                    {"child_ids": [10, 101], "date": "2026-09-04"},
+                ],
+                "month": "2026-09",
+                "operation": "monthly_roster",
+                "replace_existing": True,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
     chat_requests = (
         "55555555-5555-4555-8555-555555555551",
         "55555555-5555-4555-8555-555555555552",
@@ -2019,16 +2865,34 @@ def _apply_live_provenance(plan):
         "child_id": None,
         "date_from": "2026-08-31",
         "date_to": "2026-09-06",
-        "end_reason": ["complete"],
+        "end_reason": ["max_rounds"],
         "keyword": "池塘",
         "review_status": ["confirmed"],
         "sort": "completed_desc",
     }
-    tts_text = "这是一份很完整的池塘日记。"
-    tts_audio = b"ID3 synthetic retained UAT audio"
+    tts_texts = [
+        "你好呀，Live Child！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～",
+        "你观察到小鸭有什么变化？",
+        "你照顾得很认真，还有什么感受？",
+        module.FROZEN_MAX_ROUNDS_REPLY,
+    ]
     plan.tts_cache.mkdir(mode=0o700, exist_ok=True)
-    tts_cache_name = f"{hashlib.md5(tts_text.encode('utf-8')).hexdigest()}.mp3"
-    (plan.tts_cache / tts_cache_name).write_bytes(tts_audio)
+    tts_evidence = []
+    for index, tts_text in enumerate(tts_texts):
+        tts_audio = f"ID3 synthetic retained UAT audio {index}".encode("ascii")
+        tts_cache_name = hashlib.md5(
+            tts_text.encode("utf-8"), usedforsecurity=False
+        ).hexdigest() + ".mp3"
+        (plan.tts_cache / tts_cache_name).write_bytes(tts_audio)
+        tts_evidence.append(
+            {
+                "audio_sha256": hashlib.sha256(tts_audio).hexdigest(),
+                "cache_relative_path": f"tts-cache/{tts_cache_name}",
+                "kind": "opening_greeting" if index == 0 else "diary_reply",
+                "source_message_id": None if index == 0 else 400 + index * 2,
+                "text_sha256": hashlib.sha256(tts_text.encode("utf-8")).hexdigest(),
+            }
+        )
     with sqlite3.connect(plan.database) as connection:
         connection.executemany(
             "INSERT INTO avatar_media VALUES (?, ?, 'image/webp', ?, ?, ?, ?)",
@@ -2068,12 +2932,12 @@ def _apply_live_provenance(plan):
         )
         connection.execute(
             "INSERT INTO roster_requests VALUES (?, 'monthly_roster', ?, 'succeeded', ?, NULL, NULL)",
-            (retry_request, "a" * 64, roster_response),
+            (retry_request, roster_retry_hash, roster_response),
         )
         connection.executemany(
             "INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                (301, 101, "2026-09-03", "2026-09-03T02:00:00.000000", "ended", "complete", 406),
+                (301, 101, "2026-09-03", "2026-09-03T02:00:00.000000", "ended", "max_rounds", 406),
             ),
         )
         connection.executemany(
@@ -2084,7 +2948,7 @@ def _apply_live_provenance(plan):
                 (403, 301, "child", "它游得更快，我还换了清水。"),
                 (404, 301, "diary", "你照顾得很认真，还有什么感受？"),
                 (405, 301, "child", "我很开心，也会明天继续照顾。"),
-                (406, 301, "diary", "这是一份很完整的池塘日记。"),
+                (406, 301, "diary", module.FROZEN_MAX_ROUNDS_REPLY),
             ),
         )
         for index, request_id in enumerate(chat_requests):
@@ -2100,11 +2964,17 @@ def _apply_live_provenance(plan):
                     chr(ord("b") + index) * 64,
                     json.dumps(
                         {
+                            "child_message_id": child_message_id,
                             "conversation_id": 301,
                             "diary_message_id": diary_message_id,
+                            "end_reason": "max_rounds" if index == 2 else None,
+                            "ended": index == 2,
+                            "replayed": False,
                             "reply": connection.execute(
                                 "SELECT text FROM messages WHERE id = ?", (diary_message_id,)
                             ).fetchone()[0],
+                            "request_id": request_id,
+                            "round": index + 1,
                         },
                         ensure_ascii=False,
                         separators=(",", ":"),
@@ -2131,6 +3001,8 @@ def _apply_live_provenance(plan):
         "live_duck_id": 201,
         "live_conversation_id": 301,
         "chat_request_ids": list(chat_requests),
+        "provider_chat_request_ids": list(chat_requests[:2]),
+        "local_terminal_request_id": chat_requests[2],
         "growth_after": {
             "communication": [{"date": "2026-09-03", "score": 4}],
             "observation": [{"date": "2026-09-03", "score": 4}],
@@ -2143,8 +3015,28 @@ def _apply_live_provenance(plan):
         },
         "monthly_pairs": {"2026-09-03": [10, 101], "2026-09-04": [10, 101]},
         "monthly_roster_attempts": [
-            {"http_status": 409, "outcome": "ROSTER_DATE_CONFLICT", "request_id": conflict_request},
-            {"http_status": 200, "outcome": "SUCCEEDED", "request_id": retry_request},
+            {
+                "canonical_body_sha256": roster_body_sha,
+                "error_code": "ROSTER_DATE_CONFLICT",
+                "kind": "roster_attempt",
+                "method": "POST",
+                "order": 1,
+                "path": "/api/roster/month",
+                "replace_existing": False,
+                "request_id": conflict_request,
+                "status": 409,
+            },
+            {
+                "canonical_body_sha256": roster_body_sha,
+                "error_code": None,
+                "kind": "roster_attempt",
+                "method": "POST",
+                "order": 2,
+                "path": "/api/roster/month",
+                "replace_existing": True,
+                "request_id": retry_request,
+                "status": 200,
+            },
         ],
         "search_cursor": _search_cursor(search_request, conversation_id=301, snapshot_max_id=301),
         "search_deep_link": "#review?conversation_id=301",
@@ -2152,12 +3044,7 @@ def _apply_live_provenance(plan):
         "search_page_two_ids": [30],
         "search_request": search_request,
         "search_result_conversation_id": 301,
-        "tts_evidence": {
-            "audio_sha256": hashlib.sha256(tts_audio).hexdigest(),
-            "cache_relative_path": f"tts-cache/{tts_cache_name}",
-            "source_message_id": 406,
-            "text_sha256": hashlib.sha256(tts_text.encode("utf-8")).hexdigest(),
-        },
+        "tts_evidence": tts_evidence,
         "weekly_week_start": "2026-08-31",
         "weekly_metrics_after": {
             "completed_conversations": 2,
@@ -2363,17 +3250,13 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
                 "voice": None,
             }
 
-        tts = live_entities["tts_evidence"]
-        cache = plan.root / tts["cache_relative_path"]
-        return (
-            *(ai_event("chat_reply", "conversation:301") for _ in range(3)),
-            ai_event("extract_info", "analysis-job:501"),
-            ai_event("assess_conversation", "analysis-job:501"),
-            {
+        def tts_event(evidence):
+            cache = plan.root / evidence["cache_relative_path"]
+            return {
                 "audio_bytes": cache.stat().st_size,
-                "cache_relative_path": tts["cache_relative_path"],
-                "cache_sha256": tts["audio_sha256"],
-                "correlation_id": "message-text:" + tts["text_sha256"],
+                "cache_relative_path": evidence["cache_relative_path"],
+                "cache_sha256": evidence["audio_sha256"],
+                "correlation_id": "message-text:" + evidence["text_sha256"],
                 "error_class": None,
                 "latency_bucket": "1-5s",
                 "model": None,
@@ -2384,7 +3267,20 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
                 "response_sha256": None,
                 "status": "ok",
                 "voice": "zh-CN-XiaoxiaoNeural",
-            },
+            }
+
+        tts = live_entities["tts_evidence"]
+        chat_requests = live_entities["chat_request_ids"]
+        return (
+            *live_entities["monthly_roster_attempts"],
+            tts_event(tts[0]),
+            ai_event("chat_reply", f"chat-request:{chat_requests[0]}"),
+            tts_event(tts[1]),
+            ai_event("chat_reply", f"chat-request:{chat_requests[1]}"),
+            tts_event(tts[2]),
+            tts_event(tts[3]),
+            ai_event("extract_info", "analysis-job:501"),
+            ai_event("assess_conversation", "analysis-job:501"),
         )
 
     def server_finisher(session):
@@ -2410,6 +3306,10 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
         now=lambda: fixed_now,
         nonce=lambda: "123456789abc",
         business_today=lambda: date(2026, 9, 4),
+        source_materializer=lambda candidate: replace(
+            candidate,
+            source_tree_oid="b" * 40,
+        ),
         capture_resources=capture_resources,
         seed_runner=seed_runner,
         server_starter=server_starter,
@@ -2461,6 +3361,10 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
             now=lambda: fixed_now,
             nonce=lambda: "123456789abc",
             business_today=lambda: date(2026, 9, 4),
+            source_materializer=lambda candidate: replace(
+                candidate,
+                source_tree_oid="b" * 40,
+            ),
             capture_resources=capture_resources,
             seed_runner=seed_runner,
             server_starter=server_starter,

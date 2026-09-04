@@ -19,9 +19,14 @@ routine development or CI, and do not run it in parallel with any test suite.
   ancestors without following links. Renaming, relinking, permission-changing,
   or replacing a run/runtime ancestor makes the run fail; do not repair evidence
   in place.
+- The harness materializes `reviewed-source/` from Git objects belonging to the
+  literal reviewed commit, verifies each blob OID and byte hash, makes the tree
+  read-only, and runs the seed, server, frontend, and fixture handoff only from
+  that tree. The worktree is never an executable UAT source after preflight.
 - Shutdown verifies the direct leader's PID=PGID=SID identity and boundedly
-  proves that no member remains in that owned session/group, including when the
-  leader exited first. It refuses to signal a group reused by another session.
+  keeps that leader unreaped as the kernel-backed group identity until all
+  descendants are absent. This applies to successful and failed seed/server
+  groups and prevents signalling a numerically reused group.
 - Physical microphone capture/acoustic recognition is the only item that may
   be recorded as `HUMAN_UAT_REQUIRED`. All keyboard, button, focus, layout,
   controlled-text, DeepSeek, analysis, and Edge-TTS checks must run.
@@ -46,6 +51,11 @@ routine development or CI, and do not run it in parallel with any test suite.
    in the protected before/after snapshot. Never classify `app/`, `scripts/`,
    `tests/`, the live checklist, root runtime configuration, or the retained-UAT
    artifact tree as unrelated.
+
+   Each classified path is recorded with its two-character porcelain status and
+   role (`path`, or `current`/`original` for rename/copy). A stably missing
+   deletion or rename source is valid evidence, but any missing/present or byte
+   transition between the two protected snapshots fails closed.
 
 3. Wait for exactly one canonical JSON line on stdout. It is printed only after
    the app-mode health/version/worker/auth checks pass. Record the printed
@@ -80,16 +90,24 @@ one concrete visible assertion, and only the noted stable IDs where applicable.
    submit the month, intentionally exercise one conflict, then retry with a new
    UUID-v4 request ID and verify the final roster. Record `monthly_pairs` as at
    least two ISO dates mapped to exactly two distinct child IDs, and record
-   `monthly_roster_attempts` as exactly the failed 409
-   `ROSTER_DATE_CONFLICT` attempt followed by the successful 200 `SUCCEEDED`
-   attempt. The two request IDs must differ.
+   `monthly_roster_attempts` by copying the two server-originated telemetry
+   objects: exactly the failed 409 `ROSTER_DATE_CONFLICT` attempt followed by
+   the successful 200 attempt whose `error_code` is null. Each object has
+   exactly `kind`, `method`, `path`, `order`, `request_id`,
+   `canonical_body_sha256`, `replace_existing`, `status`, and `error_code`.
+   Both are `POST /api/roster/month`, their request IDs differ, their order is
+   1 then 2, and their canonical business-body hashes are identical.
 5. `child_conversation_real_provider_tts`: select the new child and complete a
-   real exchange of at least three alternating child/diary turns by controlled
-   text handoff. Verify real model replies and audible/generated Edge-TTS
-   output. Record `live_conversation_id`, every ordered UUID-v4
-   `chat_request_ids` value, and `tts_evidence` with the final diary message ID,
-   text SHA-256, run-relative cache path, and audio SHA-256. Do not send another
-   message after completion; the last diary message is the frozen boundary.
+   real exchange of exactly three alternating child/diary turns by controlled
+   text handoff. Record exactly three ordered UUID-v4 `chat_request_ids`, the
+   first two again as `provider_chat_request_ids`, and the third as
+   `local_terminal_request_id`. Only requests one and two invoke DeepSeek;
+   request three must return the product's fixed local max-round reply. Verify
+   all four generated Edge-TTS outputs: the opening greeting followed by the
+   three diary replies. Record `tts_evidence` in that order with `kind`, source
+   message ID (null only for the greeting), text SHA-256, run-relative cache
+   path, and audio SHA-256. Do not send another message after completion; the
+   sixth message and third request-ledger row are the frozen boundary.
 6. `conversation_completion_analysis`: complete the conversation, wait for the
    one real analysis worker job to succeed, and record `analysis_job_id`. The
    final DB proof requires nonempty feeding, emotion, and insight projections
@@ -107,7 +125,8 @@ one concrete visible assertion, and only the noted stable IDs where applicable.
     keyword, load the next frozen cursor page, and open the result through the
     Review deep link. Record the complete `search_request`, canonical
     `search_cursor`, exact `search_deep_link`, nonempty disjoint ordered
-    `search_page_one_ids` and `search_page_two_ids`, plus
+    `search_page_one_ids` and `search_page_two_ids` (IDs must also be unique
+    within each page), plus
     `search_result_conversation_id` equal to the retained live conversation.
 11. `search_empty_state`: submit a search that has no matches and verify its
     explicit empty state without disturbing the successful search evidence.
@@ -121,7 +140,8 @@ text when the API/URL supplies the stable ID. The required keys are exactly:
 `analysis_job_id`, `assessment_id`, `child_avatar_id`, `chat_request_ids`,
 `duck_avatar_id`, `growth_after`, `growth_before`, `live_child_id`,
 `live_duck_id`, `live_conversation_id`, `monthly_pairs`,
-`monthly_roster_attempts`, `search_cursor`, `search_deep_link`,
+`monthly_roster_attempts`, `provider_chat_request_ids`,
+`local_terminal_request_id`, `search_cursor`, `search_deep_link`,
 `search_page_one_ids`, `search_page_two_ids`, `search_request`,
 `search_result_conversation_id`, `tts_evidence`, `weekly_metrics_after`,
 `weekly_metrics_before`, and `weekly_week_start`. The harness captured
@@ -202,23 +222,35 @@ Wait for the harness to stop and exit successfully.
    protected main DB/WAL/SHM/log/TTS/media, repository HEAD/raw porcelain, and
    every pre-existing dirty path. The harness treats any mismatch as a safety
    failure.
-4. Confirm the sanitized provider summary contains exactly the correlated real
-   events: one `chat_reply` for every recorded chat request, one `extract_info`,
-   one `assess_conversation`, and one `tts`. Every event has exactly
+4. Confirm `reviewed-source.json` identifies the literal source commit/tree and
+   every retained reviewed-source blob. `SHA256SUMS` must cover this manifest,
+   the whole reviewed source, provider summary, screenshots, caches, and final
+   `manifest.json`. The harness descriptor-re-reads both terminal files,
+   recomputes the inventory, and cross-links every embedded screenshot and TTS
+   cache hash before it can return success.
+5. Confirm the sanitized telemetry summary protocol is
+   `pomegranagent-live-uat-telemetry-summary/v1` and contains, in exact order:
+   two roster attempts; greeting TTS; request-one DeepSeek chat; reply-one TTS;
+   request-two DeepSeek chat; reply-two TTS; fixed-reply TTS; one extraction;
+   and one assessment. Provider events have exactly
    `audio_bytes`, `cache_relative_path`, `cache_sha256`, `correlation_id`,
    `error_class`, `latency_bucket`, `model`, `operation`, `parse_valid`,
    `provider`, `response_bytes`, `response_sha256`, `status`, and `voice`.
    DeepSeek events must be raw-JSON parse-valid, successful, correlated to the
-   new conversation/job, and use the configured model. The TTS event must use
-   exactly `zh-CN-XiaoxiaoNeural`; its nonempty byte count, audio hash, message
-   text correlation, and run-owned cache path/hash must all agree with DB
-   provenance. A production local fallback never counts as provider success.
-5. Confirm the harness's actual-value and pattern scan completed. If doing an
+   two exact provider-backed request UUIDs or the analysis job, and use the
+   configured model. All four TTS events must use exactly
+   `zh-CN-XiaoxiaoNeural`; each nonempty byte count, audio hash, message-text
+   correlation, and run-owned cache path/hash must agree with DB provenance.
+   A local terminal reply never counts as provider success.
+6. Confirm the harness's actual-value and forbidden-pattern scan completed both
+   before and after the terminal manifest write. The exact manifest bytes are
+   scanned for registered secrets plus authorization, bearer, cookie, session,
+   and token patterns. If doing an
    additional pattern check, report only affected file names and never print
    matching content.
-6. Visually inspect selected screenshots for credentials or private browser
+7. Visually inspect selected screenshots for credentials or private browser
    state, then copy only redacted, instruction-worthy images into
    `docs/manual/assets/<run-id>/`. Never add the raw run directory to Git.
-7. Commit only the curated documentation/assets in the controller-owned Step 10
+8. Commit only the curated documentation/assets in the controller-owned Step 10
    commit. A failed run remains ignored and retained for release-owner review;
    start a new run rather than modifying its evidence into `COMPLETE`.
