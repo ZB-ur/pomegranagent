@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
+import asyncio
 from datetime import date, datetime, timezone
+import hashlib
 import importlib
 import json
 import io
@@ -47,11 +50,37 @@ def test_live_harness_module_import_is_effect_free(tmp_path, monkeypatch):
 def test_cli_accepts_only_explicit_retained_runtime_handoff():
     module = _module()
 
-    parsed = module.parse_args(["--retain", "--print-runtime-json"])
+    parsed = module.parse_args(
+        [
+            "--retain",
+            "--print-runtime-json",
+            "--expected-head",
+            HEAD,
+            "--allow-unrelated-dirty-path",
+            "notes/release-observation.md",
+        ]
+    )
 
     assert parsed.retain is True
     assert parsed.print_runtime_json is True
-    for invalid in ([], ["--retain"], ["--print-runtime-json"], ["--retain", "--print-runtime-json", "extra"]):
+    assert parsed.expected_head == HEAD
+    assert parsed.allow_unrelated_dirty_path == ["notes/release-observation.md"]
+    for invalid in (
+        [],
+        ["--retain"],
+        ["--print-runtime-json"],
+        ["--retain", "--print-runtime-json"],
+        ["--retain", "--print-runtime-json", "--expected-head", "HEAD"],
+        [
+            "--retain",
+            "--print-runtime-json",
+            "--expected-head",
+            HEAD,
+            "--allow-unrelated-dirty-path",
+            "app/backend/main.py",
+        ],
+        ["--retain", "--print-runtime-json", "--expected-head", HEAD, "extra"],
+    ):
         with pytest.raises(SystemExit):
             module.parse_args(invalid)
 
@@ -67,7 +96,7 @@ def test_main_wires_default_adapters_without_starting_live_uat():
         return object()
 
     result = module.main(
-        ["--retain", "--print-runtime-json"],
+        ["--retain", "--print-runtime-json", "--expected-head", HEAD],
         execute=execute,
         dotenv_reader=lambda _repository: {"DEEPSEEK_API_KEY": "fake"},
         environ={"PATH": "/synthetic/bin"},
@@ -80,6 +109,8 @@ def test_main_wires_default_adapters_without_starting_live_uat():
     assert result == 0
     assert len(calls) == 1
     assert calls[0]["repository"] == module.PROJECT_ROOT
+    assert calls[0]["expected_head"] == HEAD
+    assert calls[0]["allowed_unrelated_dirty_paths"] == ()
     assert calls[0]["dotenv_values"] == {"DEEPSEEK_API_KEY": "fake"}
     assert calls[0]["environ"] == {"PATH": "/synthetic/bin"}
     assert calls[0]["input_stream"] is stdin
@@ -88,6 +119,104 @@ def test_main_wires_default_adapters_without_starting_live_uat():
     assert calls[0]["server_starter"] is module.start_live_server
     assert calls[0]["readiness_probe"] is module.probe_live_readiness
     assert calls[0]["server_finisher"] is module.finish_live_server
+
+
+def test_reviewed_checkout_rejects_dirty_runtime_before_launch_and_preserves_explicit_unrelated_path(
+    tmp_path,
+):
+    module = _module()
+    unrelated = {
+        "relative_path": "notes/release-observation.md",
+        "file": {"kind": "regular", "sha256": "1" * 64},
+        "directory": None,
+    }
+    snapshot = {
+        "git_head": HEAD,
+        "dirty_paths": [unrelated],
+    }
+
+    module.validate_reviewed_checkout(
+        snapshot,
+        expected_head=HEAD,
+        allowed_unrelated_dirty_paths=("notes/release-observation.md",),
+    )
+
+    dirty_backend = {
+        **snapshot,
+        "dirty_paths": [
+            {
+                "relative_path": "app/backend/main.py",
+                "file": {"kind": "regular", "sha256": "2" * 64},
+                "directory": None,
+            }
+        ],
+    }
+    for unsafe_snapshot, expected, allowed in (
+        (snapshot, "b" * 40, ("notes/release-observation.md",)),
+        (snapshot, HEAD, ()),
+        (dirty_backend, HEAD, ("app/backend/main.py",)),
+    ):
+        with pytest.raises(module.HarnessSafetyError, match="reviewed checkout"):
+            module.validate_reviewed_checkout(
+                unsafe_snapshot,
+                expected_head=expected,
+                allowed_unrelated_dirty_paths=allowed,
+            )
+
+    launches = []
+
+    def capture_resources(_repository):
+        return {
+            "database": {},
+            "dirty_paths": dirty_backend["dirty_paths"],
+            "git_head": HEAD,
+            "git_porcelain": {},
+            "log": {},
+            "media": {},
+            "tts": {},
+        }
+
+    with pytest.raises(module.HarnessSafetyError, match="reviewed checkout"):
+        module.execute_retained_uat(
+            repository=_repository(tmp_path),
+            expected_head=HEAD,
+            allowed_unrelated_dirty_paths=(),
+            environ={},
+            dotenv_values={},
+            input_stream=io.StringIO(),
+            output_stream=io.StringIO(),
+            python_executable=PYTHON,
+            business_today=lambda: date(2026, 9, 4),
+            capture_resources=capture_resources,
+            seed_runner=lambda *_args, **_kwargs: launches.append("seed"),
+            server_starter=lambda *_args, **_kwargs: launches.append("server"),
+            readiness_probe=lambda _session: (),
+            server_finisher=lambda _session: (),
+        )
+    assert launches == []
+    assert not (tmp_path / "repository" / "artifacts").exists()
+
+
+def test_reviewed_checkout_preserves_both_rename_paths_and_rejects_runtime_endpoint():
+    module = _module()
+
+    paths = module._dirty_path_names(
+        b"R  notes/release-observation.md\0app/backend/main.py\0"
+    )
+
+    assert paths == ("app/backend/main.py", "notes/release-observation.md")
+    with pytest.raises(module.HarnessSafetyError, match="runtime or UAT dirt"):
+        module.validate_reviewed_checkout(
+            {
+                "git_head": HEAD,
+                "dirty_paths": [
+                    {"relative_path": path, "file": {}, "directory": None}
+                    for path in paths
+                ],
+            },
+            expected_head=HEAD,
+            allowed_unrelated_dirty_paths=("notes/release-observation.md",),
+        )
 
 
 def test_run_plan_creation_is_exclusive_unique_and_retained(tmp_path):
@@ -256,6 +385,7 @@ def test_default_seed_runner_is_shell_free_owned_offline_and_bounded(tmp_path):
         environment=environment,
         popen=popen,
         getpgid=lambda pid: pid,
+        getsid=lambda pid: pid,
     )
 
     assert result == payload
@@ -272,12 +402,17 @@ def test_telemetry_collector_reads_one_bounded_pipe_and_rejects_truncation():
     module = _module()
     safe = {
         "audio_bytes": 0,
+        "cache_relative_path": None,
+        "cache_sha256": None,
+        "correlation_id": "conversation:301",
         "error_class": None,
         "latency_bucket": "1-5s",
         "model": "deepseek-chat",
         "operation": "chat_reply",
+        "parse_valid": True,
         "provider": "deepseek",
         "response_bytes": 127,
+        "response_sha256": "d" * 64,
         "status": "ok",
         "voice": None,
     }
@@ -545,12 +680,17 @@ def test_telemetry_accepts_only_bounded_safe_provider_metadata():
     module = _module()
     safe = {
         "audio_bytes": 0,
+        "cache_relative_path": None,
+        "cache_sha256": None,
+        "correlation_id": "conversation:301",
         "error_class": None,
         "latency_bucket": "1-5s",
         "model": "deepseek-chat",
         "operation": "chat_reply",
+        "parse_valid": True,
         "provider": "deepseek",
         "response_bytes": 127,
+        "response_sha256": "d" * 64,
         "status": "ok",
         "voice": None,
     }
@@ -680,27 +820,44 @@ def test_live_server_ai_telemetry_is_bounded_metadata_without_exception_text():
     events = []
     ticks = iter((0.0, 2.0, 3.0, 9.0))
 
+    raw_calls = iter(
+        (
+            '{"end_reason":null,"ended":false,"reply":"safe synthetic response"}',
+            RuntimeError(secret),
+        )
+    )
+
+    def llm(*_args, **_kwargs):
+        result = next(raw_calls)
+        if isinstance(result, BaseException):
+            raise result
+        return result
+
     def chat_reply(**_kwargs):
-        return {"reply": "safe synthetic response", "ended": False}
+        return ai_engine._parse_json(ai_engine._llm([], json_mode=True))
 
     def extract_info(_transcript):
-        raise RuntimeError(secret)
+        return ai_engine._parse_json(ai_engine._llm([], json_mode=True))
 
     ai_engine = types.SimpleNamespace(
         MODEL="deepseek-safe-model",
+        _llm=llm,
+        _parse_json=json.loads,
         chat_reply=chat_reply,
         extract_info=extract_info,
         assess_conversation=lambda *_args: {"scores": []},
     )
-    server.instrument_ai_engine(
+    context = server.instrument_ai_engine(
         ai_engine,
         emit=events.append,
         monotonic=lambda: next(ticks),
     )
 
+    context.set_next_correlation("conversation:301")
     assert ai_engine.chat_reply(child={})["reply"] == "safe synthetic response"
-    with pytest.raises(RuntimeError, match="never-retain"):
-        ai_engine.extract_info("synthetic")
+    with context.correlate("analysis-job:501"):
+        with pytest.raises(RuntimeError, match="never-retain"):
+            ai_engine.extract_info("synthetic")
     assert [event["operation"] for event in events] == ["chat_reply", "extract_info"]
     for event in events:
         assert harness.parse_telemetry_line(
@@ -711,6 +868,186 @@ def test_live_server_ai_telemetry_is_bounded_metadata_without_exception_text():
     assert events[1]["status"] == "error"
     assert events[1]["error_class"] == "RuntimeError"
     assert secret not in json.dumps(events)
+
+
+def test_live_server_marks_malformed_raw_provider_json_as_error_before_local_fallback():
+    server = importlib.import_module("scripts.live_provider_uat_server")
+    events = []
+    ticks = iter((0.0, 0.2))
+    ai_engine = types.SimpleNamespace(MODEL="deepseek-safe-model")
+    ai_engine._parse_json = json.loads
+    ai_engine._llm = lambda *_args, **_kwargs: "not-json"
+
+    def chat_reply(**_kwargs):
+        raw = ai_engine._llm([], json_mode=True)
+        try:
+            return ai_engine._parse_json(raw)
+        except ValueError:
+            return {"reply": "local fallback", "ended": False, "end_reason": None}
+
+    ai_engine.chat_reply = chat_reply
+    ai_engine.extract_info = lambda _transcript: {}
+    ai_engine.assess_conversation = lambda *_args: {}
+
+    context = server.instrument_ai_engine(
+        ai_engine,
+        emit=events.append,
+        monotonic=lambda: next(ticks),
+    )
+    context.set_next_correlation("conversation:301")
+
+    assert ai_engine.chat_reply()["reply"] == "local fallback"
+    assert len(events) == 1
+    assert events[0]["operation"] == "chat_reply"
+    assert events[0]["correlation_id"] == "conversation:301"
+    assert events[0]["parse_valid"] is False
+    assert events[0]["status"] == "error"
+    assert events[0]["error_class"] == "ProviderPayloadInvalid"
+    assert "not-json" not in json.dumps(events)
+
+
+def test_provider_completion_requires_exact_model_voice_correlation_and_run_owned_audio(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.tts_cache.mkdir(mode=0o700)
+    audio = b"ID3 synthetic exact audio"
+    cache_relative = "tts-cache/0123456789abcdef0123456789abcdef.mp3"
+    (plan.root / cache_relative).write_bytes(audio)
+    audio_sha = hashlib.sha256(audio).hexdigest()
+    entity_ids = {
+        "analysis_job_id": 501,
+        "chat_request_ids": ["one", "two", "three"],
+        "live_conversation_id": 301,
+        "tts_evidence": {
+            "audio_sha256": audio_sha,
+            "cache_relative_path": cache_relative,
+            "source_message_id": 406,
+            "text_sha256": "f" * 64,
+        },
+    }
+
+    def ai_event(operation, correlation):
+        return {
+            "audio_bytes": 0,
+            "cache_relative_path": None,
+            "cache_sha256": None,
+            "correlation_id": correlation,
+            "error_class": None,
+            "latency_bucket": "1-5s",
+            "model": "deepseek-safe-model",
+            "operation": operation,
+            "parse_valid": True,
+            "provider": "deepseek",
+            "response_bytes": 127,
+            "response_sha256": "e" * 64,
+            "status": "ok",
+            "voice": None,
+        }
+
+    events = (
+        ai_event("chat_reply", "conversation:301"),
+        ai_event("chat_reply", "conversation:301"),
+        ai_event("chat_reply", "conversation:301"),
+        ai_event("extract_info", "analysis-job:501"),
+        ai_event("assess_conversation", "analysis-job:501"),
+        {
+            "audio_bytes": len(audio),
+            "cache_relative_path": cache_relative,
+            "cache_sha256": audio_sha,
+            "correlation_id": "message-text:" + "f" * 64,
+            "error_class": None,
+            "latency_bucket": "1-5s",
+            "model": None,
+            "operation": "tts",
+            "parse_valid": None,
+            "provider": "edge-tts",
+            "response_bytes": 0,
+            "response_sha256": None,
+            "status": "ok",
+            "voice": "zh-CN-XiaoxiaoNeural",
+        },
+    )
+
+    summary = module._validate_provider_completion(
+        events,
+        plan=plan,
+        provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
+        entity_ids=entity_ids,
+    )
+    assert len(summary["events"]) == 6
+
+    mutations = (
+        (*events[:3], {**events[3], "model": "wrong-model"}, *events[4:]),
+        (*events[:-1], {**events[-1], "voice": "zh-CN-YunxiNeural"}),
+        ({**events[0], "correlation_id": "conversation:999"}, *events[1:]),
+        (*events[:-1], {**events[-1], "cache_sha256": "0" * 64}),
+    )
+    for mutation in mutations:
+        with pytest.raises(module.HarnessSafetyError, match="provider telemetry"):
+            module._validate_provider_completion(
+                tuple(mutation),
+                plan=plan,
+                provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
+                entity_ids=entity_ids,
+            )
+    (plan.root / cache_relative).unlink()
+    with pytest.raises(module.HarnessSafetyError, match="provider telemetry"):
+        module._validate_provider_completion(
+            events,
+            plan=plan,
+            provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
+            entity_ids=entity_ids,
+        )
+
+
+def test_edge_tts_telemetry_hashes_exact_audio_and_run_cache_name():
+    server = importlib.import_module("scripts.live_provider_uat_server")
+    events = []
+    audio_chunks = (b"audio-one", b"audio-two")
+
+    class Communicate:
+        def __init__(self, text, voice, **_kwargs):
+            self.text = text
+            self.voice = voice
+
+        async def stream(self):
+            for chunk in audio_chunks:
+                yield {"type": "audio", "data": chunk}
+
+    edge = types.SimpleNamespace(Communicate=Communicate)
+    server.instrument_edge_tts(edge, emit=events.append, monotonic=iter((0.0, 0.5)).__next__)
+
+    async def consume():
+        return [chunk async for chunk in edge.Communicate("池塘日记", "zh-CN-XiaoxiaoNeural").stream()]
+
+    assert asyncio.run(consume()) == [
+        {"type": "audio", "data": audio_chunks[0]},
+        {"type": "audio", "data": audio_chunks[1]},
+    ]
+    combined = b"".join(audio_chunks)
+    text_sha = hashlib.sha256("池塘日记".encode("utf-8")).hexdigest()
+    assert events == [
+        {
+            "audio_bytes": len(combined),
+            "cache_relative_path": "tts-cache/"
+            + hashlib.md5("池塘日记".encode("utf-8")).hexdigest()
+            + ".mp3",
+            "cache_sha256": hashlib.sha256(combined).hexdigest(),
+            "correlation_id": f"message-text:{text_sha}",
+            "error_class": None,
+            "latency_bucket": "<1s",
+            "model": None,
+            "operation": "tts",
+            "parse_valid": None,
+            "provider": "edge-tts",
+            "response_bytes": 0,
+            "response_sha256": None,
+            "status": "ok",
+            "voice": "zh-CN-XiaoxiaoNeural",
+        }
+    ]
 
 
 class _FakeBoundSocket:
@@ -780,6 +1117,7 @@ def test_server_launch_uses_parent_prebound_random_socket_and_direct_group(tmp_p
         python_executable=PYTHON,
         popen=popen,
         getpgid=lambda pid: pid,
+        getsid=lambda pid: pid,
     )
 
     assert created.port == 43123
@@ -875,17 +1213,63 @@ def test_live_server_session_closes_parent_fds_and_finishes_once(tmp_path):
     assert session.output.closed is True
 
 
+def test_finish_live_server_still_cleans_owned_group_when_leader_already_exited(tmp_path):
+    module = _module()
+    process = _FakeProcess()
+    process.returncode = 7
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
+    output = (tmp_path / "server.log").open("w+b")
+    telemetry = types.SimpleNamespace(finish=lambda: ())
+    session = module.LiveServerSession(
+        port=43123,
+        owned=owned,
+        telemetry=telemetry,
+        output=output,
+    )
+    cleaned = []
+
+    with pytest.raises(module.HarnessSafetyError, match="exited unexpectedly"):
+        module.finish_live_server(
+            session,
+            stopper=lambda candidate: cleaned.append(candidate.pgid),
+        )
+
+    assert cleaned == [process.pid]
+    assert session.finished is True
+    assert output.closed is True
+
+
 def test_owned_process_group_stops_term_then_bounded_kill_without_foreign_signal():
     module = _module()
     timeout = subprocess.TimeoutExpired(cmd="fake", timeout=8)
     process = _FakeProcess(waits=(timeout, -signal.SIGKILL))
-    owned = module.OwnedProcess(process=process, pid=process.pid, pgid=process.pid)
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
     signals = []
+    group = [(process.pid, process.pid)]
+
+    def killpg(pgid, signum):
+        signals.append((pgid, signum))
+        if signum == signal.SIGKILL:
+            group.clear()
 
     module.stop_owned_process_group(
         owned,
         getpgid=lambda pid: pid,
-        killpg=lambda pgid, signum: signals.append((pgid, signum)),
+        getsid=lambda pid: pid,
+        group_members=lambda _pgid: tuple(group),
+        killpg=killpg,
+        monotonic=iter((0.0, 3.0, 4.0)).__next__,
+        sleep=lambda _seconds: None,
     )
 
     assert signals == [
@@ -895,28 +1279,118 @@ def test_owned_process_group_stops_term_then_bounded_kill_without_foreign_signal
     assert process.wait_timeouts == [8, 5]
 
     foreign = _FakeProcess(pid=54321)
-    foreign_owned = module.OwnedProcess(process=foreign, pid=foreign.pid, pgid=foreign.pid)
+    foreign_owned = module.OwnedProcess(
+        process=foreign,
+        pid=foreign.pid,
+        pgid=foreign.pid,
+        sid=foreign.pid,
+    )
     signals.clear()
     with pytest.raises(module.HarnessSafetyError, match="process-group ownership"):
         module.stop_owned_process_group(
             foreign_owned,
             getpgid=lambda _pid: 99999,
+            getsid=lambda pid: pid,
+            group_members=lambda _pgid: ((foreign.pid, 99999),),
             killpg=lambda pgid, signum: signals.append((pgid, signum)),
         )
     assert signals == []
+
     assert foreign.poll() is None
+
+    undiscovered = _FakeProcess(pid=54322)
+    with pytest.raises(module.HarnessSafetyError, match="process-group ownership"):
+        module.stop_owned_process_group(
+            module.OwnedProcess(
+                process=undiscovered,
+                pid=undiscovered.pid,
+                pgid=undiscovered.pid,
+                sid=undiscovered.pid,
+            ),
+            getpgid=lambda pid: pid,
+            getsid=lambda pid: pid,
+            group_members=lambda _pgid: (),
+            killpg=lambda pgid, signum: signals.append((pgid, signum)),
+        )
+    assert signals == []
+
+
+def test_owned_process_group_kills_surviving_descendant_after_leader_exit_without_reused_group():
+    module = _module()
+    leader = _FakeProcess(pid=43210)
+    leader.returncode = 0
+    owned = module.OwnedProcess(
+        process=leader,
+        pid=leader.pid,
+        pgid=leader.pid,
+        sid=leader.pid,
+    )
+    group = [(43211, 43210)]
+    signals = []
+
+    def killpg(pgid, signum):
+        signals.append((pgid, signum))
+        group.clear()
+
+    module.stop_owned_process_group(
+        owned,
+        getpgid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
+        getsid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
+        group_members=lambda _pgid: tuple(group),
+        killpg=killpg,
+        monotonic=iter((0.0, 0.1)).__next__,
+        sleep=lambda _seconds: None,
+    )
+
+    assert signals == [(43210, signal.SIGTERM)]
+
+    group[:] = [(99999, 99999)]
+    signals.clear()
+    with pytest.raises(module.HarnessSafetyError, match="process-group ownership"):
+        module.stop_owned_process_group(
+            owned,
+            getpgid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
+            getsid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
+            group_members=lambda _pgid: tuple(group),
+            killpg=lambda pgid, signum: signals.append((pgid, signum)),
+        )
+    assert signals == []
+
+    group[:] = [(leader.pid, leader.pid)]
+    with pytest.raises(module.HarnessSafetyError, match="process-group ownership"):
+        module.stop_owned_process_group(
+            owned,
+            getpgid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
+            getsid=lambda _pid: (_ for _ in ()).throw(ProcessLookupError()),
+            group_members=lambda _pgid: tuple(group),
+            killpg=lambda pgid, signum: signals.append((pgid, signum)),
+        )
+    assert signals == []
 
 
 def test_server_startup_exit_is_detected_without_group_discovery():
     module = _module()
     process = _FakeProcess()
     process.returncode = 7
-    owned = module.OwnedProcess(process=process, pid=process.pid, pgid=process.pid)
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
 
     with pytest.raises(module.HarnessSafetyError, match="exited before readiness"):
-        module.require_owned_process_alive(owned, getpgid=lambda pid: pid)
+        module.require_owned_process_alive(
+            owned,
+            getpgid=lambda pid: pid,
+            getsid=lambda pid: pid,
+        )
     with pytest.raises(module.HarnessSafetyError, match="process-group ownership"):
-        module.require_owned_process_alive(owned, getpgid=lambda _pid: 99999)
+        module.require_owned_process_alive(
+            owned,
+            getpgid=lambda _pid: 99999,
+            getsid=lambda pid: pid,
+        )
 
 
 def test_atomic_json_is_canonical_mode_0600_and_replace_failure_stays_incomplete(tmp_path):
@@ -944,6 +1418,102 @@ def test_atomic_json_is_canonical_mode_0600_and_replace_failure_stays_incomplete
     assert not any(path.name == "incomplete.json" and path.is_file() for path in tmp_path.iterdir())
 
 
+def test_pinned_run_root_rejects_ancestor_inode_swap_and_hardlink_target(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+
+    plan.root.chmod(0o500)
+    with pytest.raises(module.HarnessSafetyError, match="run root identity"):
+        module.assert_run_plan_identity(plan)
+    plan.root.chmod(0o700)
+
+    original_root = plan.root.with_name(plan.root.name + "-detached")
+    plan.root.rename(original_root)
+    plan.root.mkdir(mode=0o700)
+
+    with pytest.raises(module.HarnessSafetyError, match="run root identity"):
+        module.atomic_write_json(
+            plan.root / "evidence.json",
+            {"safe": True},
+            pinned_plan=plan,
+        )
+    assert not (plan.root / "evidence.json").exists()
+    assert not (original_root / "evidence.json").exists()
+
+    plan.root.rmdir()
+    original_root.rename(plan.root)
+    first = plan.root / "first.json"
+    first.write_bytes(b"{}\n")
+    hardlink = plan.root / "hardlink.json"
+    os.link(first, hardlink)
+    with pytest.raises(module.HarnessSafetyError, match="unsafe"):
+        module.atomic_write_json(hardlink, {"safe": True}, pinned_plan=plan)
+
+
+def test_pinned_run_file_read_rejects_nested_ancestor_swap(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.screenshots.mkdir(mode=0o700)
+    evidence = plan.screenshots / "evidence.bin"
+    evidence.write_bytes(b"reviewed evidence")
+    detached = plan.root / "screenshots-detached"
+
+    def swap_ancestor():
+        plan.screenshots.rename(detached)
+        plan.screenshots.mkdir(mode=0o700)
+        (plan.screenshots / evidence.name).write_bytes(b"replacement evidence")
+
+    with pytest.raises(module.HarnessSafetyError, match="ancestor identity"):
+        module._read_pinned_run_file(
+            plan,
+            evidence,
+            max_bytes=1024,
+            before_read=swap_ancestor,
+        )
+
+
+def test_live_server_retains_runtime_root_and_resource_inode_identity(tmp_path):
+    server = importlib.import_module("scripts.live_provider_uat_server")
+    run_root = (tmp_path / "retained-run").resolve()
+    run_root.mkdir(mode=0o700)
+    database = run_root / "duck-diary-uat.db"
+    database.write_bytes(b"sqlite-placeholder")
+    (run_root / "media").mkdir(mode=0o700)
+    (run_root / "tts-cache").mkdir(mode=0o700)
+    (run_root / "logs").mkdir(mode=0o700)
+    (run_root / "logs/app.log").write_bytes(b"")
+    environment = {
+        "APP_BUSINESS_TIMEZONE": "Asia/Shanghai",
+        "APP_DB_MODE": "app",
+        "APP_DB_PATH": str(database),
+        "APP_LOG_PATH": str(run_root / "logs/app.log"),
+        "APP_MEDIA_ROOT": str(run_root / "media"),
+        "APP_TTS_CACHE_PATH": str(run_root / "tts-cache"),
+        "DEEPSEEK_API_KEY": "sk-server-secret-1234567890",
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.example/v1",
+        "DEEPSEEK_MAX_TOKENS": "8192",
+        "DEEPSEEK_MODEL": "deepseek-safe-model",
+        "DEEPSEEK_TIMEOUT": "120",
+        "PATH": "/synthetic/bin",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHON_DOTENV_DISABLED": "1",
+        "TZ": "Asia/Shanghai",
+    }
+    paths = server.validate_child_environment(environment)
+    server.assert_runtime_paths_pinned(paths)
+
+    detached = run_root.with_name("retained-run-detached")
+    run_root.rename(detached)
+    run_root.mkdir(mode=0o700)
+    (run_root / "duck-diary-uat.db").write_bytes(b"replacement")
+    (run_root / "media").mkdir(mode=0o700)
+    (run_root / "tts-cache").mkdir(mode=0o700)
+    (run_root / "logs").mkdir(mode=0o700)
+    (run_root / "logs/app.log").write_bytes(b"")
+    with pytest.raises(server.ServerSafetyError, match="identity"):
+        server.assert_runtime_paths_pinned(paths)
+
+
 def test_failed_finalization_retains_run_and_never_claims_complete(tmp_path):
     module = _module()
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
@@ -963,6 +1533,30 @@ def test_failed_finalization_retains_run_and_never_claims_complete(tmp_path):
     }
     with pytest.raises(module.HarnessSafetyError, match="reason code"):
         module.finalize_failed_run(plan, reason_code="secret provider error text")
+
+
+def test_complete_manifest_rejects_blocker_issue_even_after_controller_validation(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    controller = {
+        "human_uat_required": [{}],
+        "issues": [
+            {
+                "safe_summary": "release blocker",
+                "severity": "blocker",
+                "step_id": "review_edit_confirm",
+            }
+        ],
+        "screenshots": [],
+    }
+    with pytest.raises(module.HarnessSafetyError, match="blocker"):
+        module._complete_manifest(
+            plan,
+            seed_result={"media_sha256": "1" * 64, "record_sha256": "2" * 64},
+            controller=controller,
+            provider_summary={"events": []},
+            provenance={"status": "PROVEN"},
+        )
 
 
 class _GitState:
@@ -1090,13 +1684,33 @@ def _png(width: int, height: int) -> bytes:
     def chunk(kind: bytes, payload: bytes) -> bytes:
         return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
 
-    scanlines = b"".join(b"\x00" + b"\x6f\xb4\xdd" * width for _ in range(height))
+    rows = []
+    for y in range(height):
+        row = bytearray(b"\x6f\xb4\xdd" * width)
+        if y < 8:
+            for x in range(min(width, 8)):
+                row[x * 3 : x * 3 + 3] = bytes((20 + x, 40 + y, 90))
+        rows.append(b"\x00" + bytes(row))
+    scanlines = b"".join(rows)
     return (
         b"\x89PNG\r\n\x1a\n"
         + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
         + chunk(b"IDAT", zlib.compress(scanlines, level=9))
         + chunk(b"IEND", b"")
     )
+
+
+def _png_with_ztxt(width: int, height: int, value: str) -> bytes:
+    payload = _png(width, height)
+    compressed = zlib.compress(value.encode("utf-8"), level=9)
+    data = b"Comment\x00\x00" + compressed
+    chunk = (
+        struct.pack(">I", len(data))
+        + b"zTXt"
+        + data
+        + struct.pack(">I", zlib.crc32(b"zTXt" + data) & 0xFFFFFFFF)
+    )
+    return payload[:-12] + chunk + payload[-12:]
 
 
 def _controller_payload(module, plan):
@@ -1109,16 +1723,26 @@ def _controller_payload(module, plan):
         }
         for step_id in module.REQUIRED_JOURNEY_STEPS
     ]
+    screenshot_specs = (
+        ("teacher-management", "teacher", "child_duck_avatar_management", "1024x768"),
+        ("teacher-review-confirmed", "teacher", "review_edit_confirm", "1440x900"),
+        ("teacher-weekly-growth", "teacher", "weekly_metrics_growth", "1024x768"),
+        ("teacher-search-deep-link", "teacher", "advanced_search_pagination_deep_link", "1440x900"),
+        ("child-avatar-selected", "child", "child_duck_avatar_management", "1024x576"),
+        ("child-conversation-complete", "child", "child_conversation_real_provider_tts", "1280x720"),
+    )
     screenshots = []
-    for viewport in ("1024x768", "1440x900", "1024x576", "1280x720"):
-        semantic = f"state-{viewport}"
+    for state_id, surface, journey_step, viewport in screenshot_specs:
+        semantic = state_id
         width, height = (int(part) for part in viewport.split("x"))
         (plan.screenshots / f"{semantic}.png").write_bytes(_png(width, height))
         screenshots.append(
             {
-                "journey_step": module.REQUIRED_JOURNEY_STEPS[0],
+                "journey_step": journey_step,
                 "relative_path": f"screenshots/{semantic}.png",
                 "semantic_name": semantic,
+                "state_id": state_id,
+                "surface": surface,
                 "viewport": viewport,
                 "visible_assertions": ["approved visible state"],
             }
@@ -1192,20 +1816,80 @@ def test_controller_evidence_rejects_traversal_wrong_dimensions_and_changed_file
         module.validate_controller_evidence(plan, after_decode=mutate_after_decode)
 
 
-def _create_provenance_database(plan):
+def test_controller_evidence_requires_exact_human_gate_and_screenshot_state_mapping(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.screenshots.mkdir(mode=0o700)
+    original = _controller_payload(module, plan)
+
+    mutations = []
+    zero_gate = json.loads(json.dumps(original))
+    zero_gate["human_uat_required"] = []
+    mutations.append(zero_gate)
+    wrong_surface = json.loads(json.dumps(original))
+    wrong_surface["screenshots"][0]["surface"] = "child"
+    mutations.append(wrong_surface)
+    duplicate_state = json.loads(json.dumps(original))
+    duplicate_state["screenshots"][1]["state_id"] = duplicate_state["screenshots"][0]["state_id"]
+    mutations.append(duplicate_state)
+    wrong_step = json.loads(json.dumps(original))
+    wrong_step["screenshots"][0]["journey_step"] = "review_edit_confirm"
+    mutations.append(wrong_step)
+
+    for mutation in mutations:
+        module.atomic_write_json(plan.controller_evidence, mutation, pinned_plan=plan)
+        with pytest.raises(module.HarnessSafetyError, match="controller evidence"):
+            module.validate_controller_evidence(plan)
+
+    blank = json.loads(json.dumps(original))
+    blank_path = plan.root / blank["screenshots"][0]["relative_path"]
+    from PIL import Image
+
+    Image.new("RGB", (1024, 768), (255, 255, 255)).save(blank_path, "PNG")
+    module.atomic_write_json(plan.controller_evidence, blank, pinned_plan=plan)
+    with pytest.raises(module.HarnessSafetyError, match="blank"):
+        module.validate_controller_evidence(plan)
+
+
+def test_compressed_png_metadata_secret_is_rejected_without_echo(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.screenshots.mkdir(mode=0o700)
+    payload = _controller_payload(module, plan)
+    secret = "sk-compressed-metadata-secret-123456"
+    screenshot = payload["screenshots"][0]
+    width, height = (int(part) for part in screenshot["viewport"].split("x"))
+    (plan.root / screenshot["relative_path"]).write_bytes(
+        _png_with_ztxt(width, height, secret)
+    )
+    module.atomic_write_json(plan.controller_evidence, payload, pinned_plan=plan)
+
+    with pytest.raises(module.HarnessSafetyError, match="metadata") as controller_error:
+        module.validate_controller_evidence(plan)
+    assert secret not in str(controller_error.value)
+    with pytest.raises(module.HarnessSafetyError, match="secret scan") as scan_error:
+        module.scan_retained_artifacts(
+            plan.root,
+            actual_secrets=(secret,),
+            pinned_plan=plan,
+        )
+    assert secret not in str(scan_error.value)
+
+
+def _create_seed_provenance_database(plan):
     from PIL import Image
 
     plan.media.mkdir(mode=0o700)
-    avatar_rows = (
-        ("11111111-1111-4111-8111-111111111111", "child.webp"),
-        ("22222222-2222-4222-8222-222222222222", "duck.webp"),
+    seed_avatar_id = "00000000-0000-4000-8000-000000000001"
+    seed_avatar_path = plan.media / f"{seed_avatar_id}.webp"
+    Image.new("RGB", (8, 8), (80, 80, 80)).save(
+        seed_avatar_path,
+        "WEBP",
+        lossless=True,
     )
-    avatar_metadata = []
-    for avatar_id, filename in avatar_rows:
-        path = plan.media / filename
-        Image.new("RGB", (16, 12), (25, 120, 210)).save(path, "WEBP", lossless=True)
-        content = path.read_bytes()
-        avatar_metadata.append((avatar_id, filename, 16, 12, len(content), __import__("hashlib").sha256(content).hexdigest()))
+    seed_avatar = seed_avatar_path.read_bytes()
     with sqlite3.connect(plan.database) as connection:
         connection.executescript(
             """
@@ -1213,13 +1897,139 @@ def _create_provenance_database(plan):
             CREATE TABLE ducks (id INTEGER PRIMARY KEY, name TEXT, avatar TEXT);
             CREATE TABLE avatar_media (id TEXT PRIMARY KEY, file_name TEXT, mime_type TEXT, width INTEGER, height INTEGER, size_bytes INTEGER, sha256 TEXT);
             CREATE TABLE duty_rosters (id INTEGER PRIMARY KEY, cycle TEXT, date TEXT, child_id INTEGER);
+            CREATE TABLE roster_requests (request_id TEXT PRIMARY KEY, operation TEXT, payload_hash TEXT, status TEXT, response_json TEXT, last_error_code TEXT, last_error_message TEXT);
             CREATE TABLE conversations (id INTEGER PRIMARY KEY, child_id INTEGER, date TEXT, ended_at TEXT, status TEXT, end_reason TEXT, frozen_last_message_id INTEGER);
             CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id INTEGER, role TEXT, text TEXT);
-            CREATE TABLE analysis_jobs (id INTEGER PRIMARY KEY, conversation_id INTEGER, frozen_last_message_id INTEGER, status TEXT);
-            CREATE TABLE assessments (id INTEGER PRIMARY KEY, conversation_id INTEGER, child_id INTEGER, status TEXT);
+            CREATE TABLE chat_requests (request_id TEXT PRIMARY KEY, child_id INTEGER, conversation_id INTEGER, base_last_message_id INTEGER, child_message_id INTEGER, diary_message_id INTEGER, payload_hash TEXT, status TEXT, attempt_count INTEGER, response_json TEXT);
+            CREATE TABLE analysis_jobs (id INTEGER PRIMARY KEY, conversation_id INTEGER, frozen_last_message_id INTEGER, status TEXT, attempt_count INTEGER);
+            CREATE TABLE feeding_logs (id INTEGER PRIMARY KEY, conversation_id INTEGER, child_id INTEGER, duck_id INTEGER, category TEXT, content TEXT);
+            CREATE TABLE emotion_logs (id INTEGER PRIMARY KEY, conversation_id INTEGER, child_id INTEGER, emotion TEXT, intensity INTEGER, note TEXT);
+            CREATE TABLE insight_notes (id INTEGER PRIMARY KEY, conversation_id INTEGER, child_id INTEGER, content TEXT);
+            CREATE TABLE assessment_dimensions (id INTEGER PRIMARY KEY, key TEXT, name TEXT, enabled INTEGER);
+            CREATE TABLE assessments (id INTEGER PRIMARY KEY, conversation_id INTEGER, child_id INTEGER, status TEXT, overall REAL);
             CREATE TABLE assessment_scores (id INTEGER PRIMARY KEY, assessment_id INTEGER, dimension_id INTEGER, score INTEGER, reason TEXT);
             """
         )
+        connection.execute(
+            "INSERT INTO avatar_media VALUES (?, ?, 'image/webp', 8, 8, ?, ?)",
+            (
+                seed_avatar_id,
+                seed_avatar_path.name,
+                len(seed_avatar),
+                hashlib.sha256(seed_avatar).hexdigest(),
+            ),
+        )
+        connection.executemany(
+            "INSERT INTO children VALUES (?, ?, ?)",
+            (
+                (10, "Seed Child", f"/api/media/avatars/{seed_avatar_id}"),
+                (11, "Seed Partner", None),
+            ),
+        )
+        connection.execute("INSERT INTO ducks VALUES (20, 'Seed Duck', NULL)")
+        connection.executemany(
+            "INSERT INTO assessment_dimensions VALUES (?, ?, ?, ?)",
+            (
+                (1, "communication", "Communication", 1),
+                (2, "observation", "Observation", 1),
+                (3, "responsibility", "Responsibility", 1),
+                (4, "disabled", "Disabled", 0),
+            ),
+        )
+        connection.execute(
+            "INSERT INTO conversations VALUES (30, 10, '2026-09-01', '2026-09-01T02:00:00.000000', 'ended', 'complete', 41)"
+        )
+        connection.executemany(
+            "INSERT INTO messages VALUES (?, 30, ?, ?)",
+            ((40, "child", "seed 池塘 child"), (41, "diary", "seed diary")),
+        )
+        connection.execute(
+            "INSERT INTO analysis_jobs VALUES (50, 30, 41, 'succeeded', 1)"
+        )
+        connection.execute(
+            "INSERT INTO assessments VALUES (60, 30, 10, 'confirmed', 3.0)"
+        )
+        connection.execute(
+            "INSERT INTO feeding_logs VALUES (80, 30, 10, 20, '观察', 'seed observation')"
+        )
+        connection.executemany(
+            "INSERT INTO assessment_scores VALUES (?, 60, ?, 3, 'seed reason')",
+            ((70, 1), (71, 2), (72, 3)),
+        )
+        connection.commit()
+
+
+def _search_cursor(search_request, *, conversation_id: int, snapshot_max_id: int) -> str:
+    fingerprint_source = {
+        "analysis_status": sorted(search_request["analysis_status"]),
+        "child_id": search_request["child_id"],
+        "date_from": search_request["date_from"],
+        "date_to": search_request["date_to"],
+        "end_reason": sorted(search_request["end_reason"]),
+        "keyword": search_request["keyword"],
+        "review_status": sorted(search_request["review_status"]),
+        "sort": search_request["sort"],
+    }
+    fingerprint = hashlib.sha256(
+        json.dumps(
+            fingerprint_source,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    raw = json.dumps(
+        {
+            "ended_at": "2026-09-03T02:00:00.000000Z",
+            "fingerprint": fingerprint,
+            "id": conversation_id,
+            "snapshot_max_id": snapshot_max_id,
+            "sort": search_request["sort"],
+            "version": 1,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _apply_live_provenance(plan):
+    from PIL import Image
+
+    avatar_rows = (
+        ("11111111-1111-4111-8111-111111111111", "11111111-1111-4111-8111-111111111111.webp"),
+        ("22222222-2222-4222-8222-222222222222", "22222222-2222-4222-8222-222222222222.webp"),
+    )
+    avatar_metadata = []
+    for avatar_id, filename in avatar_rows:
+        path = plan.media / filename
+        Image.new("RGB", (16, 12), (25, 120, 210)).save(path, "WEBP", lossless=True)
+        content = path.read_bytes()
+        avatar_metadata.append((avatar_id, filename, 16, 12, len(content), __import__("hashlib").sha256(content).hexdigest()))
+    conflict_request = "33333333-3333-4333-8333-333333333333"
+    retry_request = "44444444-4444-4444-8444-444444444444"
+    chat_requests = (
+        "55555555-5555-4555-8555-555555555551",
+        "55555555-5555-4555-8555-555555555552",
+        "55555555-5555-4555-8555-555555555553",
+    )
+    search_request = {
+        "analysis_status": ["succeeded"],
+        "child_id": None,
+        "date_from": "2026-08-31",
+        "date_to": "2026-09-06",
+        "end_reason": ["complete"],
+        "keyword": "池塘",
+        "review_status": ["confirmed"],
+        "sort": "completed_desc",
+    }
+    tts_text = "这是一份很完整的池塘日记。"
+    tts_audio = b"ID3 synthetic retained UAT audio"
+    plan.tts_cache.mkdir(mode=0o700, exist_ok=True)
+    tts_cache_name = f"{hashlib.md5(tts_text.encode('utf-8')).hexdigest()}.mp3"
+    (plan.tts_cache / tts_cache_name).write_bytes(tts_audio)
+    with sqlite3.connect(plan.database) as connection:
         connection.executemany(
             "INSERT INTO avatar_media VALUES (?, ?, 'image/webp', ?, ?, ?, ?)",
             avatar_metadata,
@@ -1228,7 +2038,6 @@ def _create_provenance_database(plan):
             "INSERT INTO children VALUES (?, ?, ?)",
             (
                 (101, "Live Child", "/api/media/avatars/11111111-1111-4111-8111-111111111111"),
-                (102, "Partner", None),
             ),
         )
         connection.execute(
@@ -1236,22 +2045,78 @@ def _create_provenance_database(plan):
             (201, "Live Duck", "/api/media/avatars/22222222-2222-4222-8222-222222222222"),
         )
         connection.executemany(
-            "INSERT INTO duty_rosters VALUES (?, '2026-09', '2026-09-03', ?)",
-            ((1, 101), (2, 102)),
+            "INSERT INTO duty_rosters VALUES (?, '2026-09', ?, ?)",
+            (
+                (101, "2026-09-03", 10),
+                (102, "2026-09-03", 101),
+                (103, "2026-09-04", 10),
+                (104, "2026-09-04", 101),
+            ),
+        )
+        roster_response = json.dumps(
+            {
+                "month": "2026-09",
+                "replayed": False,
+                "request_id": retry_request,
+                "schedule": [
+                    {"child_ids": [10, 101], "cycle": "2026-09", "date": "2026-09-03"},
+                    {"child_ids": [10, 101], "cycle": "2026-09", "date": "2026-09-04"},
+                ],
+            },
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        connection.execute(
+            "INSERT INTO roster_requests VALUES (?, 'monthly_roster', ?, 'succeeded', ?, NULL, NULL)",
+            (retry_request, "a" * 64, roster_response),
         )
         connection.executemany(
             "INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?)",
             (
-                (301, 101, "2026-09-03", "2026-09-03T02:00:00", "ended", "complete", 402),
-                (302, 102, "2026-09-02", "2026-09-02T02:00:00", "ended", "complete", 404),
+                (301, 101, "2026-09-03", "2026-09-03T02:00:00.000000", "ended", "complete", 406),
             ),
         )
         connection.executemany(
             "INSERT INTO messages VALUES (?, ?, ?, ?)",
-            ((401, 301, "child", "synthetic child"), (402, 301, "diary", "synthetic diary"), (403, 302, "child", "other"), (404, 302, "diary", "other")),
+            (
+                (401, 301, "child", "我今天在池塘边给小鸭喂食。"),
+                (402, 301, "diary", "你观察到小鸭有什么变化？"),
+                (403, 301, "child", "它游得更快，我还换了清水。"),
+                (404, 301, "diary", "你照顾得很认真，还有什么感受？"),
+                (405, 301, "child", "我很开心，也会明天继续照顾。"),
+                (406, 301, "diary", "这是一份很完整的池塘日记。"),
+            ),
         )
-        connection.execute("INSERT INTO analysis_jobs VALUES (501, 301, 402, 'succeeded')")
-        connection.execute("INSERT INTO assessments VALUES (601, 301, 101, 'confirmed')")
+        for index, request_id in enumerate(chat_requests):
+            child_message_id = 401 + index * 2
+            diary_message_id = child_message_id + 1
+            connection.execute(
+                "INSERT INTO chat_requests VALUES (?, 101, 301, ?, ?, ?, ?, 'succeeded', 1, ?)",
+                (
+                    request_id,
+                    None if index == 0 else child_message_id - 1,
+                    child_message_id,
+                    diary_message_id,
+                    chr(ord("b") + index) * 64,
+                    json.dumps(
+                        {
+                            "conversation_id": 301,
+                            "diary_message_id": diary_message_id,
+                            "reply": connection.execute(
+                                "SELECT text FROM messages WHERE id = ?", (diary_message_id,)
+                            ).fetchone()[0],
+                        },
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
+            )
+        connection.execute("INSERT INTO analysis_jobs VALUES (501, 301, 406, 'succeeded', 1)")
+        connection.execute("INSERT INTO feeding_logs VALUES (801, 301, 101, 201, '喂食', '在池塘边喂食')")
+        connection.execute("INSERT INTO emotion_logs VALUES (901, 301, 101, '开心', 5, '照顾小鸭很开心')")
+        connection.execute("INSERT INTO insight_notes VALUES (1001, 301, 101, '主动观察并持续照顾')")
+        connection.execute("INSERT INTO assessments VALUES (601, 301, 101, 'confirmed', 4.333333333333333)")
         connection.executemany(
             "INSERT INTO assessment_scores VALUES (?, 601, ?, ?, ?)",
             ((701, 1, 4, "safe"), (702, 2, 4, "safe"), (703, 3, 5, "safe")),
@@ -1265,24 +2130,70 @@ def _create_provenance_database(plan):
         "live_child_id": 101,
         "live_duck_id": 201,
         "live_conversation_id": 301,
-        "monthly_pairs": {"2026-09-03": [101, 102]},
+        "chat_request_ids": list(chat_requests),
+        "growth_after": {
+            "communication": [{"date": "2026-09-03", "score": 4}],
+            "observation": [{"date": "2026-09-03", "score": 4}],
+            "responsibility": [{"date": "2026-09-03", "score": 5}],
+        },
+        "growth_before": {
+            "communication": [],
+            "observation": [],
+            "responsibility": [],
+        },
+        "monthly_pairs": {"2026-09-03": [10, 101], "2026-09-04": [10, 101]},
+        "monthly_roster_attempts": [
+            {"http_status": 409, "outcome": "ROSTER_DATE_CONFLICT", "request_id": conflict_request},
+            {"http_status": 200, "outcome": "SUCCEEDED", "request_id": retry_request},
+        ],
+        "search_cursor": _search_cursor(search_request, conversation_id=301, snapshot_max_id=301),
+        "search_deep_link": "#review?conversation_id=301",
         "search_page_one_ids": [301],
-        "search_page_two_ids": [302],
+        "search_page_two_ids": [30],
+        "search_request": search_request,
         "search_result_conversation_id": 301,
+        "tts_evidence": {
+            "audio_sha256": hashlib.sha256(tts_audio).hexdigest(),
+            "cache_relative_path": f"tts-cache/{tts_cache_name}",
+            "source_message_id": 406,
+            "text_sha256": hashlib.sha256(tts_text.encode("utf-8")).hexdigest(),
+        },
         "weekly_week_start": "2026-08-31",
+        "weekly_metrics_after": {
+            "completed_conversations": 2,
+            "confirmed_reviews": 2,
+            "failed_analyses": 0,
+            "participating_children": 2,
+            "pending_reviews_total": 0,
+            "timezone": "Asia/Shanghai",
+            "week_end_exclusive": "2026-09-07",
+            "week_start": "2026-08-31",
+        },
+        "weekly_metrics_before": {
+            "completed_conversations": 1,
+            "confirmed_reviews": 1,
+            "failed_analyses": 0,
+            "participating_children": 1,
+            "pending_reviews_total": 0,
+            "timezone": "Asia/Shanghai",
+            "week_end_exclusive": "2026-09-07",
+            "week_start": "2026-08-31",
+        },
     }
 
 
 def test_retained_database_provenance_is_read_only_and_fails_one_broken_chain(tmp_path):
     module = _module()
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
-    entity_ids = _create_provenance_database(plan)
+    _create_seed_provenance_database(plan)
+    baseline = module.capture_post_seed_baseline(plan)
+    entity_ids = _apply_live_provenance(plan)
     before = {
         suffix: (Path(f"{plan.database}{suffix}").read_bytes() if Path(f"{plan.database}{suffix}").exists() else None)
         for suffix in ("", "-wal", "-shm")
     }
 
-    proof = module.validate_database_provenance(plan, entity_ids)
+    proof = module.validate_database_provenance(plan, entity_ids, baseline)
 
     after = {
         suffix: (Path(f"{plan.database}{suffix}").read_bytes() if Path(f"{plan.database}{suffix}").exists() else None)
@@ -1301,7 +2212,43 @@ def test_retained_database_provenance_is_read_only_and_fails_one_broken_chain(tm
         connection.execute("UPDATE assessments SET status='draft' WHERE id=601")
         connection.commit()
     with pytest.raises(module.HarnessSafetyError, match="database provenance"):
-        module.validate_database_provenance(plan, entity_ids)
+        module.validate_database_provenance(plan, entity_ids, baseline)
+
+
+def test_database_provenance_rejects_seed_entities_incomplete_projection_and_unfrozen_search(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    _create_seed_provenance_database(plan)
+    baseline = module.capture_post_seed_baseline(plan)
+    entity_ids = _apply_live_provenance(plan)
+
+    seeded_identity = {**entity_ids, "live_child_id": 10}
+    with pytest.raises(module.HarnessSafetyError, match="database provenance"):
+        module.validate_database_provenance(plan, seeded_identity, baseline)
+
+    with sqlite3.connect(plan.database) as connection:
+        connection.execute("DELETE FROM insight_notes WHERE conversation_id = 301")
+        connection.commit()
+    with pytest.raises(module.HarnessSafetyError, match="database provenance"):
+        module.validate_database_provenance(plan, entity_ids, baseline)
+
+    with sqlite3.connect(plan.database) as connection:
+        connection.execute(
+            "INSERT INTO insight_notes VALUES (1001, 301, 101, '主动观察并持续照顾')"
+        )
+        connection.commit()
+    bad_cursor = {**entity_ids, "search_cursor": entity_ids["search_cursor"][:-1] + "A"}
+    with pytest.raises(module.HarnessSafetyError, match="database provenance"):
+        module.validate_database_provenance(plan, bad_cursor, baseline)
+
+    with sqlite3.connect(plan.database) as connection:
+        connection.execute("DELETE FROM feeding_logs WHERE id = 80")
+        connection.execute("UPDATE feeding_logs SET id = 80 WHERE id = 801")
+        connection.commit()
+    with pytest.raises(module.HarnessSafetyError, match="database provenance"):
+        module.validate_database_provenance(plan, entity_ids, baseline)
 
 
 def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_failure(
@@ -1325,6 +2272,8 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
     captures = []
     process_events = []
     include_controller_evidence = True
+    live_entities = {}
+    live_plan = []
 
     def capture_resources(_repository):
         snapshot = {
@@ -1350,11 +2299,7 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
         plan.app_log.write_bytes(b"")
         plan.tts_cache.mkdir(mode=0o700)
         plan.screenshots.mkdir(mode=0o700)
-        entity_ids = _create_provenance_database(plan)
-        if include_controller_evidence:
-            controller = _controller_payload(module, plan)
-            controller["journey"][0]["entity_ids"] = entity_ids
-            module.atomic_write_json(plan.controller_evidence, controller)
+        _create_seed_provenance_database(plan)
         return {
             "archive_directory": None,
             "database_path": str(plan.database),
@@ -1374,6 +2319,18 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
         assert environment["APP_DB_PATH"] == str(plan.database)
         assert environment["DEEPSEEK_API_KEY"] == provider_secret
         assert "UNRELATED_TOKEN" not in environment
+        entity_ids = _apply_live_provenance(plan)
+        live_plan[:] = [plan]
+        live_entities.clear()
+        live_entities.update(entity_ids)
+        if include_controller_evidence:
+            controller = _controller_payload(module, plan)
+            controller["journey"][0]["entity_ids"] = entity_ids
+            module.atomic_write_json(
+                plan.controller_evidence,
+                controller,
+                pinned_plan=plan,
+            )
         plan.server_stderr.write_bytes(b"safe server log\n")
         process_events.append(("start", FakeSession.pid, FakeSession.pgid))
         return FakeSession()
@@ -1387,28 +2344,57 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
             {"configured": False, "authenticated": False},
         )
 
-    safe_events = tuple(
-        {
-            "audio_bytes": 4096 if operation == "tts" else 0,
-            "error_class": None,
-            "latency_bucket": "1-5s",
-            "model": None if operation == "tts" else "deepseek-safe-model",
-            "operation": operation,
-            "provider": "edge-tts" if operation == "tts" else "deepseek",
-            "response_bytes": 0 if operation == "tts" else 512,
-            "status": "ok",
-            "voice": "zh-CN-XiaoxiaoNeural" if operation == "tts" else None,
-        }
-        for operation in ("chat_reply", "extract_info", "assess_conversation", "tts")
-    )
+    def safe_events(plan):
+        def ai_event(operation, correlation):
+            return {
+                "audio_bytes": 0,
+                "cache_relative_path": None,
+                "cache_sha256": None,
+                "correlation_id": correlation,
+                "error_class": None,
+                "latency_bucket": "1-5s",
+                "model": "deepseek-safe-model",
+                "operation": operation,
+                "parse_valid": True,
+                "provider": "deepseek",
+                "response_bytes": 512,
+                "response_sha256": "e" * 64,
+                "status": "ok",
+                "voice": None,
+            }
+
+        tts = live_entities["tts_evidence"]
+        cache = plan.root / tts["cache_relative_path"]
+        return (
+            *(ai_event("chat_reply", "conversation:301") for _ in range(3)),
+            ai_event("extract_info", "analysis-job:501"),
+            ai_event("assess_conversation", "analysis-job:501"),
+            {
+                "audio_bytes": cache.stat().st_size,
+                "cache_relative_path": tts["cache_relative_path"],
+                "cache_sha256": tts["audio_sha256"],
+                "correlation_id": "message-text:" + tts["text_sha256"],
+                "error_class": None,
+                "latency_bucket": "1-5s",
+                "model": None,
+                "operation": "tts",
+                "parse_valid": None,
+                "provider": "edge-tts",
+                "response_bytes": 0,
+                "response_sha256": None,
+                "status": "ok",
+                "voice": "zh-CN-XiaoxiaoNeural",
+            },
+        )
 
     def server_finisher(session):
         process_events.append(("stop", session.pgid, signal.SIGTERM))
-        return safe_events
+        return safe_events(live_plan[0])
 
     stdout = io.StringIO()
     plan = module.execute_retained_uat(
         repository=repository,
+        expected_head=HEAD,
         environ=environment,
         dotenv_values={},
         input_stream=io.StringIO(
@@ -1466,6 +2452,7 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
     with pytest.raises(module.HarnessSafetyError, match="controller"):
         module.execute_retained_uat(
             repository=repository,
+            expected_head=HEAD,
             environ=environment,
             dotenv_values={},
             input_stream=io.StringIO(""),

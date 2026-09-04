@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import argparse
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 import functools
+import hashlib
 import importlib
 import json
 import logging
@@ -52,12 +54,17 @@ NEUTRAL_KEYS = {
 ALLOWED_ENVIRONMENT = APP_KEYS | DEEPSEEK_KEYS | NEUTRAL_KEYS
 TELEMETRY_KEYS = {
     "audio_bytes",
+    "cache_relative_path",
+    "cache_sha256",
+    "correlation_id",
     "error_class",
     "latency_bucket",
     "model",
     "operation",
+    "parse_valid",
     "provider",
     "response_bytes",
+    "response_sha256",
     "status",
     "voice",
 }
@@ -67,6 +74,10 @@ class ServerSafetyError(RuntimeError):
     """The child refuses to import or serve from an unsafe runtime."""
 
 
+class ProviderPayloadInvalid(ValueError):
+    """A provider returned bytes that are not a parse-valid JSON object."""
+
+
 @dataclass(frozen=True, slots=True)
 class RuntimePaths:
     root: Path
@@ -74,6 +85,7 @@ class RuntimePaths:
     media: Path
     tts_cache: Path
     app_log: Path
+    identities: tuple[tuple[str, int, int, int, int, int], ...]
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -102,6 +114,7 @@ def _regular_owned(path: Path) -> bool:
         and not stat.S_ISLNK(entry.st_mode)
         and entry.st_nlink == 1
         and entry.st_uid == os.geteuid()
+        and not entry.st_mode & 0o022
     )
 
 
@@ -116,6 +129,68 @@ def _directory_owned(path: Path) -> bool:
         and entry.st_uid == os.geteuid()
         and not entry.st_mode & 0o022
     )
+
+
+def _resource_identity(path: Path, *, directory: bool) -> tuple[str, int, int, int, int, int]:
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    descriptor = os.open(os.path.sep, directory_flags)
+    try:
+        for index, component in enumerate(absolute.parts[1:]):
+            is_leaf = index == len(absolute.parts[1:]) - 1
+            flags = os.O_RDONLY
+            if not is_leaf or directory:
+                flags |= getattr(os, "O_DIRECTORY", 0)
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            next_descriptor = os.open(component, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except OSError as exc:
+        os.close(descriptor)
+        raise ServerSafetyError("live server runtime identity is unavailable") from exc
+    try:
+        entry = os.fstat(descriptor)
+        kind_valid = stat.S_ISDIR(entry.st_mode) if directory else stat.S_ISREG(entry.st_mode)
+        if (
+            not kind_valid
+            or entry.st_uid != os.geteuid()
+            or entry.st_mode & 0o022
+            or (not directory and entry.st_nlink != 1)
+            or (directory and entry.st_nlink < 1)
+        ):
+            raise ServerSafetyError("live server runtime identity is unsafe")
+        return (
+            str(path),
+            entry.st_dev,
+            entry.st_ino,
+            stat.S_IMODE(entry.st_mode),
+            entry.st_nlink,
+            entry.st_uid,
+        )
+    finally:
+        os.close(descriptor)
+
+
+def assert_runtime_paths_pinned(paths: RuntimePaths) -> None:
+    expected_paths = (
+        (paths.root, True),
+        (paths.database, False),
+        (paths.media, True),
+        (paths.tts_cache, True),
+        (paths.app_log.parent, True),
+        (paths.app_log, False),
+    )
+    observed = tuple(
+        _resource_identity(path, directory=directory)
+        for path, directory in expected_paths
+    )
+    if observed != paths.identities:
+        raise ServerSafetyError("live server runtime identity changed")
 
 
 def validate_child_environment(
@@ -157,26 +232,42 @@ def validate_child_environment(
         raise ServerSafetyError("live server environment path is invalid")
     database = paths["APP_DB_PATH"]
     root = database.parent
+    media = paths["APP_MEDIA_ROOT"]
+    tts_cache = paths["APP_TTS_CACHE_PATH"]
+    app_log = paths["APP_LOG_PATH"]
+    if (
+        database.name != "duck-diary-uat.db"
+        or media != root / "media"
+        or tts_cache != root / "tts-cache"
+        or app_log != root / "logs/app.log"
+        or not _directory_owned(root)
+        or not _directory_owned(media)
+        or not _directory_owned(tts_cache)
+        or not _directory_owned(app_log.parent)
+        or not _regular_owned(database)
+        or not _regular_owned(app_log)
+    ):
+        raise ServerSafetyError("live server environment resources are invalid")
+    identities = tuple(
+        _resource_identity(path, directory=directory)
+        for path, directory in (
+            (root, True),
+            (database, False),
+            (media, True),
+            (tts_cache, True),
+            (app_log.parent, True),
+            (app_log, False),
+        )
+    )
     runtime = RuntimePaths(
         root=root,
         database=database,
-        media=paths["APP_MEDIA_ROOT"],
-        tts_cache=paths["APP_TTS_CACHE_PATH"],
-        app_log=paths["APP_LOG_PATH"],
+        media=media,
+        tts_cache=tts_cache,
+        app_log=app_log,
+        identities=identities,
     )
-    if (
-        database.name != "duck-diary-uat.db"
-        or runtime.media != root / "media"
-        or runtime.tts_cache != root / "tts-cache"
-        or runtime.app_log != root / "logs/app.log"
-        or not _directory_owned(root)
-        or not _directory_owned(runtime.media)
-        or not _directory_owned(runtime.tts_cache)
-        or not _directory_owned(runtime.app_log.parent)
-        or not _regular_owned(runtime.database)
-        or not _regular_owned(runtime.app_log)
-    ):
-        raise ServerSafetyError("live server environment resources are invalid")
+    assert_runtime_paths_pinned(runtime)
     return runtime
 
 
@@ -289,19 +380,80 @@ def _provider_event(
     elapsed: float,
     response_bytes: int,
     audio_bytes: int,
+    correlation_id: str,
+    parse_valid: bool | None,
+    response_sha256: str | None,
+    cache_relative_path: str | None = None,
+    cache_sha256: str | None = None,
     error: BaseException | None,
 ) -> dict[str, object]:
     return {
         "audio_bytes": audio_bytes,
+        "cache_relative_path": cache_relative_path,
+        "cache_sha256": cache_sha256,
+        "correlation_id": correlation_id,
         "error_class": None if error is None else _error_class(error),
         "latency_bucket": _latency_bucket(max(0.0, elapsed)),
         "model": model,
         "operation": operation,
+        "parse_valid": parse_valid,
         "provider": "edge-tts" if operation == "tts" else "deepseek",
         "response_bytes": response_bytes,
+        "response_sha256": response_sha256,
         "status": "ok" if error is None else "error",
         "voice": voice,
     }
+
+
+class ProviderTelemetryContext:
+    """Thread-local operation/correlation scope for raw provider calls."""
+
+    _CORRELATION = re.compile(r"(?:conversation|analysis-job):[1-9][0-9]*")
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+
+    def set_next_correlation(self, value: str) -> None:
+        if self._CORRELATION.fullmatch(value) is None:
+            raise ServerSafetyError("provider correlation is invalid")
+        self._local.next_correlation = value
+
+    def _take_next_correlation(self) -> str | None:
+        value = getattr(self._local, "next_correlation", None)
+        self._local.next_correlation = None
+        return value
+
+    @contextmanager
+    def correlate(self, value: str):
+        if self._CORRELATION.fullmatch(value) is None:
+            raise ServerSafetyError("provider correlation is invalid")
+        previous = getattr(self._local, "explicit_correlation", None)
+        self._local.explicit_correlation = value
+        try:
+            yield
+        finally:
+            self._local.explicit_correlation = previous
+
+    @contextmanager
+    def operation(self, operation: str):
+        previous_operation = getattr(self._local, "operation", None)
+        previous_correlation = getattr(self._local, "active_correlation", None)
+        correlation = getattr(self._local, "explicit_correlation", None)
+        if correlation is None:
+            correlation = self._take_next_correlation()
+        self._local.operation = operation
+        self._local.active_correlation = correlation
+        try:
+            yield
+        finally:
+            self._local.operation = previous_operation
+            self._local.active_correlation = previous_correlation
+
+    def active(self) -> tuple[str | None, str | None]:
+        return (
+            getattr(self._local, "operation", None),
+            getattr(self._local, "active_correlation", None),
+        )
 
 
 def instrument_ai_engine(
@@ -309,8 +461,8 @@ def instrument_ai_engine(
     *,
     emit: Callable[[Mapping[str, object]], None],
     monotonic: Callable[[], float] = time.monotonic,
-) -> None:
-    """Wrap only the three release-required DeepSeek operations."""
+) -> ProviderTelemetryContext:
+    """Measure the raw parse-valid boundary for required DeepSeek operations."""
 
     model = ai_engine.MODEL
     if not isinstance(model, str) or re.fullmatch(
@@ -318,37 +470,68 @@ def instrument_ai_engine(
     ) is None:
         raise ServerSafetyError("live provider model is invalid")
 
-    def wrap(operation: str, function):
-        @functools.wraps(function)
-        def measured(*args, **kwargs):
-            started = monotonic()
-            try:
-                result = function(*args, **kwargs)
-            except BaseException as error:
-                emit(
-                    _provider_event(
-                        operation=operation,
-                        model=model,
-                        voice=None,
-                        elapsed=monotonic() - started,
-                        response_bytes=0,
-                        audio_bytes=0,
-                        error=error,
-                    )
-                )
-                raise
+    original_llm = getattr(ai_engine, "_llm", None)
+    parser = getattr(ai_engine, "_parse_json", None)
+    if not callable(original_llm) or not callable(parser):
+        raise ServerSafetyError("live raw provider instrumentation target is missing")
+    context = ProviderTelemetryContext()
+
+    def measured_llm(*args, **kwargs):
+        operation, correlation = context.active()
+        if operation is None:
+            return original_llm(*args, **kwargs)
+        if correlation is None:
+            correlation = "conversation:0"
+        started = monotonic()
+        try:
+            raw = original_llm(*args, **kwargs)
+        except BaseException as error:
             emit(
                 _provider_event(
                     operation=operation,
                     model=model,
                     voice=None,
                     elapsed=monotonic() - started,
-                    response_bytes=_response_bytes(result),
+                    response_bytes=0,
                     audio_bytes=0,
-                    error=None,
+                    correlation_id=correlation,
+                    parse_valid=False,
+                    response_sha256=None,
+                    error=error,
                 )
             )
-            return result
+            raise
+        encoded = raw.encode("utf-8") if isinstance(raw, str) else b""
+        parse_error: BaseException | None = None
+        try:
+            parsed = parser(raw)
+            if not isinstance(parsed, dict) or not encoded:
+                raise ProviderPayloadInvalid()
+        except BaseException:
+            parse_error = ProviderPayloadInvalid()
+        emit(
+            _provider_event(
+                operation=operation,
+                model=model,
+                voice=None,
+                elapsed=monotonic() - started,
+                response_bytes=min(len(encoded), 100_000_000),
+                audio_bytes=0,
+                correlation_id=correlation,
+                parse_valid=parse_error is None,
+                response_sha256=hashlib.sha256(encoded).hexdigest() if encoded else None,
+                error=parse_error,
+            )
+        )
+        return raw
+
+    ai_engine._llm = measured_llm
+
+    def wrap(operation: str, function):
+        @functools.wraps(function)
+        def measured(*args, **kwargs):
+            with context.operation(operation):
+                return function(*args, **kwargs)
 
         return measured
 
@@ -357,6 +540,7 @@ def instrument_ai_engine(
         if not callable(original):
             raise ServerSafetyError("live AI instrumentation target is missing")
         setattr(ai_engine, operation, wrap(operation, original))
+    return context
 
 
 class TelemetryWriter:
@@ -406,6 +590,8 @@ def instrument_edge_tts(
     class MeasuredCommunicate:
         def __init__(self, *args, **kwargs) -> None:
             self._inner = original(*args, **kwargs)
+            text = args[0] if args else kwargs.get("text")
+            self._text = text if isinstance(text, str) else ""
             candidate = args[1] if len(args) > 1 else kwargs.get("voice")
             self._voice = (
                 candidate
@@ -417,12 +603,14 @@ def instrument_edge_tts(
         async def stream(self):
             started = monotonic()
             audio_bytes = 0
+            audio_hasher = hashlib.sha256()
             try:
                 async for chunk in self._inner.stream():
                     if isinstance(chunk, Mapping) and chunk.get("type") == "audio":
                         data = chunk.get("data")
                         if isinstance(data, bytes):
                             audio_bytes = min(100_000_000, audio_bytes + len(data))
+                            audio_hasher.update(data)
                     yield chunk
             except BaseException as error:
                 emit(
@@ -433,6 +621,17 @@ def instrument_edge_tts(
                         elapsed=monotonic() - started,
                         response_bytes=0,
                         audio_bytes=audio_bytes,
+                        correlation_id="message-text:"
+                        + hashlib.sha256(self._text.encode("utf-8")).hexdigest(),
+                        parse_valid=None,
+                        response_sha256=None,
+                        cache_relative_path="tts-cache/"
+                        + hashlib.md5(
+                            self._text.encode("utf-8"),
+                            usedforsecurity=False,
+                        ).hexdigest()
+                        + ".mp3",
+                        cache_sha256=audio_hasher.hexdigest() if audio_bytes else None,
                         error=error,
                     )
                 )
@@ -445,6 +644,17 @@ def instrument_edge_tts(
                     elapsed=monotonic() - started,
                     response_bytes=0,
                     audio_bytes=audio_bytes,
+                    correlation_id="message-text:"
+                    + hashlib.sha256(self._text.encode("utf-8")).hexdigest(),
+                    parse_valid=None,
+                    response_sha256=None,
+                    cache_relative_path="tts-cache/"
+                    + hashlib.md5(
+                        self._text.encode("utf-8"),
+                        usedforsecurity=False,
+                    ).hexdigest()
+                    + ".mp3",
+                    cache_sha256=audio_hasher.hexdigest() if audio_bytes else None,
                     error=None,
                 )
             )
@@ -452,8 +662,47 @@ def instrument_edge_tts(
     edge_tts_module.Communicate = MeasuredCommunicate
 
 
-def install_live_worker_projection(backend) -> None:
+def install_chat_correlation(backend, context: ProviderTelemetryContext) -> None:
+    conversations = importlib.import_module("app.backend.routes.conversations")
+    original = conversations.build_chat_context
+
+    @functools.wraps(original)
+    def correlated(*args, **kwargs):
+        result = original(*args, **kwargs)
+        conversation_id = getattr(result, "conversation_id", None)
+        if type(conversation_id) is not int or conversation_id <= 0:
+            raise ServerSafetyError("chat provider correlation is unavailable")
+        context.set_next_correlation(f"conversation:{conversation_id}")
+        return result
+
+    conversations.build_chat_context = correlated
+    if getattr(backend, "ai_engine", None) is not conversations.ai_engine:
+        raise ServerSafetyError("chat provider instrumentation identity mismatch")
+
+
+def install_live_worker_projection(
+    backend,
+    context: ProviderTelemetryContext,
+) -> None:
     original = backend.AnalysisWorker
+
+    class CorrelatedAnalyzer:
+        def __init__(self, worker) -> None:
+            self._worker = worker
+
+        def _job_id(self) -> int:
+            job_id = getattr(self._worker, "_active_job_id", None)
+            if type(job_id) is not int or job_id <= 0:
+                raise ServerSafetyError("analysis provider correlation is unavailable")
+            return job_id
+
+        def extract_info(self, transcript):
+            with context.correlate(f"analysis-job:{self._job_id()}"):
+                return backend.ai_engine.extract_info(transcript)
+
+        def assess_conversation(self, transcript, dimensions):
+            with context.correlate(f"analysis-job:{self._job_id()}"):
+                return backend.ai_engine.assess_conversation(transcript, dimensions)
 
     class LiveWorker:
         def __init__(self) -> None:
@@ -461,6 +710,7 @@ def install_live_worker_projection(backend) -> None:
                 session_factory=backend.SessionLocal,
                 analyzer=backend.ai_engine,
             )
+            self._inner._analyzer = CorrelatedAnalyzer(self._inner)
 
         def start(self) -> None:
             self._inner.start()
@@ -501,14 +751,19 @@ def _validated_listen_socket(descriptor: int) -> socket.socket:
 def main(argv: list[str] | None = None) -> int:
     parsed = parse_args(argv)
     paths = validate_child_environment()
+    assert_runtime_paths_pinned(paths)
     configure_safe_logging(paths, secrets=(os.environ["DEEPSEEK_API_KEY"],))
+    assert_runtime_paths_pinned(paths)
     telemetry = TelemetryWriter(parsed.telemetry_fd)
     listen_socket = _validated_listen_socket(parsed.listen_fd)
     backend = load_backend()
-    instrument_ai_engine(backend.ai_engine, emit=telemetry.emit)
+    assert_runtime_paths_pinned(paths)
+    provider_context = instrument_ai_engine(backend.ai_engine, emit=telemetry.emit)
+    install_chat_correlation(backend, provider_context)
     edge_tts = importlib.import_module("edge_tts")
     instrument_edge_tts(edge_tts, emit=telemetry.emit)
-    install_live_worker_projection(backend)
+    install_live_worker_projection(backend, provider_context)
+    assert_runtime_paths_pinned(paths)
 
     import uvicorn
 
@@ -521,6 +776,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     server = uvicorn.Server(config)
     server.run(sockets=[listen_socket])
+    assert_runtime_paths_pinned(paths)
     return 0
 
 

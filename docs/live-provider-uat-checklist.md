@@ -15,6 +15,13 @@ routine development or CI, and do not run it in parallel with any test suite.
   Do not reuse another local server or discover a process by name or port.
 - Leave `artifacts/real-uat/<run-id>/` in place whether the run succeeds or
   fails. The harness owns only its newly created run and server process group.
+- The harness pins owner/mode/device/inode identities and walks retained/runtime
+  ancestors without following links. Renaming, relinking, permission-changing,
+  or replacing a run/runtime ancestor makes the run fail; do not repair evidence
+  in place.
+- Shutdown verifies the direct leader's PID=PGID=SID identity and boundedly
+  proves that no member remains in that owned session/group, including when the
+  leader exited first. It refuses to signal a group reused by another session.
 - Physical microphone capture/acoustic recognition is the only item that may
   be recorded as `HUMAN_UAT_REQUIRED`. All keyboard, button, focus, layout,
   controlled-text, DeepSeek, analysis, and Edge-TTS checks must run.
@@ -26,8 +33,19 @@ routine development or CI, and do not run it in parallel with any test suite.
 2. Start the harness in a dedicated terminal and keep its stdin connected:
 
    ```bash
-   /Users/lddmay/AiCoding/pomegranagent/.venv/bin/python scripts/run_live_provider_uat.py --retain --print-runtime-json
+   /Users/lddmay/AiCoding/pomegranagent/.venv/bin/python scripts/run_live_provider_uat.py --retain --print-runtime-json --expected-head <literal-reviewed-40-hex-commit>
    ```
+
+   The value after `--expected-head` is mandatory and must be the exact
+   independently reviewed lowercase commit, not `HEAD`, a branch, or a shell
+   substitution. The harness rejects any dirty runtime/UAT path before creating
+   a run or launching a child. If the release owner has explicitly reviewed an
+   unrelated user-owned dirty path, classify that exact repository-relative
+   path with one repeatable `--allow-unrelated-dirty-path <path>` argument. The
+   observed set must equal the classified set, and every classified path remains
+   in the protected before/after snapshot. Never classify `app/`, `scripts/`,
+   `tests/`, the live checklist, root runtime configuration, or the retained-UAT
+   artifact tree as unrelated.
 
 3. Wait for exactly one canonical JSON line on stdout. It is printed only after
    the app-mode health/version/worker/auth checks pass. Record the printed
@@ -53,32 +71,44 @@ one concrete visible assertion, and only the noted stable IDs where applicable.
    lock/logout, and unlock again; retain no credential value.
 2. `child_duck_avatar_management`: create/edit one synthetic child and duck;
    upload the printed PNG/JPEG fixtures, save each resource, and verify the
-   canonical WebP display URLs. Record `live_child_id`, `child_avatar_id`,
-   `live_duck_id`, and `duck_avatar_id`.
+   canonical UUID-v4-named WebP display URLs. Record `live_child_id`,
+   `child_avatar_id`, `live_duck_id`, and `duck_avatar_id`. These must be new
+   after the harness's post-seed baseline.
 3. `invalid_avatar_rejection`: choose the printed invalid-avatar fixture and
    verify a visible rejection without changing the successful avatar.
 4. `monthly_roster_conflict_retry`: select two children for multiple dates,
    submit the month, intentionally exercise one conflict, then retry with a new
-   request ID and verify the final roster. Record `monthly_pairs` as ISO dates
-   mapped to exactly two distinct child IDs.
+   UUID-v4 request ID and verify the final roster. Record `monthly_pairs` as at
+   least two ISO dates mapped to exactly two distinct child IDs, and record
+   `monthly_roster_attempts` as exactly the failed 409
+   `ROSTER_DATE_CONFLICT` attempt followed by the successful 200 `SUCCEEDED`
+   attempt. The two request IDs must differ.
 5. `child_conversation_real_provider_tts`: select the new child and complete a
-   real multi-turn diary exchange by controlled text handoff. Verify real model
-   replies and audible/generated Edge-TTS output. Record
-   `live_conversation_id`.
+   real exchange of at least three alternating child/diary turns by controlled
+   text handoff. Verify real model replies and audible/generated Edge-TTS
+   output. Record `live_conversation_id`, every ordered UUID-v4
+   `chat_request_ids` value, and `tts_evidence` with the final diary message ID,
+   text SHA-256, run-relative cache path, and audio SHA-256. Do not send another
+   message after completion; the last diary message is the frozen boundary.
 6. `conversation_completion_analysis`: complete the conversation, wait for the
-   real analysis worker to succeed, and record `analysis_job_id`.
+   one real analysis worker job to succeed, and record `analysis_job_id`. The
+   final DB proof requires nonempty feeding, emotion, and insight projections
+   tied to the new conversation/child/duck.
 7. `teacher_today_queues`: verify the completed item appears in the correct
    Today queue and other queue states remain coherent.
 8. `review_edit_confirm`: open the analysis, edit the review, confirm exactly
-   three dimension scores, and record `assessment_id`.
+   all currently enabled dimension scores, and record `assessment_id`. The
+   confirmed overall must equal the mean of those scores.
 9. `weekly_metrics_growth`: verify the conversation contributes to the intended
    weekly metrics and Growth view. Record the Monday ISO date as
-   `weekly_week_start`.
+   `weekly_week_start`, plus the exact displayed `weekly_metrics_before`,
+   `weekly_metrics_after`, `growth_before`, and `growth_after` objects.
 10. `advanced_search_pagination_deep_link`: search privately with a literal
     keyword, load the next frozen cursor page, and open the result through the
-    Review deep link. Record nonempty, disjoint `search_page_one_ids` and
-    `search_page_two_ids`, plus `search_result_conversation_id` equal to the
-    retained live conversation.
+    Review deep link. Record the complete `search_request`, canonical
+    `search_cursor`, exact `search_deep_link`, nonempty disjoint ordered
+    `search_page_one_ids` and `search_page_two_ids`, plus
+    `search_result_conversation_id` equal to the retained live conversation.
 11. `search_empty_state`: submit a search that has no matches and verify its
     explicit empty state without disturbing the successful search evidence.
 12. `logout_login_retained_state`: logout, unlock again, and verify the roster,
@@ -87,24 +117,45 @@ one concrete visible assertion, and only the noted stable IDs where applicable.
 
 Use each provenance key exactly once across the journey's `entity_ids` objects;
 use `{}` when a step has no new provenance value. Do not infer IDs from display
-text when the API/URL supplies the stable ID.
+text when the API/URL supplies the stable ID. The required keys are exactly:
+`analysis_job_id`, `assessment_id`, `child_avatar_id`, `chat_request_ids`,
+`duck_avatar_id`, `growth_after`, `growth_before`, `live_child_id`,
+`live_duck_id`, `live_conversation_id`, `monthly_pairs`,
+`monthly_roster_attempts`, `search_cursor`, `search_deep_link`,
+`search_page_one_ids`, `search_page_two_ids`, `search_request`,
+`search_result_conversation_id`, `tts_evidence`, `weekly_metrics_after`,
+`weekly_metrics_before`, and `weekly_week_start`. The harness captured
+`seed-baseline.json` after the offline seed and before server/browser activity;
+seed IDs, files, requests, or projections do not count as live evidence.
 
 ## Screenshot evidence
 
-Capture real PNG screenshots directly under the printed `screenshots_dir`.
-Use stable lowercase semantic names and do not overwrite a captured file.
-Collect instruction-worthy states covering exactly these viewport values:
+Capture exactly the six real PNG screenshots below directly under the printed
+`screenshots_dir`; do not overwrite a captured file. Every row fixes the
+`state_id`/semantic filename, surface, journey step, and approved viewport:
+
+- `child-avatar-selected`: child,
+  `child_duck_avatar_management`, `1024x576`.
+- `child-conversation-complete`: child,
+  `child_conversation_real_provider_tts`, `1280x720`.
+- `teacher-management`: teacher, `child_duck_avatar_management`, `1024x768`.
+- `teacher-review-confirmed`: teacher, `review_edit_confirm`, `1440x900`.
+- `teacher-search-deep-link`: teacher,
+  `advanced_search_pagination_deep_link`, `1440x900`.
+- `teacher-weekly-growth`: teacher, `weekly_metrics_growth`, `1024x768`.
+
+Together they cover exactly these viewport values:
 
 - Teacher: `1024x768` and `1440x900`.
 - Child: `1024x576` and `1280x720`.
 
-At minimum, show teacher management/review/report/search state and the child
-canonical-avatar/conversation state across those four viewports. For each image,
-record the relative path `screenshots/<semantic-name>.png`, semantic name,
-viewport, one journey step ID, and concrete visible assertions. Confirm dialogs
+For each image, record `relative_path`, `semantic_name`, `state_id`, `surface`,
+`viewport`, `journey_step`, and concrete `visible_assertions`. Confirm dialogs
 fit, the active control/focus is visible, canonical avatars or fallback are
 visible as intended, fixed panels do not overlap content, and there is no
-horizontal scrolling. Do not capture credential entry, cookies, request
+horizontal scrolling. A uniform/blank image, duplicate state, wrong surface or
+step, dimension mismatch, symlink/hardlink, changed file, or any nonessential
+PNG metadata fails closed. Do not capture credential entry, cookies, request
 headers, provider payloads, or developer tools.
 
 ## Controller evidence and finalize
@@ -117,8 +168,9 @@ newline). It must contain exactly:
 - the printed `run_id` and literal 40-hex `source_head`
 - `journey`: the 12 ordered entries above; each has exactly `step_id`, `status`,
   `visible_assertions`, and `entity_ids`
-- `screenshots`: entries with exactly `relative_path`, `semantic_name`,
-  `viewport`, `journey_step`, and `visible_assertions`
+- `screenshots`: the exact six entries above, each with exactly
+  `relative_path`, `semantic_name`, `state_id`, `surface`, `viewport`,
+  `journey_step`, and `visible_assertions`
 - `issues`: safe summaries with exactly `severity`, `step_id`, and
   `safe_summary`; do not include raw exception/provider/credential content
 - `human_uat_required`: one entry with gate ID
@@ -126,7 +178,9 @@ newline). It must contain exactly:
   safe summary
 
 Do not include unknown fields, duplicate steps/semantic names/paths, absolute or
-traversing screenshot paths, a blocker issue, or another human-only gate.
+traversing screenshot paths, a blocker issue, or another/zero human-only gate.
+Any blocker issue prevents `COMPLETE`, both during controller validation and in
+the terminal-manifest builder.
 
 After the evidence file is durably in place, send the canonical stdin line
 `{"type":"finalize"}`. Do not use SIGINT/SIGTERM for a successful run: signals
@@ -148,9 +202,17 @@ Wait for the harness to stop and exit successfully.
    protected main DB/WAL/SHM/log/TTS/media, repository HEAD/raw porcelain, and
    every pre-existing dirty path. The harness treats any mismatch as a safety
    failure.
-4. Confirm the sanitized provider summary contains successful real
-   `chat_reply`, `extract_info`, `assess_conversation`, and `tts` events, with
-   only provider/model/voice/status/latency bucket/byte counts/error class.
+4. Confirm the sanitized provider summary contains exactly the correlated real
+   events: one `chat_reply` for every recorded chat request, one `extract_info`,
+   one `assess_conversation`, and one `tts`. Every event has exactly
+   `audio_bytes`, `cache_relative_path`, `cache_sha256`, `correlation_id`,
+   `error_class`, `latency_bucket`, `model`, `operation`, `parse_valid`,
+   `provider`, `response_bytes`, `response_sha256`, `status`, and `voice`.
+   DeepSeek events must be raw-JSON parse-valid, successful, correlated to the
+   new conversation/job, and use the configured model. The TTS event must use
+   exactly `zh-CN-XiaoxiaoNeural`; its nonempty byte count, audio hash, message
+   text correlation, and run-owned cache path/hash must all agree with DB
+   provenance. A production local fallback never counts as provider success.
 5. Confirm the harness's actual-value and pattern scan completed. If doing an
    additional pattern check, report only affected file names and never print
    matching content.
