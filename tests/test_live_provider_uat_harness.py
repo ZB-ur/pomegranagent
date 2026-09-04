@@ -3070,6 +3070,88 @@ def test_secret_scan_scopes_teacher_pin_to_runtime_generated_evidence(tmp_path):
         )
 
 
+def test_teacher_pin_scan_exempts_only_validated_machine_metadata(tmp_path):
+    module = _module()
+    teacher_pin = "4839"
+    source_head = teacher_pin + "a" * (40 - len(teacher_pin))
+    plan = module.create_run_plan(_repository(tmp_path), source_head)
+    reviewed_path = f"tests/fixtures/{teacher_pin}/avatar.png"
+    blob_oid = teacher_pin + "b" * (40 - len(teacher_pin))
+    sha256 = teacher_pin + "c" * (64 - len(teacher_pin))
+    reviewed = replace(
+        plan,
+        source_tree_oid=teacher_pin + "d" * (40 - len(teacher_pin)),
+        source_inventory=((reviewed_path, blob_oid, 0o100644, 4, sha256),),
+    )
+    reviewed_file = reviewed.source_root / reviewed_path
+    reviewed_file.parent.mkdir(parents=True, mode=0o700)
+    reviewed_file.write_bytes(b"safe")
+    module.atomic_write_json(
+        reviewed.source_manifest,
+        module._source_manifest_value(reviewed),
+        pinned_plan=reviewed,
+    )
+    reviewed.screenshots.mkdir(mode=0o700)
+    controller = _controller_payload(module, reviewed)
+    controller["source_head"] = source_head
+    module.atomic_write_json(
+        reviewed.controller_evidence,
+        controller,
+        pinned_plan=reviewed,
+    )
+    manifest = module._complete_manifest(
+        reviewed,
+        seed_result={"media_sha256": sha256, "record_sha256": sha256},
+        controller=controller,
+        provider_summary={"events": []},
+        provenance={"status": "PROVEN"},
+    )
+    manifest["screenshots"][0]["sha256"] = sha256
+    manifest_payload = module.canonical_json_line(manifest).encode("utf-8")
+    module.atomic_write_json(
+        reviewed.manifest,
+        manifest,
+        pinned_plan=reviewed,
+    )
+    reviewed.checksums.write_bytes(
+        module._checksum_lines(reviewed, manifest_payload)
+    )
+
+    module.scan_retained_artifacts(
+        reviewed.root,
+        provider_secrets=("sk-machine-index-provider-secret",),
+        runtime_secrets=(teacher_pin,),
+        pinned_plan=reviewed,
+    )
+
+
+def test_teacher_pin_scan_still_rejects_log_and_controller_text(tmp_path):
+    module = _module()
+    teacher_pin = "4839"
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.app_log.parent.mkdir(mode=0o700)
+    plan.app_log.write_text(f"credential={teacher_pin}\n", encoding="utf-8")
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-runtime-provider-secret",),
+            runtime_secrets=(teacher_pin,),
+        )
+
+    plan.app_log.unlink()
+    plan.screenshots.mkdir(mode=0o700)
+    controller = _controller_payload(module, plan)
+    controller["journey"][0]["visible_assertions"] = [
+        f"teacher credential {teacher_pin} remained visible"
+    ]
+    module.atomic_write_json(plan.controller_evidence, controller, pinned_plan=plan)
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-runtime-provider-secret",),
+            runtime_secrets=(teacher_pin,),
+        )
+
 def _png(width: int, height: int) -> bytes:
     def chunk(kind: bytes, payload: bytes) -> bytes:
         return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
@@ -4106,7 +4188,11 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
 
     def observed_manifest_scan(*args, **kwargs):
         if kwargs.get("role") == "manifest.json":
-            terminal_events.append("manifest-scan")
+            terminal_events.append(
+                "manifest-provider-scan"
+                if kwargs.get("actual_secrets") == (provider_secret,)
+                else "manifest-teacher-field-scan"
+            )
         return real_manifest_scan(*args, **kwargs)
 
     def observed_artifact_scan(*args, **kwargs):
@@ -4347,7 +4433,8 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
     }
     assert terminal_events == [
         "artifact-scan",
-        "manifest-scan",
+        "manifest-provider-scan",
+        "manifest-teacher-field-scan",
         "artifact-scan",
         "terminal-verify",
         "COMPLETE",

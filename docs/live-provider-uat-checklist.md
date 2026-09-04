@@ -328,16 +328,22 @@ Wait for the harness to stop and exit successfully.
    `FULL_RETAINED_TREE_PASS`, and `teacher_pin` equal to
    `RUNTIME_GENERATED_EVIDENCE_PASS`. The exact prepared manifest bytes and the
    retained artifact tree are scanned before the final COMPLETE commit. The
-   provider key is checked across the entire retained tree, including the
-   Git-pinned `reviewed-source/`. The temporary teacher PIN is checked only in
-   runtime-generated evidence and is deliberately excluded from
-   `reviewed-source/`, because reviewed source may legitimately contain the
-   same short 4-6 digit sequence. Authorization, bearer, cookie, session, and
-   token detector patterns apply to runtime evidence; reviewed Git source is
-   marked `GIT_PINNED_EXEMPT` for those generic patterns because it contains
-   the scanner literals themselves. Do not run a broad content-printing `rg`
-   over `reviewed-source/`; rely on the typed harness attestation. Any optional
-   audit must never print matching content.
+   provider key is checked byte-for-byte across the entire retained tree,
+   including the Git-pinned `reviewed-source/`. The temporary teacher PIN is
+   checked in every credential-capable runtime artifact: logs and server
+   output, controller/journey/issue/provider free-text fields, retained
+   database logical and physical evidence, screenshot bytes and metadata, and
+   every unclassified generated file. Only Git-validated reviewed-source bytes
+   and strictly parsed machine metadata are exempt from the low-entropy PIN
+   match: the exact `reviewed-source.json`, the recomputed `SHA256SUMS`, and
+   already validated path/OID/hash/checksum fields in structured summaries.
+   Unknown shapes and all human/free-text fields fail closed and remain
+   scanned. Authorization, bearer, cookie, session, and token detector patterns
+   apply to runtime evidence; reviewed Git source is marked
+   `GIT_PINNED_EXEMPT` for those generic patterns because it contains the
+   scanner literals themselves. Do not run a broad content-printing `rg` over
+   `reviewed-source/`; rely on the typed harness attestation. Any optional audit
+   must never print matching content.
 7. Visually inspect selected screenshots for credentials or private browser
    state, then copy only redacted, instruction-worthy images into
    `docs/manual/assets/<run-id>/`. Never add the raw run directory to Git.

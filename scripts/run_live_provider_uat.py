@@ -3152,6 +3152,191 @@ def _assert_secret_free_payload(
         raise HarnessSafetyError(f"secret scan failed: {role}")
 
 
+def _canonical_secret_scan_object(payload: bytes, *, role: str) -> Mapping[str, object]:
+    try:
+        text = payload.decode("utf-8", errors="strict")
+        value = json.loads(text)
+    except (UnicodeError, ValueError, TypeError) as exc:
+        raise HarnessSafetyError(f"secret scan failed: {role}") from exc
+    if (
+        not isinstance(value, Mapping)
+        or canonical_json_line(dict(value)) != text
+    ):
+        raise HarnessSafetyError(f"secret scan failed: {role}")
+    return value
+
+
+def _runtime_summary_texts(
+    payload: bytes,
+    *,
+    role: str,
+) -> tuple[str, ...]:
+    value = _canonical_secret_scan_object(payload, role=role)
+    texts: list[str] = []
+
+    def assertions(items: object) -> None:
+        if not isinstance(items, list):
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        for item in items:
+            if not isinstance(item, Mapping):
+                raise HarnessSafetyError(f"secret scan failed: {role}")
+            visible = item.get("visible_assertions")
+            if not isinstance(visible, list) or any(
+                not isinstance(entry, str) for entry in visible
+            ):
+                raise HarnessSafetyError(f"secret scan failed: {role}")
+            texts.extend(visible)
+
+    def summaries(items: object) -> None:
+        if not isinstance(items, list):
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        for item in items:
+            if not isinstance(item, Mapping) or not isinstance(
+                item.get("safe_summary"), str
+            ):
+                raise HarnessSafetyError(f"secret scan failed: {role}")
+            texts.append(str(item["safe_summary"]))
+
+    if role == "controller-evidence.json":
+        if set(value) != _CONTROLLER_KEYS:
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        assertions(value.get("journey"))
+        assertions(value.get("screenshots"))
+        summaries(value.get("issues"))
+        summaries(value.get("human_uat_required"))
+    elif role == "journey.json":
+        if set(value) != {"journey", "protocol", "run_id"}:
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        assertions(value.get("journey"))
+    elif role == "issues.json":
+        if set(value) != {"issues", "protocol", "run_id"}:
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        summaries(value.get("issues"))
+    elif role == "provider-summary.json":
+        events = value.get("events")
+        if not isinstance(events, list):
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        try:
+            validated = summarize_provider_events(tuple(events))
+        except HarnessSafetyError as exc:
+            raise HarnessSafetyError(f"secret scan failed: {role}") from exc
+        if value != validated:
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        for event in events:
+            assert isinstance(event, Mapping)
+            for key in ("error_class", "model", "operation", "provider", "voice"):
+                candidate = event.get(key)
+                if isinstance(candidate, str):
+                    texts.append(candidate)
+    elif role == "manifest.json":
+        if set(value) != {
+            "database_provenance",
+            "human_uat_required",
+            "issues_count",
+            "protocol",
+            "provider_event_count",
+            "release",
+            "run_id",
+            "screenshots",
+            "secret_scan",
+            "seed",
+            "source_head",
+            "status",
+        }:
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        assertions(value.get("screenshots"))
+        summaries(value.get("human_uat_required"))
+    else:
+        raise HarnessSafetyError(f"secret scan failed: {role}")
+    return tuple(texts)
+
+
+def _validate_checksum_secret_index(
+    payload: bytes,
+    *,
+    plan: RunPlan | None,
+) -> None:
+    inventory = _checksum_inventory(payload)
+    if plan is None:
+        return
+    observed: dict[str, str] = {}
+    try:
+        candidates = sorted(
+            plan.root.rglob("*"),
+            key=lambda item: item.relative_to(plan.root).as_posix(),
+        )
+    except OSError as exc:
+        raise HarnessSafetyError("secret scan failed: SHA256SUMS") from exc
+    for candidate in candidates:
+        if candidate == plan.checksums:
+            continue
+        entry = candidate.lstat()
+        if stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode):
+            continue
+        if not stat.S_ISREG(entry.st_mode) or entry.st_nlink != 1:
+            raise HarnessSafetyError("secret scan failed: SHA256SUMS")
+        relative = candidate.relative_to(plan.root).as_posix()
+        observed[relative] = _file_evidence(candidate)["sha256"]
+    if plan.manifest.name not in observed:
+        observed[plan.manifest.name] = str(inventory.get(plan.manifest.name, ""))
+    if inventory != observed:
+        raise HarnessSafetyError("secret scan failed: SHA256SUMS")
+
+
+def _assert_runtime_secrets_free_payload(
+    payload: bytes,
+    *,
+    runtime_secrets: tuple[str, ...],
+    role: str,
+    pinned_plan: RunPlan | None,
+) -> None:
+    if role.startswith("reviewed-source/"):
+        return
+    if role == "reviewed-source.json":
+        if pinned_plan is None or payload != canonical_json_line(
+            _source_manifest_value(pinned_plan)
+        ).encode("utf-8"):
+            raise HarnessSafetyError("secret scan failed: reviewed-source.json")
+        return
+    if role == "SHA256SUMS":
+        _validate_checksum_secret_index(payload, plan=pinned_plan)
+        return
+    if role in {
+        "controller-evidence.json",
+        "issues.json",
+        "journey.json",
+        "manifest.json",
+        "provider-summary.json",
+    }:
+        texts = _runtime_summary_texts(payload, role=role)
+        _assert_secret_free_payload(
+            canonical_json_line(list(texts)).encode("utf-8"),
+            actual_secrets=runtime_secrets,
+            role=role,
+            apply_patterns=False,
+        )
+        return
+    if role in {"resources.before.json", "resources.after.json"}:
+        value = _canonical_secret_scan_object(payload, role=role)
+        if set(value) != {
+            "database",
+            "dirty_paths",
+            "git_head",
+            "git_porcelain",
+            "log",
+            "media",
+            "tts",
+        }:
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        return
+    _assert_secret_free_payload(
+        payload,
+        actual_secrets=runtime_secrets,
+        role=role,
+        apply_patterns=False,
+    )
+
+
 def scan_retained_artifacts(
     root: Path,
     *,
@@ -3205,16 +3390,18 @@ def scan_retained_artifacts(
         reviewed_source = role.startswith("reviewed-source/")
         _assert_secret_free_payload(
             payload,
-            actual_secrets=(
-                provider_secrets
-                if reviewed_source
-                else (*provider_secrets, *runtime_secrets)
-            ),
+            actual_secrets=provider_secrets,
             role=role,
             # The retained source tree is already pinned byte-for-byte to the
             # reviewed Git objects and necessarily contains the scanner's own
             # detector literals.  Registered live secrets remain forbidden.
             apply_patterns=not reviewed_source,
+        )
+        _assert_runtime_secrets_free_payload(
+            payload,
+            runtime_secrets=runtime_secrets,
+            role=role,
+            pinned_plan=pinned_plan,
         )
         if payload.startswith(b"\x89PNG\r\n\x1a\n"):
             try:
@@ -5223,8 +5410,14 @@ def execute_retained_uat(
         manifest_payload = canonical_json_line(manifest).encode("utf-8")
         _assert_secret_free_payload(
             manifest_payload,
-            actual_secrets=(*provider_secrets, *runtime_secrets),
+            actual_secrets=provider_secrets,
             role="manifest.json",
+        )
+        _assert_runtime_secrets_free_payload(
+            manifest_payload,
+            runtime_secrets=runtime_secrets,
+            role="manifest.json",
+            pinned_plan=plan,
         )
         checksums_payload = _checksum_lines(plan, manifest_payload)
         _write_owned_bytes(
