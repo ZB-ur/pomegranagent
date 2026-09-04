@@ -908,10 +908,12 @@ def _roster_request_evidence(payload: bytes) -> dict[str, object]:
 
 
 def _response_error_code(payload: bytes, *, status: int) -> str | None:
-    if status < 400:
-        return None
     try:
         value = json.loads(payload.decode("utf-8", errors="strict"))
+        if not isinstance(value, dict):
+            raise ValueError
+        if status < 400:
+            return None
         code = value["error"]["code"]
     except (KeyError, TypeError, UnicodeError, ValueError) as exc:
         raise ServerSafetyError("monthly roster telemetry response is invalid") from exc
@@ -939,71 +941,97 @@ class RosterAttemptTelemetry:
             or scope.get("path") != "/api/roster/month"
         ):
             return await self._app(scope, receive, send)
-        request_messages = []
+
         request_body = bytearray()
-        while True:
+        request_complete = False
+        request_valid = True
+
+        async def measured_receive():
+            nonlocal request_complete, request_valid
             message = await receive()
-            if not isinstance(message, Mapping) or message.get("type") != "http.request":
-                raise ServerSafetyError("monthly roster telemetry request is invalid")
+            if not isinstance(message, Mapping):
+                request_valid = False
+                return message
+            if message.get("type") != "http.request":
+                if not request_complete:
+                    request_valid = False
+                return message
             chunk = message.get("body", b"")
             if not isinstance(chunk, bytes):
-                raise ServerSafetyError("monthly roster telemetry request is invalid")
-            request_body.extend(chunk)
-            if len(request_body) > 1_000_000:
-                raise ServerSafetyError("monthly roster telemetry request is invalid")
-            request_messages.append(dict(message))
-            if not message.get("more_body", False):
-                break
-        evidence = _roster_request_evidence(bytes(request_body))
-        with self._lock:
-            self._order += 1
-            order = self._order
-
-        async def replay_receive():
-            if request_messages:
-                return request_messages.pop(0)
-            return {"type": "http.disconnect"}
+                request_valid = False
+            elif len(request_body) + len(chunk) > 1_000_000:
+                request_valid = False
+            elif request_valid:
+                request_body.extend(chunk)
+            more_body = message.get("more_body", False)
+            if type(more_body) is not bool or request_complete:
+                request_valid = False
+            if more_body is False:
+                request_complete = True
+            return message
 
         response_status = None
         response_body = bytearray()
         response_complete = False
+        response_valid = True
 
         async def measured_send(message):
-            nonlocal response_status, response_complete
+            nonlocal response_status, response_complete, response_valid
             if not isinstance(message, Mapping):
-                raise ServerSafetyError("monthly roster telemetry response is invalid")
-            if message.get("type") == "http.response.start":
+                response_valid = False
+                return await send(message)
+            message_type = message.get("type")
+            if message_type == "http.response.start":
                 status = message.get("status")
-                if type(status) is not int or not 100 <= status <= 599 or response_status is not None:
-                    raise ServerSafetyError("monthly roster telemetry response is invalid")
-                response_status = status
-            elif message.get("type") == "http.response.body":
+                if (
+                    type(status) is not int
+                    or not 100 <= status <= 599
+                    or response_status is not None
+                ):
+                    response_valid = False
+                else:
+                    response_status = status
+            elif message_type == "http.response.body":
                 chunk = message.get("body", b"")
                 if not isinstance(chunk, bytes) or response_status is None:
-                    raise ServerSafetyError("monthly roster telemetry response is invalid")
-                response_body.extend(chunk)
-                if len(response_body) > 1_000_000:
-                    raise ServerSafetyError("monthly roster telemetry response is invalid")
-                if not message.get("more_body", False):
+                    response_valid = False
+                elif len(response_body) + len(chunk) > 1_000_000:
+                    response_valid = False
+                elif response_valid:
+                    response_body.extend(chunk)
+                more_body = message.get("more_body", False)
+                if type(more_body) is not bool or response_complete:
+                    response_valid = False
+                if more_body is False:
                     response_complete = True
             await send(message)
 
-        await self._app(scope, replay_receive, measured_send)
-        if response_status is None or not response_complete:
+        result = await self._app(scope, measured_receive, measured_send)
+        if response_status not in {200, 409}:
+            return result
+        if not request_valid or not request_complete:
+            raise ServerSafetyError("monthly roster telemetry request is invalid")
+        if not response_valid:
+            raise ServerSafetyError("monthly roster telemetry response is invalid")
+        if not response_complete:
             raise ServerSafetyError("monthly roster telemetry response is incomplete")
-        self._emit(
-            {
-                **evidence,
-                "error_code": _response_error_code(
-                    bytes(response_body), status=response_status
-                ),
-                "kind": "roster_attempt",
-                "method": "POST",
-                "order": order,
-                "path": "/api/roster/month",
-                "status": response_status,
-            }
-        )
+        evidence = _roster_request_evidence(bytes(request_body))
+        error_code = _response_error_code(bytes(response_body), status=response_status)
+        with self._lock:
+            order = self._order + 1
+            self._emit(
+                {
+                    **evidence,
+                    "error_code": error_code,
+                    "kind": "roster_attempt",
+                    "method": "POST",
+                    "order": order,
+                    "path": "/api/roster/month",
+                    "status": response_status,
+                }
+            )
+            self._order = order
+        return result
 
 
 class TTSRequestTelemetry:

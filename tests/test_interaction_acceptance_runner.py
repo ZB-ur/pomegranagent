@@ -145,6 +145,7 @@ def test_full_suite_argv_is_explicit_sorted_and_forbidden_targets_are_absent(tmp
         "tests/test_api_errors.py",
         "tests/test_http_boundary.py",
         "tests/test_teacher_auth.py",
+        "tests/test_teacher_auth_body_privacy.py",
         "tests/test_frontend_foundation.py",
         "tests/test_pipeline_models.py",
         "tests/test_chat_idempotency.py",
@@ -161,6 +162,7 @@ def test_full_suite_argv_is_explicit_sorted_and_forbidden_targets_are_absent(tmp
         "tests/test_runtime_context.py",
         "tests/test_resource_idempotency.py",
         "tests/test_avatar_media.py",
+        "tests/test_legacy_avatar_fallback.py",
         "tests/test_weekly_reports.py",
         "tests/test_conversation_search.py",
         "tests/test_demo_seed.py",
@@ -2524,6 +2526,13 @@ browser | ^test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds\[(102
 browser | ^test_release_avatar_upload_and_fallback_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 12,14"""
 
 
+_P6_POST_REVIEW_SELECTOR_ADDITIONS_TEXT = r"""backend | ^test_schema_two_(legacy_avatars_remain_stored_but_every_identity_read_projects_null|canonical_avatar_urls_survive_upgrade_and_every_identity_read)$ | 2 | 1,9,12,14
+backend | ^test_search_fails_closed_when_review_status_drifts_during_projection$ | 1 | 8,9,14
+backend | ^test_protected_teacher_json_write_inventory_uses_manual_body_dependencies$ | 1 | 3,14
+backend | ^test_unauthenticated_teacher_write_rejects_before_receiving_json_body\[(post-/api/children|put-/api/children/\{child_id\}|post-/api/ducks|put-/api/ducks/\{duck_id\}|post-/api/roster/auto|post-/api/roster/month|put-/api/roster/\{roster_date\}|put-/api/conversations/\{conversation_id\}/review|post-/api/dimensions|put-/api/dimensions/\{dim_id\}|put-/api/ducks/\{duck_id\}/archive)\]$ | 11 | 3,14
+backend | ^test_manual_body_dependency_preserves_strict_content_type_behavior$ | 1 | 3,14"""
+
+
 _P5_SELECTOR_ORACLE = (
     Path(__file__).resolve().parent
     / "fixtures/interaction_acceptance/p5_selector_oracle.json"
@@ -2533,6 +2542,9 @@ _P5_SELECTOR_ORACLE_SHA256 = (
 )
 _P6_SELECTOR_ADDITIONS_SHA256 = (
     "38ef5ceacb3b34e5a64e92f5d98b1a7deeeee5a9831281671c4ebac7241b9031"
+)
+_P6_POST_REVIEW_SELECTOR_ADDITIONS_SHA256 = (
+    "ed7fe56d4422466c4f88b5e27a208fb89e0d57297bbbc2dccb724b2f7440f24b"
 )
 
 
@@ -2610,14 +2622,29 @@ def _p6_frozen_manifest_rows():
     return _selector_rows(_P6_SELECTOR_ADDITIONS_TEXT)
 
 
+def _p6_post_review_manifest_rows():
+    assert (
+        hashlib.sha256(
+            _P6_POST_REVIEW_SELECTOR_ADDITIONS_TEXT.encode("utf-8")
+        ).hexdigest()
+        == _P6_POST_REVIEW_SELECTOR_ADDITIONS_SHA256
+    )
+    return _selector_rows(_P6_POST_REVIEW_SELECTOR_ADDITIONS_TEXT)
+
+
 def _frozen_manifest_rows():
-    return _p5_frozen_manifest_rows() + _p6_frozen_manifest_rows()
+    return (
+        _p5_frozen_manifest_rows()
+        + _p6_frozen_manifest_rows()
+        + _p6_post_review_manifest_rows()
+    )
 
 
 def test_literal_p5_selector_oracle_is_exact_ordered_prefix_with_p6_suffix_separate():
     module = importlib.import_module("scripts.run_interaction_acceptance")
     p5_rows = _p5_frozen_manifest_rows()
     p6_rows = _p6_frozen_manifest_rows()
+    post_review_rows = _p6_post_review_manifest_rows()
     actual_rows = tuple(
         (row.command_id, row.node_pattern, row.expected_count, row.gates)
         for row in module.SELECTOR_MANIFEST
@@ -2625,9 +2652,12 @@ def test_literal_p5_selector_oracle_is_exact_ordered_prefix_with_p6_suffix_separ
 
     assert len(p5_rows) == 97
     assert len(p6_rows) == 56
+    assert len(post_review_rows) == 5
+    p6_end = len(p5_rows) + len(p6_rows)
     assert actual_rows[: len(p5_rows)] == p5_rows
-    assert actual_rows[len(p5_rows) :] == p6_rows
-    assert _frozen_manifest_rows() == p5_rows + p6_rows
+    assert actual_rows[len(p5_rows) : p6_end] == p6_rows
+    assert actual_rows[p6_end:] == post_review_rows
+    assert _frozen_manifest_rows() == p5_rows + p6_rows + post_review_rows
 
 
 def _concat_expansions(left, right):
@@ -2716,7 +2746,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
 
     assert actual_today_retry_rows == EXPECTED_TODAY_RETRY_SELECTOR_ROWS
     assert actual_rows == expected_rows
-    assert len(actual_rows) == 153
+    assert len(actual_rows) == 158
     assert module.GATE_TITLES == EXPECTED_GATE_TITLES
     assert tuple(
         (item.source, item.evidence_id, item.expected_count, item.gates)
@@ -2741,7 +2771,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
             ]
             assert len(matches) == 1
         materialized_count += len(node_ids)
-    assert materialized_count == 372
+    assert materialized_count == 388
 
     assert module.SELECTOR_TO_GATES == {
         (row.command_id, row.node_pattern): row.gates for row in module.SELECTOR_MANIFEST
@@ -4079,8 +4109,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "4a84117e0888d5aa153764b6fb97c8a86c9423f0433e5e298d628b7ee588ffa7"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "b64c3a047c200b18298a87f975ec9f16caf23f9c692ef04599a1eb7d55f49e27"
+    assert hashlib.sha256(json_bytes).hexdigest() == "5f212379a8e04937ffeb44ee92d06f0fb2be1e76fa8ca080ed43f02ffb216697"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "5d15d27d036725dd926f05d2f8460122d82660f0112eed5b678871277748b8de"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4645,8 +4675,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "49c403f0ce0773eafe5c5e63edf7132153883c20ab50bd6637bbd35e7b5a36d5"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "1a894857c0740c71c01f9e1b5660e99a7d1652068f011d1b6388545ce0520d74"
+    assert hashlib.sha256(json_bytes).hexdigest() == "1784bfcf9a825690ad63e98376e7357bc195c7ecac512ac870f3547c50edc133"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "649ca20f1083b016c7b35c3aaaf7b14fa80c91f58279d1b157c2aa6db85e41fe"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown

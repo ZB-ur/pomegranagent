@@ -3236,6 +3236,11 @@ browser | ^test_release_monthly_roster_dialog_keeps_fixed_actions_and_scrollable
 browser | ^test_release_search_filters_results_and_focus_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 8,9,14
 browser | ^test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 7,14
 browser | ^test_release_avatar_upload_and_fallback_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 12,14
+backend | ^test_schema_two_(legacy_avatars_remain_stored_but_every_identity_read_projects_null|canonical_avatar_urls_survive_upgrade_and_every_identity_read)$ | 2 | 1,9,12,14
+backend | ^test_search_fails_closed_when_review_status_drifts_during_projection$ | 1 | 8,9,14
+backend | ^test_protected_teacher_json_write_inventory_uses_manual_body_dependencies$ | 1 | 3,14
+backend | ^test_unauthenticated_teacher_write_rejects_before_receiving_json_body\[(post-/api/children|put-/api/children/\{child_id\}|post-/api/ducks|put-/api/ducks/\{duck_id\}|post-/api/roster/auto|post-/api/roster/month|put-/api/roster/\{roster_date\}|put-/api/conversations/\{conversation_id\}/review|post-/api/dimensions|put-/api/dimensions/\{dim_id\}|put-/api/ducks/\{duck_id\}/archive)\]$ | 11 | 3,14
+backend | ^test_manual_body_dependency_preserves_strict_content_type_behavior$ | 1 | 3,14
 """
 
 
@@ -4413,6 +4418,7 @@ def build_command_specs(repo_root: Path, artifact_root: Path) -> tuple[CommandSp
         "tests/test_api_errors.py",
         "tests/test_http_boundary.py",
         "tests/test_teacher_auth.py",
+        "tests/test_teacher_auth_body_privacy.py",
         "tests/test_frontend_foundation.py",
         "tests/test_pipeline_models.py",
         "tests/test_chat_idempotency.py",
@@ -4429,6 +4435,7 @@ def build_command_specs(repo_root: Path, artifact_root: Path) -> tuple[CommandSp
         "tests/test_runtime_context.py",
         "tests/test_resource_idempotency.py",
         "tests/test_avatar_media.py",
+        "tests/test_legacy_avatar_fallback.py",
         "tests/test_weekly_reports.py",
         "tests/test_conversation_search.py",
         "tests/test_demo_seed.py",

@@ -1743,6 +1743,133 @@ def test_edge_tts_telemetry_hashes_exact_audio_and_run_cache_name():
     ]
 
 
+@pytest.mark.parametrize(
+    "request_messages",
+    [
+        pytest.param(
+            [
+                {
+                    "type": "http.request",
+                    "body": json.dumps(
+                        {
+                            "cycle": "2026-09",
+                            "entries": [
+                                {
+                                    "child_ids": [10, 101],
+                                    "date": "2026-09-03",
+                                }
+                            ],
+                            "month": "2026-09",
+                            "replace_existing": False,
+                            "request_id": "33333333-3333-4333-8333-333333333333",
+                        }
+                    ).encode("utf-8"),
+                    "more_body": False,
+                }
+            ],
+            id="valid-single-chunk",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "http.request",
+                    "body": b"{not-json",
+                    "more_body": False,
+                }
+            ],
+            id="malformed-single-chunk",
+        ),
+        pytest.param(
+            [
+                {
+                    "type": "http.request",
+                    "body": b'{"request_id":',
+                    "more_body": True,
+                },
+                {
+                    "type": "http.request",
+                    "body": b"not-json}",
+                    "more_body": False,
+                },
+            ],
+            id="malformed-multiple-chunks",
+        ),
+    ],
+)
+def test_roster_telemetry_never_reads_or_reports_a_body_rejected_by_auth(
+    request_messages,
+):
+    server = importlib.import_module("scripts.live_provider_uat_server")
+    events = []
+    receive_calls = 0
+    downstream_calls = 0
+    responses = []
+    expected_responses = [
+        {
+            "type": "http.response.start",
+            "status": 401,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"x-request-id", b"auth-before-body"),
+            ],
+        },
+        {
+            "type": "http.response.body",
+            "body": b'{"error":{"code":"TEACHER_AUTH_REQUIRED"}}',
+            "more_body": False,
+        },
+    ]
+
+    async def downstream(_scope, _receive, send):
+        nonlocal downstream_calls
+        downstream_calls += 1
+        for message in expected_responses:
+            await send(dict(message))
+
+    wrapped = server.RosterAttemptTelemetry(downstream, emit=events.append)
+
+    async def invoke():
+        nonlocal receive_calls
+        pending = list(request_messages)
+
+        async def receive():
+            nonlocal receive_calls
+            receive_calls += 1
+            if pending:
+                return pending.pop(0)
+            return {"type": "http.disconnect"}
+
+        async def send(message):
+            responses.append(message)
+
+        await wrapped(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0", "spec_version": "2.3"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/api/roster/month",
+                "raw_path": b"/api/roster/month",
+                "query_string": b"",
+                "root_path": "",
+                "headers": [(b"content-type", b"application/json")],
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+                "state": {},
+            },
+            receive,
+            send,
+        )
+
+    asyncio.run(invoke())
+
+    assert downstream_calls == 1
+    assert receive_calls == 0
+    assert events == []
+    assert responses == expected_responses
+
+
 def test_live_server_emits_safe_ordered_monthly_roster_attempt_telemetry():
     server = importlib.import_module("scripts.live_provider_uat_server")
     harness = _module()
