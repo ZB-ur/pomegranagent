@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import errno
-import shutil
 import sys
 import urllib.error
 import urllib.request
@@ -23,8 +22,12 @@ UNREACHABLE_ERRNOS = {errno.ECONNREFUSED, errno.ENETUNREACH, errno.EHOSTUNREACH}
 @dataclass(frozen=True)
 class RebuildResult:
     database_path: Path
+    media_root: Path
+    log_path: Path
     archived_database: Path | None
     archive_directory: Path
+    record_sha256: str
+    media_sha256: str
 
 
 def local_service_is_running() -> bool:
@@ -41,51 +44,73 @@ def local_service_is_running() -> bool:
 def rebuild_demo_database(
     *,
     db_path: Path,
+    media_root: Path,
     archive_dir: Path,
     log_path: Path,
+    anchor_date: date = DEMO_SEED_DATE,
     service_is_running: Callable[[], bool] = local_service_is_running,
 ) -> RebuildResult:
+    """Rebuild through the same staged, verified full-demo installation path."""
+
     if service_is_running():
         raise RuntimeError("service is still running; stop it before rebuilding data")
-    db_path = db_path.expanduser().resolve()
-    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    target_dir = archive_dir.expanduser().resolve() / stamp
-    target_dir.mkdir(parents=True, exist_ok=False)
-    archived_database = None
-    for source in (db_path, Path(str(db_path) + "-wal"), Path(str(db_path) + "-shm"), log_path):
-        if source.exists():
-            destination = target_dir / source.name
-            shutil.move(str(source), destination)
-            if source == db_path:
-                archived_database = destination
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    from sqlalchemy import create_engine
-    from sqlalchemy.orm import sessionmaker
+    db_path = db_path.expanduser().absolute()
+    media_root = media_root.expanduser().absolute()
+    log_path = log_path.expanduser().absolute()
+    archive_base = archive_dir.expanduser().absolute()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S.%fZ")
+    target_archive = archive_base / stamp
+    database_existed = db_path.exists() or db_path.is_symlink()
 
-    from app.backend import models
-    from app.backend.database import Base
-    from app.backend.main import _seed_demo_data, _seed_dimensions
+    from app.backend.services.demo_seed import seed_full_demo
 
-    local_engine = create_engine(
-        f"sqlite:///{db_path}",
-        connect_args={"check_same_thread": False},
+    seeded = seed_full_demo(
+        anchor_date=anchor_date,
+        database_path=db_path,
+        media_root=media_root,
+        log_path=log_path,
+        force=True,
+        archive_directory=target_archive,
     )
-    local_sessions = sessionmaker(autocommit=False, autoflush=False, bind=local_engine)
-    Base.metadata.create_all(bind=local_engine)
-    _seed_dimensions(local_sessions)
-    _seed_demo_data(local_sessions, seed_date=DEMO_SEED_DATE)
-    local_engine.dispose()
-    return RebuildResult(db_path, archived_database, target_dir)
+    archived_database = (
+        target_archive / "database" / db_path.name if database_existed else None
+    )
+    return RebuildResult(
+        database_path=seeded.database_path,
+        media_root=seeded.media_root,
+        log_path=seeded.log_path,
+        archived_database=archived_database,
+        archive_directory=target_archive,
+        record_sha256=seeded.record_sha256,
+        media_sha256=seeded.media_sha256,
+    )
+
+
+def _anchor_date(value: str) -> date:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("anchor date must be YYYY-MM-DD") from None
+    if parsed.isoformat() != value:
+        raise argparse.ArgumentTypeError("anchor date must be YYYY-MM-DD")
+    return parsed
 
 
 def parse_args() -> argparse.Namespace:
     from app.backend.settings import RuntimeSettings
 
+    settings = RuntimeSettings.from_env()
     parser = argparse.ArgumentParser(
-        description="Archive the current demo data and rebuild it with deterministic sample records."
+        description=(
+            "Archive the current demo bundle and rebuild it with deterministic "
+            "full-demo records and media."
+        )
     )
-    parser.add_argument("--database", type=Path, default=RuntimeSettings.from_env().db_path)
+    parser.add_argument("--database", type=Path, default=settings.db_path)
+    parser.add_argument("--media-root", type=Path, default=settings.media_root)
+    parser.add_argument("--log-path", type=Path, default=settings.log_path)
     parser.add_argument("--archive-dir", type=Path, default=Path("data/archive"))
+    parser.add_argument("--anchor-date", type=_anchor_date, default=DEMO_SEED_DATE)
     parser.add_argument("--confirm-rebuild", action="store_true", required=True)
     return parser.parse_args()
 
@@ -94,11 +119,17 @@ def main() -> None:
     args = parse_args()
     result = rebuild_demo_database(
         db_path=args.database,
+        media_root=args.media_root,
         archive_dir=args.archive_dir,
-        log_path=Path("logs/app.log"),
+        log_path=args.log_path,
+        anchor_date=args.anchor_date,
     )
     print(f"New database: {result.database_path}")
+    print(f"New media root: {result.media_root}")
+    print(f"New log: {result.log_path}")
     print(f"Archive directory: {result.archive_directory}")
+    print(f"Record SHA-256: {result.record_sha256}")
+    print(f"Media SHA-256: {result.media_sha256}")
 
 
 if __name__ == "__main__":

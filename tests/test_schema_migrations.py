@@ -867,7 +867,7 @@ def test_avatar_media_orm_is_compatible_with_migrated_schema(tmp_path: Path):
         engine.dispose()
 
 
-def test_app_lifespan_migrates_before_seed_and_worker_start(monkeypatch):
+def test_app_lifespan_migrates_and_seeds_only_dimensions_before_worker_start(monkeypatch):
     from app.backend import main as main_module
 
     events: list[str] = []
@@ -904,12 +904,6 @@ def test_app_lifespan_migrates_before_seed_and_worker_start(monkeypatch):
         "_seed_dimensions",
         lambda: events.append("seed_dimensions"),
     )
-    monkeypatch.setattr(
-        main_module,
-        "_seed_demo_data",
-        lambda: events.append("seed_demo"),
-    )
-
     async def exercise_lifespan():
         async with main_module.lifespan(test_app):
             events.append("serving")
@@ -919,7 +913,6 @@ def test_app_lifespan_migrates_before_seed_and_worker_start(monkeypatch):
     assert events == [
         "migrate",
         "seed_dimensions",
-        "seed_demo",
         "worker_construct",
         "worker_start",
         "serving",

@@ -3,7 +3,6 @@ from contextlib import asynccontextmanager
 import hashlib
 import logging
 import time
-from datetime import date, timedelta
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.responses import JSONResponse
@@ -15,7 +14,6 @@ from . import ai_engine, auth, models, schemas
 from .analysis_worker import AnalysisWorker
 from .api_errors import APIError, install_api_error_handling
 from .auth import require_teacher_session
-from .business_time import BusinessClock
 from .database import Base, DATABASE_PATH, DB_MODE, SETTINGS, SessionLocal, engine, get_db
 from .http_boundary import install_same_origin_boundary
 from .routes.conversations import router as conversations_router
@@ -28,7 +26,6 @@ from .schema_migrations import ensure_database_schema
 from .versioning import VERSION_FILE, load_runtime_version
 
 RUNTIME_VERSION = load_runtime_version()
-BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
 MEDIA_ROOT = SETTINGS.media_root
 TTS_CACHE_DIR = SETTINGS.tts_cache_path
 
@@ -54,8 +51,6 @@ async def lifespan(app: FastAPI):
     else:
         Base.metadata.create_all(bind=engine)
     _seed_dimensions()
-    if DB_MODE == "app":
-        _seed_demo_data()
     factory = getattr(app.state, "analysis_worker_factory", None)
     worker = (
         factory()
@@ -113,54 +108,6 @@ def _seed_dimensions(session_factory=SessionLocal) -> None:
         for key, name, description in defaults:
             if not db.scalar(select(models.AssessmentDimension).where(models.AssessmentDimension.key == key)):
                 db.add(models.AssessmentDimension(key=key, name=name, description=description))
-        db.commit()
-    finally:
-        db.close()
-
-
-def _seed_demo_data(session_factory=SessionLocal, seed_date: date | None = None) -> None:
-    """首次启动且数据库空时，插入示例幼儿/小鸭/排班，便于开箱演示。"""
-    db = session_factory()
-    try:
-        if db.scalar(select(models.Child)) or db.scalar(select(models.Duck)):
-            return  # 已有数据则不重复插入
-        children = [
-            ("王小明", "小明"),
-            ("李小红", "小红"),
-            ("张小华", "小华"),
-            ("赵小乐", "小乐"),
-            ("陈小宝", "小宝"),
-        ]
-        ducks = [
-            ("小黄", "活泼健康，喜欢在水中嬉戏"),
-            ("小白", "性格温和，喜欢吃菜叶"),
-            ("小橙", "好奇心强，喜欢探索"),
-        ]
-        for name, nickname in children:
-            db.add(models.Child(name=name, nickname=nickname, active=True))
-        for name, status in ducks:
-            db.add(models.Duck(name=name, status=status))
-        db.commit()
-
-        today = seed_date or BUSINESS_CLOCK.business_today()
-        child_ids = [
-            child.id
-            for child in db.scalars(select(models.Child).order_by(models.Child.id)).all()
-        ]
-        cycle = f"示例-{today.isocalendar().week}周"
-        roster_date = today
-        index = 0
-        for _day in range(7):
-            while roster_date.weekday() >= 5:
-                roster_date += timedelta(days=1)
-            for offset in range(2):
-                db.add(models.DutyRoster(
-                    cycle=cycle,
-                    date=roster_date.isoformat(),
-                    child_id=child_ids[(index + offset) % len(child_ids)],
-                ))
-            index += 2
-            roster_date += timedelta(days=1)
         db.commit()
     finally:
         db.close()

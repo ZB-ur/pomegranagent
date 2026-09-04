@@ -1,0 +1,77 @@
+{
+  "format": "pomegranagent-full-demo-v1",
+  "future_lease_at": "9999-12-31T23:59:59.999999",
+  "dimensions": [
+    {"id": 1, "key": "language", "name": "语言表达能力", "description": "能清晰、连贯地表达自己的观察与感受"},
+    {"id": 2, "key": "empathy", "name": "同理心", "description": "能体会并关心小鸭与同伴的感受"},
+    {"id": 3, "key": "diligence", "name": "勤劳启蒙", "description": "积极参与饲养劳动并承担责任"}
+  ],
+  "children": [
+    {"id": 1, "name": "演示幼儿一号", "nickname": "小禾", "active": true, "avatar_id": "70000000-0000-4000-8000-000000000001"},
+    {"id": 2, "name": "演示幼儿二号", "nickname": "小满", "active": true, "avatar_id": "70000000-0000-4000-8000-000000000002"},
+    {"id": 3, "name": "演示幼儿三号", "nickname": "星星", "active": true, "avatar_id": "70000000-0000-4000-8000-000000000003"},
+    {"id": 4, "name": "演示幼儿四号", "nickname": "朵朵", "active": true, "avatar_id": "70000000-0000-4000-8000-000000000004"},
+    {"id": 5, "name": "演示幼儿五号", "nickname": "乐乐", "active": true, "avatar_id": "70000000-0000-4000-8000-000000000005"},
+    {"id": 6, "name": "演示幼儿六号", "nickname": "团团", "active": true, "avatar_id": "70000000-0000-4000-8000-000000000006"},
+    {"id": 7, "name": "演示幼儿七号", "nickname": "安安", "active": true, "avatar_id": "70000000-0000-4000-8000-000000000007"},
+    {"id": 8, "name": "演示幼儿八号", "nickname": "已离园", "active": false, "avatar_id": null}
+  ],
+  "ducks": [
+    {"id": 1, "name": "演示小鸭晨光", "status": "活泼健康", "note": "喜欢青菜与浅水活动", "active": true, "avatar_id": "70000000-0000-4000-8000-000000000101"},
+    {"id": 2, "name": "演示小鸭云朵", "status": "安静亲人", "note": "喜欢跟随值日幼儿", "active": true, "avatar_id": "70000000-0000-4000-8000-000000000102"},
+    {"id": 3, "name": "演示小鸭晚霞", "status": "已转园", "note": "保留历史记录", "active": false, "avatar_id": null}
+  ],
+  "avatars": [
+    {"id": "70000000-0000-4000-8000-000000000001", "owner_type": "child", "owner_id": 1, "primary": [245, 166, 35, 255], "accent": [255, 245, 214, 255]},
+    {"id": "70000000-0000-4000-8000-000000000002", "owner_type": "child", "owner_id": 2, "primary": [78, 166, 133, 255], "accent": [224, 249, 240, 255]},
+    {"id": "70000000-0000-4000-8000-000000000003", "owner_type": "child", "owner_id": 3, "primary": [91, 141, 239, 255], "accent": [226, 237, 255, 255]},
+    {"id": "70000000-0000-4000-8000-000000000004", "owner_type": "child", "owner_id": 4, "primary": [218, 105, 143, 255], "accent": [255, 228, 238, 255]},
+    {"id": "70000000-0000-4000-8000-000000000005", "owner_type": "child", "owner_id": 5, "primary": [146, 105, 205, 255], "accent": [242, 232, 255, 255]},
+    {"id": "70000000-0000-4000-8000-000000000006", "owner_type": "child", "owner_id": 6, "primary": [46, 153, 184, 255], "accent": [221, 247, 253, 255]},
+    {"id": "70000000-0000-4000-8000-000000000007", "owner_type": "child", "owner_id": 7, "primary": [111, 163, 65, 255], "accent": [235, 249, 218, 255]},
+    {"id": "70000000-0000-4000-8000-000000000101", "owner_type": "duck", "owner_id": 1, "primary": [250, 197, 58, 255], "accent": [255, 247, 195, 255]},
+    {"id": "70000000-0000-4000-8000-000000000102", "owner_type": "duck", "owner_id": 2, "primary": [241, 241, 232, 255], "accent": [244, 166, 45, 255]}
+  ],
+  "rosters": [
+    {"id": 1, "day_offset": -7, "child_id": 1},
+    {"id": 2, "day_offset": -7, "child_id": 2},
+    {"id": 3, "day_offset": -1, "child_id": 3},
+    {"id": 4, "day_offset": -1, "child_id": 4},
+    {"id": 5, "day_offset": 0, "child_id": 5},
+    {"id": 6, "day_offset": 0, "child_id": 6},
+    {"id": 7, "day_offset": 1, "child_id": 7},
+    {"id": 8, "day_offset": 1, "child_id": 1},
+    {"id": 9, "day_offset": 7, "child_id": 2},
+    {"id": 10, "day_offset": 7, "child_id": 3}
+  ],
+  "conversations": [
+    {"id": 1, "child_id": 2, "day_offset": -30, "started_at": "09:10:00", "ended_at": "09:30:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "pending", "score_base": 3, "child_text": "今天我完成了 50% 的喂食记录。", "diary_text": "你观察到演示小鸭晨光有什么变化？"},
+    {"id": 2, "child_id": 3, "day_offset": -30, "started_at": "09:12:00", "ended_at": "09:30:00", "end_reason": "manual", "analysis_status": "succeeded", "review_status": "pending", "score_base": 3, "child_text": "我把记录标成 duck_demo 再告诉老师。", "diary_text": "这个名字帮助你记住了什么？"},
+    {"id": 3, "child_id": 4, "day_offset": -30, "started_at": "09:15:00", "ended_at": "09:30:00", "end_reason": "max_rounds", "analysis_status": "succeeded", "review_status": "pending", "score_base": 3, "child_text": "我在卡片上画了 C:\\duck\\water。", "diary_text": "你画出了换水的步骤。"},
+    {"id": 4, "child_id": 5, "day_offset": -10, "started_at": "08:10:00", "ended_at": "08:24:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "pending", "score_base": 3, "child_text": "我给小鸭添了干净的水。", "diary_text": "你做得很细心。"},
+    {"id": 5, "child_id": 6, "day_offset": -8, "started_at": "08:20:00", "ended_at": "08:35:00", "end_reason": "manual", "analysis_status": "succeeded", "review_status": "pending", "score_base": 4, "child_text": "小鸭吃完后安静地休息。", "diary_text": "你留意到了它的状态。"},
+    {"id": 6, "child_id": 7, "day_offset": -6, "started_at": "08:30:00", "ended_at": "08:45:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "draft", "score_base": 3, "child_text": "我清理了围栏边的稻草。", "diary_text": "清理后环境有什么不同？"},
+    {"id": 7, "child_id": 2, "day_offset": -5, "started_at": "08:40:00", "ended_at": "08:55:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "draft", "score_base": 4, "child_text": "我和同伴一起数了两只小鸭。", "diary_text": "合作让观察更完整。"},
+    {"id": 8, "child_id": 3, "day_offset": -4, "started_at": "08:50:00", "ended_at": "09:05:00", "end_reason": "manual", "analysis_status": "succeeded", "review_status": "draft", "score_base": 3, "child_text": "演示小鸭云朵今天走得很快。", "diary_text": "你能描述它走路的样子吗？"},
+    {"id": 9, "child_id": 4, "day_offset": -3, "started_at": "09:00:00", "ended_at": "09:15:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "draft", "score_base": 4, "child_text": "周日我看到小鸭在树荫下休息。", "diary_text": "树荫让它感觉更舒服。"},
+    {"id": 10, "child_id": 1, "day_offset": -21, "started_at": "09:10:00", "ended_at": "09:25:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "confirmed", "score_base": 2, "child_text": "我第一次学着把饲料分成两份。", "diary_text": "这是认真照顾的开始。"},
+    {"id": 11, "child_id": 1, "day_offset": -14, "started_at": "09:20:00", "ended_at": "09:35:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "confirmed", "score_base": 3, "child_text": "我记住了先换水再放饲料。", "diary_text": "你的步骤越来越清楚。"},
+    {"id": 12, "child_id": 1, "day_offset": -7, "started_at": "09:30:00", "ended_at": "09:45:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "confirmed", "score_base": 4, "child_text": "我发现小鸭口渴时会靠近水盆。", "diary_text": "你已经能根据动作判断需要。"},
+    {"id": 13, "child_id": 1, "day_offset": 0, "started_at": "09:40:00", "ended_at": "09:55:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "confirmed", "score_base": 5, "child_text": "我和星河纸船小组一起照顾小鸭。", "diary_text": "你能合作、观察并完整表达。"},
+    {"id": 14, "child_id": 2, "day_offset": -1, "started_at": "09:50:00", "ended_at": "10:05:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "confirmed", "score_base": 4, "child_text": "我提醒同伴轻轻放下水盆。", "diary_text": "你关心小鸭也关心同伴。"},
+    {"id": 15, "child_id": 3, "day_offset": 1, "started_at": "10:00:00", "ended_at": "10:15:00", "end_reason": "manual", "analysis_status": "succeeded", "review_status": "confirmed", "score_base": 4, "child_text": "我把今天的观察讲给大家听。", "diary_text": "大家听懂了你的发现。"},
+    {"id": 16, "child_id": 4, "day_offset": 4, "started_at": "10:10:00", "ended_at": "10:25:00", "end_reason": "complete", "analysis_status": "succeeded", "review_status": "confirmed", "score_base": 5, "child_text": "我主动检查了饲料和清水。", "diary_text": "你已经会独立完成值日。"},
+    {"id": 17, "child_id": 5, "day_offset": -2, "started_at": "10:20:00", "ended_at": "10:35:00", "end_reason": "complete", "analysis_status": "pending", "review_status": null, "child_text": "我刚记录好今天的喂食。", "diary_text": "记录已经保存，等待分析。"},
+    {"id": 18, "child_id": 6, "day_offset": 2, "started_at": "10:30:00", "ended_at": "10:45:00", "end_reason": "manual", "analysis_status": "pending", "review_status": null, "child_text": "小鸭在水里拍了拍翅膀。", "diary_text": "这个观察正在等待分析。"},
+    {"id": 19, "child_id": 7, "day_offset": 3, "started_at": "10:40:00", "ended_at": "10:55:00", "end_reason": "complete", "analysis_status": "pending", "review_status": null, "child_text": "我整理了值日工具。", "diary_text": "这条记录稍后会被分析。"},
+    {"id": 20, "child_id": 2, "day_offset": 5, "started_at": "10:50:00", "ended_at": "11:05:00", "end_reason": "max_rounds", "analysis_status": "pending", "review_status": null, "child_text": "新一周我先检查了水盆。", "diary_text": "这条边界记录等待分析。"},
+    {"id": 21, "child_id": 3, "day_offset": -12, "started_at": "11:00:00", "ended_at": "11:15:00", "end_reason": "complete", "analysis_status": "processing", "review_status": null, "child_text": "我观察到羽毛变得干净。", "diary_text": "分析任务正在处理。"},
+    {"id": 22, "child_id": 4, "day_offset": -11, "started_at": "11:10:00", "ended_at": "11:25:00", "end_reason": "manual", "analysis_status": "processing", "review_status": null, "child_text": "我换掉了湿的稻草。", "diary_text": "分析任务正在处理。"},
+    {"id": 23, "child_id": 5, "day_offset": -2, "started_at": "11:20:00", "ended_at": "11:35:00", "end_reason": "complete", "analysis_status": "processing", "review_status": null, "child_text": "我给两只小鸭平均分了食物。", "diary_text": "分析任务正在处理。"},
+    {"id": 24, "child_id": 6, "day_offset": 2, "started_at": "11:30:00", "ended_at": "11:45:00", "end_reason": "complete", "analysis_status": "processing", "review_status": null, "child_text": "我记下了小鸭喝水的次数。", "diary_text": "分析任务正在处理。"},
+    {"id": 25, "child_id": 7, "day_offset": -2, "started_at": "13:00:00", "ended_at": "13:15:00", "end_reason": "complete", "analysis_status": "failed", "review_status": null, "child_text": "我今天照顾了演示小鸭晨光。", "diary_text": "这条分析可以由教师重试。"},
+    {"id": 26, "child_id": 2, "day_offset": -1, "started_at": "13:10:00", "ended_at": "13:25:00", "end_reason": "manual", "analysis_status": "failed", "review_status": null, "child_text": "我完成了换水。", "diary_text": "这条分析可以由教师重试。"},
+    {"id": 27, "child_id": 3, "day_offset": 1, "started_at": "13:20:00", "ended_at": "13:35:00", "end_reason": "complete", "analysis_status": "failed", "review_status": null, "child_text": "小鸭吃了新鲜青菜。", "diary_text": "这条分析可以由教师重试。"},
+    {"id": 28, "child_id": 4, "day_offset": 3, "started_at": "13:30:00", "ended_at": "13:45:00", "end_reason": "max_rounds", "analysis_status": "failed", "review_status": null, "child_text": "我和同伴清理了围栏。", "diary_text": "这条分析可以由教师重试。"}
+  ]
+}

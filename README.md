@@ -49,20 +49,42 @@ run.bat                   # 双击，或 uvicorn app.backend.main:app --host 127
 - **幼儿端**：http://localhost:8000/
 - **教师端**：http://localhost:8000/teacher.html
 
-> 首次启动自动插入示例数据（5 幼儿 / 3 小鸭 / 排班），便于开箱演示。
+> 普通启动只幂等创建 3 个参考评估维度，不会创建幼儿、小鸭或演示记录。
+> 完整演示数据必须通过下方显式 `full-demo` CLI 写入。
 >
 > 服务仅监听本机回环地址 `127.0.0.1`；刻意不支持局域网或公网访问。
 
-### 重新创建示例数据
+### 创建或重新创建完整演示数据
 
-需要清理演示数据时，先停止服务。第一条命令必须报告 connection refused，确认本机服务已停止后再继续。脚本会打印新数据库路径和带时间戳的归档目录。
+所有目标路径和锚点日期都必须显式传给首次 seed。脚本会离线生成 8 个合成幼儿、
+3 只合成小鸭、排班、28 个历史会话、完整分析/审阅投影与本地头像；不会调用 AI/TTS，
+也不会设置教师 PIN。目标已有任一数据库/WAL/SHM、媒体或日志资源时，必须改用
+`--force` 并提供一个尚不存在且不重叠的归档目录。
+
+```bash
+python scripts/seed_demo_database.py full-demo \
+  --anchor-date 2026-09-02 \
+  --database data/duck_diary.db \
+  --media-root data/media \
+  --log-path logs/app.log
+```
+
+需要重新创建现有演示 bundle 时，先停止服务。第一条命令必须报告 connection refused，
+确认本机服务已停止后再继续。兼容重建脚本会先完整 staging 和校验新 bundle，再把旧
+数据库及 sidecars、媒体和日志归档到带 UTC 时间戳的子目录；安装失败会恢复旧 bundle。
 
 ```bash
 # 1. Stop run.sh/run.bat first. This must fail to connect.
 curl --fail http://127.0.0.1:8000/api/health
 
-# 2. Archive the old demo database/log and create a clean deterministic demo database.
-python scripts/rebuild_demo_database.py --confirm-rebuild
+# 2. Archive the whole old bundle and install a deterministic schema-3 full demo.
+python scripts/rebuild_demo_database.py \
+  --confirm-rebuild \
+  --anchor-date 2026-09-02 \
+  --database data/duck_diary.db \
+  --media-root data/media \
+  --log-path logs/app.log \
+  --archive-dir data/archive
 
 # 3. Start the loopback-only service.
 ./run.sh

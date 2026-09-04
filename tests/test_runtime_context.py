@@ -157,22 +157,11 @@ print(json.dumps({
     }
 
 
-def test_demo_seed_defaults_to_one_captured_business_date(monkeypatch) -> None:
-    class SeedClock:
-        calls = 0
-
-        def business_today(self) -> date:
-            self.calls += 1
-            return date(2030, 1, 2)
-
-    clock = SeedClock()
-    monkeypatch.setattr(main_module, "BUSINESS_CLOCK", clock)
-
-    main_module._seed_demo_data(session_factory=SessionLocal)
-
+def test_ordinary_lifespan_leaves_people_and_demo_graph_empty(client) -> None:
+    del client
     with SessionLocal() as db:
-        roster_dates = db.scalars(
-            select(models.DutyRoster.date).order_by(models.DutyRoster.date)
-        ).all()
-    assert clock.calls == 1
-    assert roster_dates[0] == "2030-01-02"
+        assert db.scalars(select(models.AssessmentDimension)).all()
+        assert db.scalars(select(models.Child)).all() == []
+        assert db.scalars(select(models.Duck)).all() == []
+        assert db.scalars(select(models.DutyRoster)).all() == []
+        assert db.scalars(select(models.Conversation)).all() == []

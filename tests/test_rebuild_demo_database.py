@@ -2,7 +2,6 @@ import errno
 import sys
 import urllib.error
 import urllib.request
-from datetime import date
 from pathlib import Path
 
 import pytest
@@ -55,6 +54,7 @@ def test_rebuild_archives_existing_database_before_replacing_it(tmp_path: Path):
     db_path.write_bytes(b"old-demo-database")
     result = rebuild_demo_database(
         db_path=db_path,
+        media_root=tmp_path / "media",
         archive_dir=tmp_path / "archive",
         log_path=tmp_path / "app.log",
         service_is_running=lambda: False,
@@ -68,58 +68,55 @@ def test_rebuild_refuses_while_service_is_reachable(tmp_path: Path):
     with pytest.raises(RuntimeError, match="service is still running"):
         rebuild_demo_database(
             db_path=tmp_path / "duck_diary.db",
+            media_root=tmp_path / "media",
             archive_dir=tmp_path / "archive",
             log_path=tmp_path / "app.log",
             service_is_running=lambda: True,
         )
 
 
-def test_rebuild_creates_frozen_deterministic_demo_data(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_rebuild_creates_frozen_deterministic_demo_data(tmp_path: Path):
     from sqlalchemy import create_engine, text
-    from app.backend import main as backend_main
-
-    class UnfrozenDate(date):
-        @classmethod
-        def today(cls) -> "UnfrozenDate":
-            return cls(2030, 1, 1)
-
-    monkeypatch.setattr(backend_main, "date", UnfrozenDate)
 
     db_path = tmp_path / "rebuilt.db"
     rebuild_demo_database(
         db_path=db_path,
+        media_root=tmp_path / "media",
         archive_dir=tmp_path / "archive",
         log_path=tmp_path / "missing.log",
         service_is_running=lambda: False,
     )
     engine = create_engine(f"sqlite:///{db_path}")
     with engine.connect() as connection:
-        assert connection.scalar(text("select count(*) from children")) == 5
+        assert connection.scalar(text("select count(*) from children")) == 8
         assert connection.scalar(text("select count(*) from ducks")) == 3
         assert connection.scalar(text("select count(*) from assessment_dimensions")) == 3
-        assert connection.scalar(text("select count(*) from duty_rosters")) == 14
-        assert connection.scalars(text("select distinct cycle from duty_rosters")).all() == ["示例-35周"]
+        assert connection.scalar(text("select count(*) from avatar_media")) == 9
+        assert connection.scalar(text("select count(*) from duty_rosters")) == 10
+        assert connection.scalar(text("select count(*) from conversations")) == 28
         assert connection.scalars(
             text("select distinct date from duty_rosters order by date")
         ).all() == [
+            "2026-08-17",
+            "2026-08-23",
             "2026-08-24",
             "2026-08-25",
-            "2026-08-26",
-            "2026-08-27",
-            "2026-08-28",
             "2026-08-31",
-            "2026-09-01",
         ]
 
 
 def test_parse_args_uses_runtime_configured_database(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     configured_db = tmp_path / "configured.db"
+    configured_media = tmp_path / "configured-media"
+    configured_log = tmp_path / "configured.log"
     monkeypatch.setenv("APP_DB_PATH", str(configured_db))
+    monkeypatch.setenv("APP_MEDIA_ROOT", str(configured_media))
+    monkeypatch.setenv("APP_LOG_PATH", str(configured_log))
     monkeypatch.setattr(sys, "argv", ["rebuild_demo_database.py", "--confirm-rebuild"])
 
     assert parse_args().database == configured_db.resolve()
+    assert parse_args().media_root == configured_media.resolve()
+    assert parse_args().log_path == configured_log.resolve()
 
 
 def test_parse_args_preserves_explicit_database_override(
@@ -127,11 +124,24 @@ def test_parse_args_preserves_explicit_database_override(
 ):
     configured_db = tmp_path / "configured.db"
     overridden_db = tmp_path / "override.db"
+    overridden_media = tmp_path / "override-media"
+    overridden_log = tmp_path / "override.log"
     monkeypatch.setenv("APP_DB_PATH", str(configured_db))
     monkeypatch.setattr(
         sys,
         "argv",
-        ["rebuild_demo_database.py", "--confirm-rebuild", "--database", str(overridden_db)],
+        [
+            "rebuild_demo_database.py",
+            "--confirm-rebuild",
+            "--database",
+            str(overridden_db),
+            "--media-root",
+            str(overridden_media),
+            "--log-path",
+            str(overridden_log),
+        ],
     )
 
     assert parse_args().database == overridden_db
+    assert parse_args().media_root == overridden_media
+    assert parse_args().log_path == overridden_log
