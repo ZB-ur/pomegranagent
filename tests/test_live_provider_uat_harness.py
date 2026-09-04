@@ -26,6 +26,56 @@ import pytest
 
 HEAD = "a" * 40
 PYTHON = "/Users/lddmay/AiCoding/pomegranagent/.venv/bin/python"
+STEP_PROVENANCE_KEYS = {
+    "teacher_credential_setup_login": set(),
+    "child_duck_avatar_management": {
+        "child_avatar_id",
+        "duck_avatar_id",
+        "live_child_id",
+        "live_duck_id",
+    },
+    "invalid_avatar_rejection": set(),
+    "monthly_roster_conflict_retry": {
+        "monthly_pairs",
+        "monthly_roster_request_ids",
+    },
+    "child_conversation_real_provider_tts": {
+        "chat_request_ids",
+        "live_conversation_id",
+        "local_terminal_request_id",
+        "provider_chat_request_ids",
+        "tts_evidence",
+    },
+    "conversation_completion_analysis": {"analysis_job_id"},
+    "teacher_today_queues": set(),
+    "review_edit_confirm": {"assessment_id"},
+    "weekly_metrics_growth": {
+        "growth_after",
+        "growth_before",
+        "weekly_metrics_after",
+        "weekly_metrics_before",
+        "weekly_week_start",
+    },
+    "advanced_search_pagination_deep_link": {
+        "search_cursor",
+        "search_deep_link",
+        "search_page_one_ids",
+        "search_page_two_ids",
+        "search_request",
+        "search_result_conversation_id",
+    },
+    "search_empty_state": set(),
+    "logout_login_retained_state": set(),
+}
+
+
+def _native_audio_playback():
+    return {
+        "error": None,
+        "events": ["playing", "ended"],
+        "play_promise": "fulfilled",
+        "speech_synthesis_fallback": False,
+    }
 
 
 def _module():
@@ -1316,6 +1366,7 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
                     text.strip()[:500].encode("utf-8")
                 ).hexdigest(),
                 "kind": "opening_greeting" if index == 0 else "diary_reply",
+                "playback": _native_audio_playback(),
                 "source_message_id": None if index == 0 else 400 + index * 2,
                 "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "truncated": len(text.strip()) > 500,
@@ -1349,6 +1400,10 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
                 "request_id": "44444444-4444-4444-8444-444444444444",
                 "status": 200,
             },
+        ],
+        "monthly_roster_request_ids": [
+            "33333333-3333-4333-8333-333333333333",
+            "44444444-4444-4444-8444-444444444444",
         ],
         "provider_chat_request_ids": request_ids[:2],
         "tts_evidence": tts_evidence,
@@ -1450,6 +1505,17 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
                 provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
                 entity_ids=entity_ids,
             )
+    fallback_entities = json.loads(json.dumps(entity_ids))
+    fallback_entities["tts_evidence"][0]["playback"][
+        "speech_synthesis_fallback"
+    ] = True
+    with pytest.raises(module.HarnessSafetyError, match="provider telemetry TTS"):
+        module._validate_provider_completion(
+            events,
+            plan=plan,
+            provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
+            entity_ids=fallback_entities,
+        )
     (plan.root / tts_evidence[-1]["cache_relative_path"]).unlink()
     with pytest.raises(module.HarnessSafetyError, match="provider telemetry"):
         module._validate_provider_completion(
@@ -1497,6 +1563,7 @@ def test_provider_completion_accepts_early_complete_and_requires_cache_hit_endpo
                     effective.encode("utf-8")
                 ).hexdigest(),
                 "kind": "opening_greeting" if index == 0 else "diary_reply",
+                "playback": _native_audio_playback(),
                 "source_message_id": None if index == 0 else 400 + index * 2,
                 "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
                 "truncated": index > 0,
@@ -1532,6 +1599,7 @@ def test_provider_completion_accepts_early_complete_and_requires_cache_hit_endpo
         "live_conversation_id": 301,
         "local_terminal_request_id": None,
         "monthly_roster_attempts": roster,
+        "monthly_roster_request_ids": [item["request_id"] for item in roster],
         "provider_chat_request_ids": request_ids,
         "tts_evidence": evidence,
     }
@@ -2934,7 +3002,11 @@ def test_secret_scan_uses_actual_values_and_patterns_without_echoing_matches(tmp
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
     safe_file = plan.root / "safe.json"
     safe_file.write_text('{"status":"ok"}\n', encoding="utf-8")
-    module.scan_retained_artifacts(plan.root, actual_secrets=("sk-actual-secret-123456", "483921"))
+    module.scan_retained_artifacts(
+        plan.root,
+        provider_secrets=("sk-actual-secret-123456",),
+        runtime_secrets=("483921",),
+    )
 
     cases = (
         b"sk-actual-secret-123456",
@@ -2952,11 +3024,50 @@ def test_secret_scan_uses_actual_values_and_patterns_without_echoing_matches(tmp
         with pytest.raises(module.HarnessSafetyError, match="secret scan failed") as caught:
             module.scan_retained_artifacts(
                 plan.root,
-                actual_secrets=("sk-actual-secret-123456", "483921"),
+                provider_secrets=("sk-actual-secret-123456",),
+                runtime_secrets=("483921",),
             )
         assert "actual-secret" not in str(caught.value)
         assert "483921" not in str(caught.value)
         candidate.unlink()
+
+
+def test_secret_scan_scopes_teacher_pin_to_runtime_generated_evidence(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    provider_key = "sk-provider-scope-secret-123456"
+    teacher_pin = "483921"
+    reviewed_source = plan.root / "reviewed-source"
+    reviewed_source.mkdir(mode=0o700)
+    reviewed_file = reviewed_source / "existing-literal.py"
+    reviewed_file.write_text(f"EXAMPLE_CODE = {teacher_pin}\n", encoding="utf-8")
+
+    module.scan_retained_artifacts(
+        plan.root,
+        provider_secrets=(provider_key,),
+        runtime_secrets=(teacher_pin,),
+    )
+
+    reviewed_file.write_text(f"PROVIDER = {provider_key!r}\n", encoding="utf-8")
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=(provider_key,),
+            runtime_secrets=(teacher_pin,),
+        )
+
+    reviewed_file.write_text(f"EXAMPLE_CODE = {teacher_pin}\n", encoding="utf-8")
+    runtime_file = plan.root / "journey.json"
+    runtime_file.write_text(
+        json.dumps({"accidental_pin": teacher_pin}) + "\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=(provider_key,),
+            runtime_secrets=(teacher_pin,),
+        )
 
 
 def _png(width: int, height: int) -> bytes:
@@ -2993,9 +3104,46 @@ def _png_with_ztxt(width: int, height: int, value: str) -> bytes:
 
 
 def _controller_payload(module, plan):
+    entities = {
+        "analysis_job_id": 501,
+        "assessment_id": 601,
+        "child_avatar_id": "11111111-1111-4111-8111-111111111111",
+        "chat_request_ids": ["55555555-5555-4555-8555-555555555551"],
+        "duck_avatar_id": "22222222-2222-4222-8222-222222222222",
+        "growth_after": {},
+        "growth_before": {},
+        "live_child_id": 101,
+        "live_duck_id": 201,
+        "live_conversation_id": 301,
+        "local_terminal_request_id": None,
+        "monthly_pairs": {
+            "2026-09-03": [10, 101],
+            "2026-09-04": [10, 101],
+        },
+        "monthly_roster_request_ids": [
+            "33333333-3333-4333-8333-333333333331",
+            "33333333-3333-4333-8333-333333333332",
+        ],
+        "provider_chat_request_ids": [
+            "55555555-5555-4555-8555-555555555551"
+        ],
+        "search_cursor": "cursor",
+        "search_deep_link": "#review?conversation_id=301",
+        "search_page_one_ids": [301, 30, 29, 28, 27],
+        "search_page_two_ids": [26],
+        "search_request": {"keyword": "我"},
+        "search_result_conversation_id": 301,
+        "tts_evidence": [],
+        "weekly_metrics_after": {},
+        "weekly_metrics_before": {},
+        "weekly_week_start": "2026-08-31",
+    }
     journey = [
         {
-            "entity_ids": {},
+            "entity_ids": {
+                key: entities[key]
+                for key in STEP_PROVENANCE_KEYS[step_id]
+            },
             "status": "PASS",
             "step_id": step_id,
             "visible_assertions": ["approved visible state"],
@@ -3041,6 +3189,101 @@ def _controller_payload(module, plan):
         "screenshots": screenshots,
         "source_head": HEAD,
     }
+
+
+def _set_controller_entities(payload, entity_ids):
+    controller_entities = {
+        **entity_ids,
+        "monthly_roster_request_ids": [
+            attempt["request_id"] for attempt in entity_ids["monthly_roster_attempts"]
+        ],
+    }
+    controller_entities.pop("monthly_roster_attempts")
+    for step in payload["journey"]:
+        step["entity_ids"] = {
+            key: controller_entities[key]
+            for key in STEP_PROVENANCE_KEYS[step["step_id"]]
+        }
+    return payload
+
+
+def test_controller_evidence_rejects_misplaced_or_private_step_provenance(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.screenshots.mkdir(mode=0o700)
+    original = _controller_payload(module, plan)
+    by_step = {step["step_id"]: step for step in original["journey"]}
+
+    misplaced = json.loads(json.dumps(original))
+    misplaced_steps = {step["step_id"]: step for step in misplaced["journey"]}
+    live_child_id = misplaced_steps["child_duck_avatar_management"][
+        "entity_ids"
+    ].pop("live_child_id")
+    misplaced_steps["invalid_avatar_rejection"]["entity_ids"][
+        "live_child_id"
+    ] = live_child_id
+
+    private = json.loads(json.dumps(original))
+    private_steps = {step["step_id"]: step for step in private["journey"]}
+    private_steps["monthly_roster_conflict_retry"]["entity_ids"][
+        "monthly_roster_attempts"
+    ] = []
+
+    assert set(by_step["monthly_roster_conflict_retry"]["entity_ids"]) == {
+        "monthly_pairs",
+        "monthly_roster_request_ids",
+    }
+    for invalid in (misplaced, private):
+        module.atomic_write_json(plan.controller_evidence, invalid, pinned_plan=plan)
+        with pytest.raises(module.HarnessSafetyError, match="journey"):
+            module.validate_controller_evidence(plan)
+
+
+def test_private_roster_telemetry_is_injected_from_visible_request_ids(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.screenshots.mkdir(mode=0o700)
+    payload = _controller_payload(module, plan)
+    module.atomic_write_json(plan.controller_evidence, payload, pinned_plan=plan)
+    controller = module.validate_controller_evidence(plan)
+    controller_entities = module._collect_entity_ids(controller)
+    request_ids = controller_entities["monthly_roster_request_ids"]
+    events = (
+        {
+            "canonical_body_sha256": "a" * 64,
+            "error_code": "ROSTER_DATE_CONFLICT",
+            "kind": "roster_attempt",
+            "method": "POST",
+            "order": 1,
+            "path": "/api/roster/month",
+            "replace_existing": False,
+            "request_id": request_ids[0],
+            "status": 409,
+        },
+        {
+            "canonical_body_sha256": "a" * 64,
+            "error_code": None,
+            "kind": "roster_attempt",
+            "method": "POST",
+            "order": 2,
+            "path": "/api/roster/month",
+            "replace_existing": True,
+            "request_id": request_ids[1],
+            "status": 200,
+        },
+    )
+
+    enriched = module._inject_private_roster_provenance(events, controller_entities)
+
+    assert "monthly_roster_attempts" not in controller_entities
+    assert enriched["monthly_roster_attempts"] == list(events)
+    assert enriched["monthly_roster_request_ids"] == request_ids
+    for invalid in (
+        ({**events[0], "request_id": "99999999-9999-4999-8999-999999999999"}, events[1]),
+        (*events, events[1]),
+    ):
+        with pytest.raises(module.HarnessSafetyError, match="roster evidence"):
+            module._inject_private_roster_provenance(tuple(invalid), controller_entities)
 
 
 def test_controller_evidence_binds_four_viewports_dimensions_and_screenshot_hashes(tmp_path):
@@ -3180,7 +3423,8 @@ def test_compressed_png_metadata_secret_is_rejected_without_echo(tmp_path):
     with pytest.raises(module.HarnessSafetyError, match="secret scan") as scan_error:
         module.scan_retained_artifacts(
             plan.root,
-            actual_secrets=(secret,),
+            provider_secrets=(secret,),
+            runtime_secrets=(),
             pinned_plan=plan,
         )
     assert secret not in str(scan_error.value)
@@ -3244,30 +3488,74 @@ def _create_seed_provenance_database(plan):
                 (4, "disabled", "Disabled", 0),
             ),
         )
-        connection.execute(
-            "INSERT INTO conversations VALUES (30, 10, '2026-09-01', '2026-09-01T02:00:00.000000', 'ended', 'max_rounds', 41)"
+        seed_search_rows = (
+            (25, "2026-08-14", "2026-08-14T02:00:00.000000", "max_rounds"),
+            (26, "2026-08-21", "2026-08-21T02:00:00.000000", "complete"),
+            (27, "2026-08-28", "2026-08-28T02:00:00.000000", "complete"),
+            (28, "2026-08-29", "2026-08-29T02:00:00.000000", "complete"),
+            (29, "2026-08-30", "2026-08-30T02:00:00.000000", "complete"),
+            (30, "2026-09-01", "2026-09-01T02:00:00.000000", "max_rounds"),
+            (31, "2026-09-08", "2026-09-08T02:00:00.000000", "complete"),
         )
-        connection.executemany(
-            "INSERT INTO messages VALUES (?, 30, ?, ?)",
-            ((40, "child", "我在 seed 池塘观察"), (41, "diary", "seed diary")),
-        )
-        connection.execute(
-            "INSERT INTO analysis_jobs VALUES (50, 30, 41, 'succeeded', 1)"
-        )
-        connection.execute(
-            "INSERT INTO assessments VALUES (60, 30, 10, 'confirmed', 3.0)"
-        )
+        for conversation_id, conversation_date, ended_at, end_reason in seed_search_rows:
+            child_message_id = conversation_id * 10
+            diary_message_id = child_message_id + 1
+            job_id = 100 + conversation_id
+            assessment_id = 200 + conversation_id
+            connection.execute(
+                "INSERT INTO conversations VALUES (?, 10, ?, ?, 'ended', ?, ?)",
+                (
+                    conversation_id,
+                    conversation_date,
+                    ended_at,
+                    end_reason,
+                    diary_message_id,
+                ),
+            )
+            connection.executemany(
+                "INSERT INTO messages VALUES (?, ?, ?, ?)",
+                (
+                    (
+                        child_message_id,
+                        conversation_id,
+                        "child",
+                        f"我在 seed 池塘观察 {conversation_id}",
+                    ),
+                    (diary_message_id, conversation_id, "diary", "seed diary"),
+                ),
+            )
+            connection.execute(
+                "INSERT INTO analysis_jobs VALUES (?, ?, ?, 'succeeded', 1)",
+                (job_id, conversation_id, diary_message_id),
+            )
+            connection.execute(
+                "INSERT INTO assessments VALUES (?, ?, 10, 'confirmed', 3.0)",
+                (assessment_id, conversation_id),
+            )
+            connection.executemany(
+                "INSERT INTO assessment_scores VALUES (?, ?, ?, 3, 'seed reason')",
+                tuple(
+                    (
+                        conversation_id * 100 + dimension_id,
+                        assessment_id,
+                        dimension_id,
+                    )
+                    for dimension_id in (1, 2, 3)
+                ),
+            )
         connection.execute(
             "INSERT INTO feeding_logs VALUES (80, 30, 10, 20, '观察', 'seed observation')"
-        )
-        connection.executemany(
-            "INSERT INTO assessment_scores VALUES (?, 60, ?, 3, 'seed reason')",
-            ((70, 1), (71, 2), (72, 3)),
         )
         connection.commit()
 
 
-def _search_cursor(search_request, *, conversation_id: int, snapshot_max_id: int) -> str:
+def _search_cursor(
+    search_request,
+    *,
+    conversation_id: int,
+    ended_at: str,
+    snapshot_max_id: int,
+) -> str:
     fingerprint_source = {
         "analysis_status": sorted(search_request["analysis_status"]),
         "child_id": search_request["child_id"],
@@ -3288,7 +3576,7 @@ def _search_cursor(search_request, *, conversation_id: int, snapshot_max_id: int
     ).hexdigest()
     raw = json.dumps(
         {
-            "ended_at": "2026-09-03T02:00:00.000000Z",
+            "ended_at": ended_at,
             "fingerprint": fingerprint,
             "id": conversation_id,
             "snapshot_max_id": snapshot_max_id,
@@ -3358,10 +3646,11 @@ def _apply_live_provenance(plan):
     search_request = {
         "analysis_status": ["succeeded"],
         "child_id": None,
-        "date_from": "2026-08-31",
-        "date_to": "2026-09-06",
+        "date_from": "2026-08-14",
+        "date_to": "2026-09-08",
         "end_reason": ["max_rounds", "complete"],
         "keyword": "我",
+        "limit": 5,
         "review_status": ["confirmed"],
         "sort": "completed_desc",
     }
@@ -3387,6 +3676,7 @@ def _apply_live_provenance(plan):
                     tts_text.strip()[:500].encode("utf-8")
                 ).hexdigest(),
                 "kind": "opening_greeting" if index == 0 else "diary_reply",
+                "playback": _native_audio_playback(),
                 "source_message_id": None if index == 0 else 400 + index * 2,
                 "text_sha256": hashlib.sha256(tts_text.encode("utf-8")).hexdigest(),
                 "truncated": len(tts_text.strip()) > 500,
@@ -3542,10 +3832,16 @@ def _apply_live_provenance(plan):
                 "status": 200,
             },
         ],
-        "search_cursor": _search_cursor(search_request, conversation_id=301, snapshot_max_id=301),
+        "monthly_roster_request_ids": [conflict_request, retry_request],
+        "search_cursor": _search_cursor(
+            search_request,
+            conversation_id=28,
+            ended_at="2026-08-29T02:00:00.000000Z",
+            snapshot_max_id=301,
+        ),
         "search_deep_link": "#review?conversation_id=301",
-        "search_page_one_ids": [301],
-        "search_page_two_ids": [30],
+        "search_page_one_ids": [31, 301, 30, 29, 28],
+        "search_page_two_ids": [27, 26, 25],
         "search_request": search_request,
         "search_result_conversation_id": 301,
         "tts_evidence": tts_evidence,
@@ -3599,9 +3895,35 @@ def test_retained_database_provenance_is_read_only_and_fails_one_broken_chain(tm
         "search_result_id": 301,
         "status": "PROVEN",
     }
+    playback_mutations = (
+        {**_native_audio_playback(), "play_promise": "rejected"},
+        {**_native_audio_playback(), "events": ["playing"]},
+        {**_native_audio_playback(), "error": "MEDIA_ERR_DECODE"},
+        {**_native_audio_playback(), "speech_synthesis_fallback": True},
+    )
+    for playback in playback_mutations:
+        invalid_playback = json.loads(json.dumps(entity_ids))
+        invalid_playback["tts_evidence"][0]["playback"] = playback
+        with pytest.raises(module.HarnessSafetyError, match="TTS source mismatch"):
+            module.validate_database_provenance(plan, invalid_playback, baseline)
+    wrong_roster_ids = {
+        **entity_ids,
+        "monthly_roster_request_ids": list(
+            reversed(entity_ids["monthly_roster_request_ids"])
+        ),
+    }
+    with pytest.raises(module.HarnessSafetyError, match="roster retry evidence"):
+        module.validate_database_provenance(plan, wrong_roster_ids, baseline)
     for bad_request in (
         {**entity_ids["search_request"], "end_reason": ["max_rounds"]},
+        {
+            **entity_ids["search_request"],
+            "end_reason": ["complete", "max_rounds"],
+        },
+        {**entity_ids["search_request"], "child_id": 101},
+        {**entity_ids["search_request"], "date_from": "2026-08-15"},
         {**entity_ids["search_request"], "keyword": "池塘"},
+        {**entity_ids["search_request"], "limit": 20},
     ):
         bad_search = {**entity_ids, "search_request": bad_request}
         with pytest.raises(
@@ -3609,7 +3931,32 @@ def test_retained_database_provenance_is_read_only_and_fails_one_broken_chain(tm
             match="database provenance search request mismatch",
         ):
             module.validate_database_provenance(plan, bad_search, baseline)
+    for bad_pages in (
+        {
+            **entity_ids,
+            "search_page_one_ids": entity_ids["search_page_one_ids"][:-1],
+        },
+        {
+            **entity_ids,
+            "search_page_two_ids": entity_ids["search_page_two_ids"][:-1],
+        },
+        {
+            **entity_ids,
+            "search_page_two_ids": [*entity_ids["search_page_two_ids"][:-1], 999],
+        },
+    ):
+        with pytest.raises(module.HarnessSafetyError, match="database provenance search"):
+            module.validate_database_provenance(plan, bad_pages, baseline)
     with sqlite3.connect(plan.database) as connection:
+        connection.execute("UPDATE messages SET text='it cared for the duck' WHERE id=403")
+        connection.commit()
+    with pytest.raises(
+        module.HarnessSafetyError,
+        match="database provenance frozen messages mismatch",
+    ):
+        module.validate_database_provenance(plan, entity_ids, baseline)
+    with sqlite3.connect(plan.database) as connection:
+        connection.execute("UPDATE messages SET text='它游得更快，我还换了清水。' WHERE id=403")
         connection.execute("UPDATE assessments SET status='draft' WHERE id=601")
         connection.commit()
     with pytest.raises(module.HarnessSafetyError, match="database provenance"):
@@ -3688,6 +4035,7 @@ def test_database_provenance_accepts_early_completion_and_shared_truncated_tts_c
                 effective.encode("utf-8")
             ).hexdigest(),
             "kind": "diary_reply",
+            "playback": _native_audio_playback(),
             "source_message_id": message_id,
             "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
             "truncated": True,
@@ -3701,11 +4049,6 @@ def test_database_provenance_accepts_early_completion_and_shared_truncated_tts_c
         evidence(first_reply, 402),
         evidence(second_reply, 404),
     ]
-    entity_ids["search_request"]["end_reason"] = ["max_rounds", "complete"]
-    entity_ids["search_cursor"] = _search_cursor(
-        entity_ids["search_request"], conversation_id=301, snapshot_max_id=301
-    )
-
     assert module.validate_database_provenance(plan, entity_ids, baseline)["status"] == "PROVEN"
 
 
@@ -3851,8 +4194,10 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
         live_entities.clear()
         live_entities.update(entity_ids)
         if include_controller_evidence:
-            controller = _controller_payload(module, plan)
-            controller["journey"][0]["entity_ids"] = entity_ids
+            controller = _set_controller_entities(
+                _controller_payload(module, plan),
+                entity_ids,
+            )
             module.atomic_write_json(
                 plan.controller_evidence,
                 controller,
@@ -3995,8 +4340,10 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
     assert manifest["secret_scan"] == {
         "actual_values": "PASS",
         "forbidden_patterns": "PASS",
+        "provider_key": "FULL_RETAINED_TREE_PASS",
         "reviewed_source_forbidden_patterns": "GIT_PINNED_EXEMPT",
         "status": "PASS",
+        "teacher_pin": "RUNTIME_GENERATED_EVIDENCE_PASS",
     }
     assert terminal_events == [
         "artifact-scan",
@@ -4019,7 +4366,8 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
     )
     module.scan_retained_artifacts(
         plan.root,
-        actual_secrets=(provider_secret, teacher_secret),
+        provider_secrets=(provider_secret,),
+        runtime_secrets=(teacher_secret,),
     )
     assert len(captures) == 3
 

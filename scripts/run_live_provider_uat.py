@@ -121,6 +121,22 @@ TTS_REQUEST_TELEMETRY_KEYS = {
     "truncated",
     "voice",
 }
+TTS_EVIDENCE_KEYS = {
+    "audio_sha256",
+    "cache_relative_path",
+    "effective_text_sha256",
+    "kind",
+    "playback",
+    "source_message_id",
+    "text_sha256",
+    "truncated",
+}
+PLAYBACK_EVIDENCE_KEYS = {
+    "error",
+    "events",
+    "play_promise",
+    "speech_synthesis_fallback",
+}
 LATENCY_BUCKETS = {"<1s", "1-5s", "5-30s", "30-120s", ">=120s"}
 REQUIRED_JOURNEY_STEPS = (
     "teacher_credential_setup_login",
@@ -145,31 +161,52 @@ _CONTROLLER_KEYS = {
     "screenshots",
     "source_head",
 }
-_PROVENANCE_KEYS = {
-    "analysis_job_id",
-    "assessment_id",
-    "child_avatar_id",
-    "chat_request_ids",
-    "duck_avatar_id",
-    "growth_after",
-    "growth_before",
-    "live_child_id",
-    "live_duck_id",
-    "live_conversation_id",
-    "local_terminal_request_id",
-    "monthly_pairs",
+STEP_PROVENANCE_KEYS = {
+    "teacher_credential_setup_login": frozenset(),
+    "child_duck_avatar_management": frozenset(
+        {"child_avatar_id", "duck_avatar_id", "live_child_id", "live_duck_id"}
+    ),
+    "invalid_avatar_rejection": frozenset(),
+    "monthly_roster_conflict_retry": frozenset(
+        {"monthly_pairs", "monthly_roster_request_ids"}
+    ),
+    "child_conversation_real_provider_tts": frozenset(
+        {
+            "chat_request_ids",
+            "live_conversation_id",
+            "local_terminal_request_id",
+            "provider_chat_request_ids",
+            "tts_evidence",
+        }
+    ),
+    "conversation_completion_analysis": frozenset({"analysis_job_id"}),
+    "teacher_today_queues": frozenset(),
+    "review_edit_confirm": frozenset({"assessment_id"}),
+    "weekly_metrics_growth": frozenset(
+        {
+            "growth_after",
+            "growth_before",
+            "weekly_metrics_after",
+            "weekly_metrics_before",
+            "weekly_week_start",
+        }
+    ),
+    "advanced_search_pagination_deep_link": frozenset(
+        {
+            "search_cursor",
+            "search_deep_link",
+            "search_page_one_ids",
+            "search_page_two_ids",
+            "search_request",
+            "search_result_conversation_id",
+        }
+    ),
+    "search_empty_state": frozenset(),
+    "logout_login_retained_state": frozenset(),
+}
+_CONTROLLER_PROVENANCE_KEYS = frozenset().union(*STEP_PROVENANCE_KEYS.values())
+_PROVENANCE_KEYS = _CONTROLLER_PROVENANCE_KEYS | {
     "monthly_roster_attempts",
-    "provider_chat_request_ids",
-    "search_cursor",
-    "search_deep_link",
-    "search_page_one_ids",
-    "search_page_two_ids",
-    "search_request",
-    "search_result_conversation_id",
-    "tts_evidence",
-    "weekly_metrics_after",
-    "weekly_metrics_before",
-    "weekly_week_start",
 }
 _BASELINE_ID_COLUMNS = {
     "analysis_jobs": "id",
@@ -3118,7 +3155,8 @@ def _assert_secret_free_payload(
 def scan_retained_artifacts(
     root: Path,
     *,
-    actual_secrets: tuple[str, ...],
+    provider_secrets: tuple[str, ...],
+    runtime_secrets: tuple[str, ...],
     pinned_plan: RunPlan | None = None,
 ) -> None:
     base = _absolute(root)
@@ -3127,7 +3165,10 @@ def scan_retained_artifacts(
             raise HarnessSafetyError("secret scan failed: retained root identity")
         assert_run_plan_identity(pinned_plan)
     _safe_owned_directory(base, label="retained artifact root")
-    if any(not isinstance(secret, str) for secret in actual_secrets):
+    if any(
+        not isinstance(secret, str)
+        for secret in (*provider_secrets, *runtime_secrets)
+    ):
         raise HarnessSafetyError("secret scan failed: invalid scanner input")
     try:
         candidates = sorted(base.rglob("*"), key=lambda item: item.relative_to(base).as_posix())
@@ -3161,14 +3202,19 @@ def scan_retained_artifacts(
         if total > 2_000_000_000:
             raise HarnessSafetyError("secret scan failed: artifact bound")
         role = path.relative_to(base).as_posix()
+        reviewed_source = role.startswith("reviewed-source/")
         _assert_secret_free_payload(
             payload,
-            actual_secrets=actual_secrets,
+            actual_secrets=(
+                provider_secrets
+                if reviewed_source
+                else (*provider_secrets, *runtime_secrets)
+            ),
             role=role,
             # The retained source tree is already pinned byte-for-byte to the
             # reviewed Git objects and necessarily contains the scanner's own
             # detector literals.  Registered live secrets remain forbidden.
-            apply_patterns=not role.startswith("reviewed-source/"),
+            apply_patterns=not reviewed_source,
         )
         if payload.startswith(b"\x89PNG\r\n\x1a\n"):
             try:
@@ -3193,7 +3239,7 @@ def _safe_assertions(value: object) -> bool:
 
 
 def _safe_entity_value(value: object, *, depth: int = 0) -> bool:
-    if depth > 4:
+    if depth > 5:
         return False
     if value is None or type(value) in {bool, int}:
         return True
@@ -3375,6 +3421,8 @@ def validate_controller_evidence(
             or not _safe_entity_value(item["entity_ids"])
         ):
             raise HarnessSafetyError("controller evidence journey is invalid")
+        if set(item["entity_ids"]) != STEP_PROVENANCE_KEYS[item["step_id"]]:
+            raise HarnessSafetyError("controller evidence journey provenance is invalid")
         seen_steps.append(item["step_id"])
     if tuple(seen_steps) != REQUIRED_JOURNEY_STEPS:
         raise HarnessSafetyError("controller evidence journey is incomplete")
@@ -3812,6 +3860,17 @@ def _decode_search_cursor(
         raise HarnessSafetyError("database provenance search cursor mismatch") from None
 
 
+def _valid_native_audio_playback(value: object) -> bool:
+    return (
+        isinstance(value, Mapping)
+        and set(value) == PLAYBACK_EVIDENCE_KEYS
+        and value["play_promise"] == "fulfilled"
+        and value["events"] == ["playing", "ended"]
+        and value["error"] is None
+        and value["speech_synthesis_fallback"] is False
+    )
+
+
 def validate_database_provenance(
     plan: RunPlan,
     entity_ids: Mapping[str, object],
@@ -3903,6 +3962,7 @@ def validate_database_provenance(
                 if actual != sorted(expected_children):
                     raise HarnessSafetyError("database provenance monthly roster mismatch")
             attempts = entity_ids["monthly_roster_attempts"]
+            roster_request_ids = entity_ids["monthly_roster_request_ids"]
             if (
                 not isinstance(attempts, list)
                 or len(attempts) != 2
@@ -3911,6 +3971,8 @@ def validate_database_provenance(
                     or set(attempt) != ROSTER_TELEMETRY_KEYS
                     for attempt in attempts
                 )
+                or roster_request_ids
+                != [attempt.get("request_id") for attempt in attempts]
                 or [attempt["kind"] for attempt in attempts]
                 != ["roster_attempt", "roster_attempt"]
                 or [attempt["method"] for attempt in attempts] != ["POST", "POST"]
@@ -4040,6 +4102,7 @@ def validate_database_provenance(
                 or any(row[0] in baseline_ids["messages"] for row in messages)
                 or [row[1] for row in messages] != ["child", "diary"] * (len(messages) // 2)
                 or any(not isinstance(row[2], str) or not row[2].strip() for row in messages)
+                or any("我" not in row[2] for row in messages[::2])
             ):
                 raise HarnessSafetyError("database provenance frozen messages mismatch")
             tts_evidence = entity_ids["tts_evidence"]
@@ -4083,17 +4146,9 @@ def validate_database_provenance(
                 )
                 if (
                     not isinstance(evidence, Mapping)
-                    or set(evidence)
-                    != {
-                        "audio_sha256",
-                        "cache_relative_path",
-                        "effective_text_sha256",
-                        "kind",
-                        "source_message_id",
-                        "text_sha256",
-                        "truncated",
-                    }
+                    or set(evidence) != TTS_EVIDENCE_KEYS
                     or evidence["kind"] != kind
+                    or not _valid_native_audio_playback(evidence["playback"])
                     or evidence["source_message_id"] != source_message_id
                     or evidence["text_sha256"] != _hash_bytes(text.encode("utf-8"))
                     or evidence["effective_text_sha256"]
@@ -4336,10 +4391,11 @@ def validate_database_provenance(
             page_one = entity_ids["search_page_one_ids"]
             page_two = entity_ids["search_page_two_ids"]
             result_id = entity_ids["search_result_conversation_id"]
+            search_request = entity_ids["search_request"]
             if (
                 not isinstance(page_one, list)
                 or not isinstance(page_two, list)
-                or not page_one
+                or len(page_one) != 5
                 or not page_two
                 or any(type(value) is not int or value <= 0 for value in page_one + page_two)
                 or len(set(page_one)) != len(page_one)
@@ -4349,77 +4405,95 @@ def validate_database_provenance(
                 or result_id not in set(page_one + page_two)
             ):
                 raise HarnessSafetyError("database provenance search mismatch")
-            placeholders = ",".join("?" for _ in page_one + page_two)
-            search_rows = connection.execute(
-                f"SELECT id, child_id, date, ended_at, status, end_reason, frozen_last_message_id "
-                f"FROM conversations WHERE id IN ({placeholders})",
-                tuple(page_one + page_two),
-            ).fetchall()
-            if len(search_rows) != len(set(page_one + page_two)) or any(row[4] != "ended" for row in search_rows):
-                raise HarnessSafetyError("database provenance search rows mismatch")
-            search_request = entity_ids["search_request"]
             if (
                 not isinstance(search_request, Mapping)
                 or set(search_request)
-                != {"analysis_status", "child_id", "date_from", "date_to", "end_reason", "keyword", "review_status", "sort"}
+                != {
+                    "analysis_status",
+                    "child_id",
+                    "date_from",
+                    "date_to",
+                    "end_reason",
+                    "keyword",
+                    "limit",
+                    "review_status",
+                    "sort",
+                }
                 or search_request["analysis_status"] != ["succeeded"]
                 or search_request["review_status"] != ["confirmed"]
                 or search_request["end_reason"] != ["max_rounds", "complete"]
                 or conversation[4] not in search_request["end_reason"]
-                or search_request["sort"] not in {"completed_asc", "completed_desc"}
-                or search_request["child_id"] not in {None, child_id}
+                or search_request["sort"] != "completed_desc"
+                or search_request["child_id"] is not None
                 or search_request["keyword"] != "我"
-                or not search_request["date_from"] <= conversation[1] <= search_request["date_to"]
+                or search_request["limit"] != 5
             ):
                 raise HarnessSafetyError("database provenance search request mismatch")
-            keyword_hit = connection.execute(
-                "SELECT 1 FROM messages WHERE conversation_id = ? AND instr(text, ?) > 0 LIMIT 1",
-                (conversation_id, search_request["keyword"]),
+            snapshot_row = connection.execute(
+                "SELECT MAX(id) FROM conversations"
             ).fetchone()
+            if snapshot_row is None or type(snapshot_row[0]) is not int:
+                raise HarnessSafetyError("database provenance search rows mismatch")
+            snapshot_max_id = snapshot_row[0]
+            search_rows = connection.execute(
+                "SELECT c.id, c.child_id, c.date, c.ended_at, c.status, "
+                "c.end_reason, c.frozen_last_message_id "
+                "FROM conversations c "
+                "JOIN analysis_jobs j ON j.conversation_id = c.id "
+                "WHERE c.status = 'ended' AND c.ended_at IS NOT NULL "
+                "AND c.frozen_last_message_id IS NOT NULL AND c.id <= ? "
+                "AND c.end_reason IN ('max_rounds', 'complete') "
+                "AND j.status = 'succeeded' "
+                "AND EXISTS (SELECT 1 FROM assessments a "
+                "WHERE a.conversation_id = c.id AND a.status = 'confirmed') "
+                "AND EXISTS (SELECT 1 FROM messages m "
+                "WHERE m.conversation_id = c.id "
+                "AND m.id <= c.frozen_last_message_id "
+                "AND m.role IN ('child', 'diary') AND instr(m.text, ?) > 0) "
+                "ORDER BY c.ended_at DESC, c.id DESC",
+                (snapshot_max_id, search_request["keyword"]),
+            ).fetchall()
+            if (
+                len(search_rows) <= 5
+                or len({row[0] for row in search_rows}) != len(search_rows)
+            ):
+                raise HarnessSafetyError("database provenance search rows mismatch")
+            expected_date_from = min(str(row[2]) for row in search_rows)
+            expected_date_to = max(str(row[2]) for row in search_rows)
+            try:
+                canonical_date_from = date.fromisoformat(
+                    str(search_request["date_from"])
+                ).isoformat()
+                canonical_date_to = date.fromisoformat(
+                    str(search_request["date_to"])
+                ).isoformat()
+            except ValueError:
+                raise HarnessSafetyError(
+                    "database provenance search request mismatch"
+                ) from None
+            if (
+                canonical_date_from != search_request["date_from"]
+                or canonical_date_to != search_request["date_to"]
+                or canonical_date_from != expected_date_from
+                or canonical_date_to != expected_date_to
+                or not canonical_date_from <= conversation[1] <= canonical_date_to
+            ):
+                raise HarnessSafetyError("database provenance search request mismatch")
+            expected_ids = [row[0] for row in search_rows]
+            if page_one != expected_ids[:5] or page_two != expected_ids[5:10]:
+                raise HarnessSafetyError("database provenance search result mismatch")
             cursor = _decode_search_cursor(
                 entity_ids["search_cursor"],
                 search_request=search_request,
             )
             search_by_id = {row[0]: row for row in search_rows}
-            for search_id in page_one + page_two:
-                row = search_by_id[search_id]
-                job_status = connection.execute(
-                    "SELECT status FROM analysis_jobs WHERE conversation_id = ? "
-                    "AND frozen_last_message_id = ?",
-                    (search_id, row[6]),
-                ).fetchone()
-                review_status = connection.execute(
-                    "SELECT status FROM assessments WHERE conversation_id = ?",
-                    (search_id,),
-                ).fetchone()
-                row_keyword = connection.execute(
-                    "SELECT 1 FROM messages WHERE conversation_id = ? AND instr(text, ?) > 0 LIMIT 1",
-                    (search_id, search_request["keyword"]),
-                ).fetchone()
-                if (
-                    row[5] not in search_request["end_reason"]
-                    or search_request["child_id"] not in {None, row[1]}
-                    or not search_request["date_from"] <= row[2] <= search_request["date_to"]
-                    or job_status is None
-                    or job_status[0] not in search_request["analysis_status"]
-                    or review_status is None
-                    or review_status[0] not in search_request["review_status"]
-                    or row_keyword is None
-                ):
-                    raise HarnessSafetyError("database provenance search result mismatch")
-            expected_cursor_time = str(search_by_id[page_one[-1]][3]) + "Z"
-            flattened = page_one + page_two
-            expected_order = sorted(
-                flattened,
-                key=lambda value: (search_by_id[value][3], value),
-                reverse=search_request["sort"] == "completed_desc",
-            )
+            expected_cursor_time = datetime.fromisoformat(
+                str(search_by_id[page_one[-1]][3])
+            ).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
             if (
-                keyword_hit is None
-                or cursor["id"] != page_one[-1]
+                cursor["id"] != page_one[-1]
                 or cursor["ended_at"] != expected_cursor_time
-                or cursor["snapshot_max_id"] != max(flattened)
-                or flattened != expected_order
+                or cursor["snapshot_max_id"] != snapshot_max_id
                 or entity_ids["search_deep_link"] != f"#review?conversation_id={conversation_id}"
             ):
                 raise HarnessSafetyError("database provenance frozen search mismatch")
@@ -4546,9 +4620,53 @@ def _collect_entity_ids(controller: Mapping[str, object]) -> dict[str, object]:
             if key in combined:
                 raise HarnessSafetyError("controller entity identifiers contain duplicates")
             combined[key] = value
-    if set(combined) != _PROVENANCE_KEYS:
+    if set(combined) != _CONTROLLER_PROVENANCE_KEYS:
         raise HarnessSafetyError("controller entity identifiers are incomplete")
     return combined
+
+
+def _inject_private_roster_provenance(
+    events: tuple[Mapping[str, object], ...],
+    controller_entity_ids: Mapping[str, object],
+) -> dict[str, object]:
+    """Add server-only roster telemetry after binding its visible request ids."""
+
+    if set(controller_entity_ids) != _CONTROLLER_PROVENANCE_KEYS:
+        raise HarnessSafetyError("controller entity identifiers are incomplete")
+    request_ids = controller_entity_ids.get("monthly_roster_request_ids")
+    summary = summarize_provider_events(events)
+    roster_events = [
+        event for event in summary["events"] if event.get("kind") == "roster_attempt"
+    ]
+    if (
+        not isinstance(request_ids, list)
+        or len(request_ids) != 2
+        or len(set(request_ids)) != 2
+        or any(
+            not isinstance(request_id, str)
+            or UUID4_PATTERN.fullmatch(request_id) is None
+            for request_id in request_ids
+        )
+        or summary["events"][:2] != roster_events
+        or len(roster_events) != 2
+        or [event.get("request_id") for event in roster_events] != request_ids
+        or [event.get("order") for event in roster_events] != [1, 2]
+        or [event.get("method") for event in roster_events] != ["POST", "POST"]
+        or [event.get("path") for event in roster_events]
+        != ["/api/roster/month", "/api/roster/month"]
+        or [event.get("status") for event in roster_events] != [409, 200]
+        or [event.get("error_code") for event in roster_events]
+        != ["ROSTER_DATE_CONFLICT", None]
+        or [event.get("replace_existing") for event in roster_events]
+        != [False, True]
+        or roster_events[0].get("canonical_body_sha256")
+        != roster_events[1].get("canonical_body_sha256")
+    ):
+        raise HarnessSafetyError("provider telemetry roster evidence mismatch")
+    return {
+        **dict(controller_entity_ids),
+        "monthly_roster_attempts": roster_events,
+    }
 
 
 def _validate_provider_completion(
@@ -4566,6 +4684,7 @@ def _validate_provider_completion(
     provider_chat_request_ids = entity_ids.get("provider_chat_request_ids")
     local_terminal_request_id = entity_ids.get("local_terminal_request_id")
     roster_attempts = entity_ids.get("monthly_roster_attempts")
+    roster_request_ids = entity_ids.get("monthly_roster_request_ids")
     tts_evidence = entity_ids.get("tts_evidence")
     if (
         type(conversation_id) is not int
@@ -4586,6 +4705,8 @@ def _validate_provider_completion(
         != (chat_request_ids[2] if len(chat_request_ids) == 3 else None)
         or not isinstance(roster_attempts, list)
         or len(roster_attempts) != 2
+        or roster_request_ids
+        != [attempt.get("request_id") for attempt in roster_attempts]
         or not isinstance(tts_evidence, list)
         or len(tts_evidence) != len(chat_request_ids) + 1
     ):
@@ -4613,18 +4734,10 @@ def _validate_provider_completion(
     for index, evidence in enumerate(tts_evidence):
         if (
             not isinstance(evidence, Mapping)
-            or set(evidence)
-            != {
-                "audio_sha256",
-                "cache_relative_path",
-                "effective_text_sha256",
-                "kind",
-                "source_message_id",
-                "text_sha256",
-                "truncated",
-            }
+            or set(evidence) != TTS_EVIDENCE_KEYS
             or evidence["kind"]
             != ("opening_greeting" if index == 0 else "diary_reply")
+            or not _valid_native_audio_playback(evidence["playback"])
             or (index == 0 and evidence["source_message_id"] is not None)
             or (
                 index > 0
@@ -4915,8 +5028,10 @@ def _complete_manifest(
         "secret_scan": {
             "actual_values": "PASS",
             "forbidden_patterns": "PASS",
+            "provider_key": "FULL_RETAINED_TREE_PASS",
             "reviewed_source_forbidden_patterns": "GIT_PINNED_EXEMPT",
             "status": "PASS",
+            "teacher_pin": "RUNTIME_GENERATED_EVIDENCE_PASS",
         },
         "seed": {
             "media_sha256": seed_result["media_sha256"],
@@ -5046,7 +5161,11 @@ def execute_retained_uat(
             for issue in controller["issues"]
         ):
             raise HarnessSafetyError("controller evidence contains a blocker")
-        entity_ids = _collect_entity_ids(controller)
+        controller_entity_ids = _collect_entity_ids(controller)
+        entity_ids = _inject_private_roster_provenance(
+            tuple(provider_events),
+            controller_entity_ids,
+        )
         provenance = provenance_validator(plan, entity_ids, seed_baseline)
         provider_summary = _validate_provider_completion(
             tuple(provider_events),
@@ -5082,13 +5201,16 @@ def execute_retained_uat(
         )
         atomic_write_json(plan.resources_after, after, pinned_plan=plan)
         assert_protected_resources_equal(before_second, after)
-        actual_secrets = (provider["DEEPSEEK_API_KEY"], control.secret_for_scan())
-        registered_secrets = tuple(
-            secret for secret in actual_secrets if isinstance(secret, str) and secret
+        provider_secrets = (str(provider["DEEPSEEK_API_KEY"]),)
+        runtime_secrets = tuple(
+            secret
+            for secret in (control.secret_for_scan(),)
+            if isinstance(secret, str) and secret
         )
         scan_retained_artifacts(
             plan.root,
-            actual_secrets=registered_secrets,
+            provider_secrets=provider_secrets,
+            runtime_secrets=runtime_secrets,
             pinned_plan=plan,
         )
         manifest = _complete_manifest(
@@ -5101,7 +5223,7 @@ def execute_retained_uat(
         manifest_payload = canonical_json_line(manifest).encode("utf-8")
         _assert_secret_free_payload(
             manifest_payload,
-            actual_secrets=registered_secrets,
+            actual_secrets=(*provider_secrets, *runtime_secrets),
             role="manifest.json",
         )
         checksums_payload = _checksum_lines(plan, manifest_payload)
@@ -5112,7 +5234,8 @@ def execute_retained_uat(
         )
         scan_retained_artifacts(
             plan.root,
-            actual_secrets=registered_secrets,
+            provider_secrets=provider_secrets,
+            runtime_secrets=runtime_secrets,
             pinned_plan=plan,
         )
         _verify_complete_precommit_state(

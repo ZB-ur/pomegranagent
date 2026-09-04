@@ -98,18 +98,20 @@ one concrete visible assertion, and only the noted stable IDs where applicable.
 4. `monthly_roster_conflict_retry`: select two children for multiple dates,
    submit the month, intentionally exercise one conflict, then retry with a new
    UUID-v4 request ID and verify the final roster. Record `monthly_pairs` as at
-   least two ISO dates mapped to exactly two distinct child IDs, and record
-   `monthly_roster_attempts` by copying the two server-originated telemetry
-   objects: exactly the failed 409 `ROSTER_DATE_CONFLICT` attempt followed by
-   the successful 200 attempt whose `error_code` is null. Each object has
-   exactly `kind`, `method`, `path`, `order`, `request_id`,
-   `canonical_body_sha256`, `replace_existing`, `status`, and `error_code`.
-   Both are `POST /api/roster/month`, their request IDs differ, their order is
-   1 then 2, and their canonical business-body hashes are identical.
+   least two ISO dates mapped to exactly two distinct child IDs. Record only
+   `monthly_roster_request_ids`: the two visible UUID-v4 request IDs in
+   conflict-then-retry order, as observed in the browser request/response
+   boundary. Do not manufacture or copy private server telemetry into the
+   controller file. After finalization, the harness obtains the two private
+   `POST /api/roster/month` attempt events directly from its telemetry pipe and
+   binds them to these IDs, the identical canonical monthly payload, the
+   409 `ROSTER_DATE_CONFLICT`, and the successful 200 retry.
 5. `child_conversation_real_provider_tts`: select the new child and complete a
    real exchange of one to three alternating child/diary turns by controlled
    text handoff. The opening greeting must use the child's nonempty nickname,
    falling back to its name only when the nickname is empty. Record every
+   child utterance with the literal character `我` so the retained live result
+   is covered by the later exact search. Record every
    ordered UUID-v4 request as `chat_request_ids`. If DeepSeek returns
    `complete` after turn one or two, stop there: all recorded request IDs are
    also `provider_chat_request_ids` and `local_terminal_request_id` is null. If
@@ -118,13 +120,27 @@ one concrete visible assertion, and only the noted stable IDs where applicable.
    fixed local `max_rounds` reply. Record the actual final message as the frozen
    boundary and never send another message after completion.
 
-   Verify the TTS endpoint response for the opening greeting and every diary
-   reply. Record `tts_evidence` in that order with exactly `kind`, source
-   message ID (null only for the greeting), full requested-text SHA-256,
-   effective stripped/500-character-text SHA-256, `truncated`, run-relative
-   cache path, and audio SHA-256. Repeated or identically truncated text may
-   legitimately reuse one cache file: every endpoint call is still required,
-   while only the first request for a cache key invokes Edge-TTS.
+   Before the first child-page navigation, install passive browser
+   instrumentation around the native `HTMLMediaElement.prototype.play`
+   boundary and capture-phase `playing`, `ended`, and `error` listeners. Call
+   the original native `play` with its original receiver, return its original
+   promise unchanged, and observe whether that promise fulfills. Keep the real
+   `Audio` constructor, element, network request, decode, and playback intact;
+   never stub or replace them. Also wrap `speechSynthesis.speak` as a
+   pass-through usage detector before navigation; never substitute synthesized
+   speech for the real audio element.
+
+   Verify the TTS endpoint response and completed native playback for the
+   opening greeting and every diary reply. Record `tts_evidence` in that order
+   with exactly `kind`, source message ID (null only for the greeting), full
+   requested-text SHA-256, effective stripped/500-character-text SHA-256,
+   `truncated`, run-relative cache path, audio SHA-256, and `playback`. Each
+   `playback` object has exactly `play_promise: "fulfilled"`,
+   `events: ["playing", "ended"]`, `error: null`, and
+   `speech_synthesis_fallback: false`. Repeated or identically truncated text
+   may legitimately reuse one cache file: every endpoint call and real element
+   playback is still required, while only the first request for a cache key
+   invokes Edge-TTS.
 6. `conversation_completion_analysis`: complete the conversation, wait for the
    one real analysis worker job to succeed, and record `analysis_job_id`. The
    final DB proof requires nonempty feeding, emotion, and insight projections
@@ -139,36 +155,58 @@ one concrete visible assertion, and only the noted stable IDs where applicable.
    `weekly_week_start`, plus the exact displayed `weekly_metrics_before`,
    `weekly_metrics_after`, `growth_before`, and `growth_after` objects.
 10. `advanced_search_pagination_deep_link`: search privately with literal
-    keyword `我`, analysis status exactly `succeeded`, review status exactly
-    `confirmed`, and both end reasons in UI order: `max_rounds`, then
-    `complete`. Use the
-    product's fixed five-result page, load the next frozen cursor page, and open
-    the result through the Review deep link. Record the complete
+    keyword `我` across all children (`child_id: null`), analysis status exactly
+    `succeeded`, review status exactly `confirmed`, and both end reasons in UI
+    order: `max_rounds`, then `complete`. Set the inclusive dates to cover the
+    seeded qualifying range from anchor `day_offset=-21` through
+    `day_offset=+4` and the live conversation. Submit literal `limit: 5`. Load
+    the next frozen cursor page and open the result through the Review deep
+    link. Record the complete
     `search_request`, canonical `search_cursor`, exact `search_deep_link`,
-    nonempty disjoint ordered `search_page_one_ids` and
-    `search_page_two_ids` (IDs must also be unique within each page), plus
+    exactly five ordered `search_page_one_ids`, and the nonempty exact second
+    five-result slice as `search_page_two_ids`. IDs must be unique within each
+    page and disjoint across pages. Record
     `search_result_conversation_id` equal to the retained live conversation.
     The live conversation's actual end reason must be covered by the selected
-    two-reason filter.
+    two-reason filter. The harness independently reconstructs the complete
+    matching ID set from the stopped database and requires these lists to equal
+    its first and second slices at the cursor's immutable snapshot.
 11. `search_empty_state`: submit a search that has no matches and verify its
     explicit empty state without disturbing the successful search evidence.
 12. `logout_login_retained_state`: logout, unlock again, and verify the roster,
     avatars, conversation, confirmed review, weekly metrics, and search result
     remain available.
 
-Use each provenance key exactly once across the journey's `entity_ids` objects;
-use `{}` when a step has no new provenance value. Do not infer IDs from display
-text when the API/URL supplies the stable ID. The required keys are exactly:
-`analysis_job_id`, `assessment_id`, `child_avatar_id`, `chat_request_ids`,
-`duck_avatar_id`, `growth_after`, `growth_before`, `live_child_id`,
-`live_duck_id`, `live_conversation_id`, `monthly_pairs`,
-`monthly_roster_attempts`, `provider_chat_request_ids`,
-`local_terminal_request_id`, `search_cursor`, `search_deep_link`,
-`search_page_one_ids`, `search_page_two_ids`, `search_request`,
-`search_result_conversation_id`, `tts_evidence`, `weekly_metrics_after`,
-`weekly_metrics_before`, and `weekly_week_start`. The harness captured
-`seed-baseline.json` after the offline seed and before server/browser activity;
-seed IDs, files, requests, or projections do not count as live evidence.
+Use each provenance key exactly once and only in the journey step below; a key
+placed in another step fails even if the global union is unchanged. Do not infer
+IDs from display text when the API/URL supplies the stable ID. The exact
+`entity_ids` key sets are:
+
+- `teacher_credential_setup_login`: `{}`
+- `child_duck_avatar_management`: `child_avatar_id`, `duck_avatar_id`,
+  `live_child_id`, `live_duck_id`
+- `invalid_avatar_rejection`: `{}`
+- `monthly_roster_conflict_retry`: `monthly_pairs`,
+  `monthly_roster_request_ids`
+- `child_conversation_real_provider_tts`: `chat_request_ids`,
+  `live_conversation_id`, `local_terminal_request_id`,
+  `provider_chat_request_ids`, `tts_evidence`
+- `conversation_completion_analysis`: `analysis_job_id`
+- `teacher_today_queues`: `{}`
+- `review_edit_confirm`: `assessment_id`
+- `weekly_metrics_growth`: `growth_after`, `growth_before`,
+  `weekly_metrics_after`, `weekly_metrics_before`, `weekly_week_start`
+- `advanced_search_pagination_deep_link`: `search_cursor`,
+  `search_deep_link`, `search_page_one_ids`, `search_page_two_ids`,
+  `search_request`, `search_result_conversation_id`
+- `search_empty_state`: `{}`
+- `logout_login_retained_state`: `{}`
+
+The controller must never include the private `monthly_roster_attempts` field;
+the harness adds that field only after parsing the stopped server's telemetry.
+The harness captured `seed-baseline.json` after the offline seed and before
+server/browser activity; seed IDs, files, requests, or projections do not count
+as live evidence.
 
 The approved fixture bytes are fixed and come from project-owner-supplied IP
 for internal product/testing; external redistribution rights are not asserted.
@@ -284,14 +322,20 @@ Wait for the harness to stop and exit successfully.
    provenance and use `zh-CN-XiaoxiaoNeural`. A local terminal reply never
    counts as provider success.
 6. Confirm `manifest.json.secret_scan.status` is `PASS`, with actual values and
-   forbidden patterns also `PASS`. The exact prepared manifest bytes and the
-   retained artifact tree are scanned for registered secrets plus
-   authorization, bearer, cookie, session, and token patterns before the final
-   COMPLETE commit. Reviewed Git source remains actual-secret scanned but is
-   marked `GIT_PINNED_EXEMPT` for generic detector patterns because it contains
+   forbidden patterns also `PASS`, `provider_key` equal to
+   `FULL_RETAINED_TREE_PASS`, and `teacher_pin` equal to
+   `RUNTIME_GENERATED_EVIDENCE_PASS`. The exact prepared manifest bytes and the
+   retained artifact tree are scanned before the final COMPLETE commit. The
+   provider key is checked across the entire retained tree, including the
+   Git-pinned `reviewed-source/`. The temporary teacher PIN is checked only in
+   runtime-generated evidence and is deliberately excluded from
+   `reviewed-source/`, because reviewed source may legitimately contain the
+   same short 4-6 digit sequence. Authorization, bearer, cookie, session, and
+   token detector patterns apply to runtime evidence; reviewed Git source is
+   marked `GIT_PINNED_EXEMPT` for those generic patterns because it contains
    the scanner literals themselves. Do not run a broad content-printing `rg`
-   over `reviewed-source/`; rely on the harness attestation. Any optional audit
-   must never print matching content.
+   over `reviewed-source/`; rely on the typed harness attestation. Any optional
+   audit must never print matching content.
 7. Visually inspect selected screenshots for credentials or private browser
    state, then copy only redacted, instruction-worthy images into
    `docs/manual/assets/<run-id>/`. Never add the raw run directory to Git.
