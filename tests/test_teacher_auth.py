@@ -188,6 +188,7 @@ def test_teacher_route_inventory_has_the_session_dependency():
         ("PUT", "/api/dimensions/{}"),
         ("GET", "/api/conversations"),
         ("GET", "/api/conversations/history"),
+        ("POST", "/api/conversations/search"),
         ("GET", "/api/conversations/{}"),
         ("PUT", "/api/conversations/{}/review"),
         ("POST", "/api/conversations/{}/analysis/retry"),
@@ -209,6 +210,7 @@ def test_teacher_route_inventory_has_the_session_dependency():
         "/api/conversations/{}/analysis/retry": {"POST"},
         "/api/conversations": {"GET"},
         "/api/conversations/history": {"GET"},
+        "/api/conversations/search": {"POST"},
         "/api/conversations/{}": {"GET"},
         "/api/conversations/{}/review": {"PUT"},
         "/api/chat": {"POST"},
@@ -293,6 +295,7 @@ def test_teacher_routes_require_session_and_child_surface_remains_public(client)
         ("get", "/api/conversations", None),
         ("get", "/api/analysis/overview", None),
         ("get", "/api/reports/weekly?week_start=not-a-date", None),
+        ("post", "/api/conversations/search?unknown=1", {"keyword": ""}),
         ("post", "/api/roster/auto", {"start_date": "2026-08-24", "days": 1, "cycle": "test"}),
         (
             "post",

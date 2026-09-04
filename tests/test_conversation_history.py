@@ -14,6 +14,7 @@ from app.backend.services.history import list_conversation_history
 
 
 NOW = datetime(2026, 8, 23, 9, 0, tzinfo=timezone.utc)
+HISTORY_AVATAR = "/api/media/avatars/123e4567-e89b-12d3-a456-426614174000"
 
 
 def _unlock(client) -> None:
@@ -42,7 +43,7 @@ def _seed_history(
     child = models.Child(
         name=f"历史幼儿-{minutes}-{job_status}",
         nickname="小史",
-        avatar="history.png",
+        avatar=HISTORY_AVATAR,
         active=child_active,
     )
     db_session.add(child)
@@ -193,7 +194,7 @@ def test_history_projects_all_states_inactive_children_and_strict_shape(client, 
             "id": newest_child.id,
             "name": newest_child.name,
             "nickname": "小史",
-            "avatar": "history.png",
+            "avatar": HISTORY_AVATAR,
         },
         "date": "2026-08-23",
         "completed_at": "2026-08-23T09:00:00Z",

@@ -7,8 +7,10 @@ from typing import Literal
 
 import httpx
 from fastapi import APIRouter, Depends, Request
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from .. import ai_engine, models, schemas
 from ..api_errors import APIError
@@ -24,7 +26,7 @@ from ..services.chat import (
     record_chat_failure,
 )
 from ..services.completion import complete_conversation
-from ..services.history import list_conversation_history
+from ..services.history import list_conversation_history, search_conversations
 from ..services.reviews import get_review_detail, list_review_queue, save_review
 
 
@@ -184,6 +186,58 @@ def conversation_history(
         child_id=child_id,
         before_id=before_id,
     )
+
+
+@router.post(
+    "/api/conversations/search",
+    response_model=schemas.ConversationSearchPage,
+    openapi_extra={
+        "requestBody": {
+            "required": True,
+            "content": {
+                "application/json": {
+                    "schema": schemas.ConversationSearchRequest.model_json_schema()
+                }
+            },
+        }
+    },
+)
+async def conversation_search(
+    request: Request,
+    db: Session = Depends(get_db),
+    _teacher: models.TeacherSession = Depends(require_teacher_session),
+) -> schemas.ConversationSearchPage:
+    if request.scope.get("query_string", b""):
+        raise APIError(
+            422,
+            "VALIDATION_ERROR",
+            "请求字段校验失败",
+            {"query": ["此接口不接受查询参数"]},
+        )
+    try:
+        raw_payload = await request.json()
+    except (TypeError, ValueError):
+        raise APIError(
+            422,
+            "VALIDATION_ERROR",
+            "请求字段校验失败",
+            {"body": ["请求体必须是有效 JSON"]},
+        ) from None
+    try:
+        payload = schemas.ConversationSearchRequest.model_validate(raw_payload)
+    except ValidationError as exc:
+        fields: dict[str, list[str]] = {}
+        for item in exc.errors():
+            location = ".".join(str(part) for part in item["loc"])
+            key = f"body.{location}" if location else "body"
+            fields.setdefault(key, []).append(item["msg"])
+        raise APIError(
+            422,
+            "VALIDATION_ERROR",
+            "请求字段校验失败",
+            fields,
+        ) from None
+    return await run_in_threadpool(search_conversations, db, payload)
 
 
 @router.get(

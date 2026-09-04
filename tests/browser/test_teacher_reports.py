@@ -1,5 +1,5 @@
 import json
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import urlsplit
 
 import pytest
 
@@ -309,23 +309,27 @@ def test_growth_marks_both_loading_phases_busy_then_renders_polite_empty_state(t
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_history_filter_pagination_and_review_anchor_are_canonical(teacher_browser, viewport):
+def test_search_filters_private_post_and_review_anchor_are_canonical(teacher_browser, viewport):
     context = teacher_browser.new_context()
     page = context.new_page()
     page_errors = []
     page.on("pageerror", lambda error: page_errors.append(str(error)))
     page.set_default_timeout(5_000)
     page.set_viewport_size(viewport)
-    history_urls = []
+    search_requests = []
     page.route(f"{teacher_browser.server.base_url}/api/children?include_inactive=true", lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)))
 
-    def history(route):
-        history_urls.append(route.request.url)
+    def search(route):
+        search_requests.append({
+            "method": route.request.method,
+            "url": route.request.url,
+            "body": route.request.post_data_json,
+        })
         route.fulfill(status=200, content_type="application/json", body=json.dumps({
             "items": [history_item()],
-            "next_before_id": 42,
+            "next_cursor": "Cursor_42",
         }, ensure_ascii=False))
-    page.route(f"{teacher_browser.server.base_url}/api/conversations/history**", history)
+    page.route(f"{teacher_browser.server.base_url}/api/conversations/search**", search)
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#search", wait_until="domcontentloaded")
     setup(page)
     page.get_by_role("heading", name="查找历史日记", exact=True).wait_for()
@@ -336,22 +340,30 @@ def test_history_filter_pagination_and_review_anchor_are_canonical(teacher_brows
     history_panel = page.locator(".search-view > .report-history-panel.card")
     assert hero.count() == 1
     assert "card" not in (hero.get_attribute("class") or "").split()
-    assert hero.get_by_text("幼儿筛选 · 不含关键词、日期范围或排序", exact=True).count() == 1
-    assert hero.get_by_text("每行保留会话 ID、日期、轮数、分析与审阅状态。", exact=True).count() == 1
+    assert hero.get_by_text("多条件私密筛选", exact=True).count() == 1
+    assert hero.get_by_text("筛选条件只用于本次教师查询，不会写入地址栏。", exact=True).count() == 1
     assert hero.locator("form").count() == 0
     assert filter_card.count() == 1
     assert history_panel.count() == 1
-    assert page.locator("#main label").count() == 1, page.locator("#main").inner_text()
     selector = page.get_by_label("筛选幼儿", exact=True)
     assert selector.locator("option").first.inner_text() == "全部幼儿"
     selector.select_option("8")
-    assert urlsplit(page.url).fragment == "search"
-    old_view = page.locator(".search-view").element_handle()
-    assert old_view is not None
-    page.get_by_role("button", name="查看历史", exact=True).click()
-    page.wait_for_url("**/teacher.html#search?child_id=8")
-    page.wait_for_function("oldView => !oldView.isConnected", arg=old_view)
-    page.wait_for_function("() => document.querySelector('#search-child-select')?.value === '8'")
+    page.get_by_label("开始日期", exact=True).fill("2026-08-01")
+    page.get_by_label("结束日期", exact=True).fill("2026-08-31")
+    keyword = page.get_by_label("关键词", exact=True)
+    keyword.fill("词" * 101)
+    assert keyword.evaluate("node => Array.from(node.value).length") == 100
+    keyword.fill("  50%_\\ 私密词  ")
+    page.get_by_role("checkbox", name="分析完成", exact=True).check()
+    page.get_by_role("checkbox", name="分析失败", exact=True).check()
+    page.get_by_role("checkbox", name="审阅完成", exact=True).check()
+    page.get_by_role("checkbox", name="暂不可审阅", exact=True).check()
+    page.get_by_role("checkbox", name="自然完成", exact=True).check()
+    page.get_by_role("checkbox", name="手动结束", exact=True).check()
+    page.get_by_label("排序", exact=True).select_option("completed_asc")
+    page.get_by_role("button", name="搜索历史", exact=True).click()
+    page.wait_for_function("() => window.location.hash === '#search'")
+    page.wait_for_function("() => document.querySelectorAll('.report-history-row').length === 1")
     link = page.get_by_role("link", name="打开会话 #42 的审阅", exact=True)
     link.wait_for()
     assert link.get_attribute("href") == "#review?conversation_id=42"
@@ -387,43 +399,64 @@ def test_history_filter_pagination_and_review_anchor_are_canonical(teacher_brows
     assert abs(filter_box["width"] - panel_box["width"]) <= 1
     assert hero_box["y"] + hero_box["height"] <= filter_box["y"] + 1
     assert filter_box["y"] + filter_box["height"] <= panel_box["y"] + 1
-    assert parse_qs(urlsplit(history_urls[-1]).query) == {
-        "limit": ["20"], "child_id": ["8"]
+    assert search_requests[-1] == {
+        "method": "POST",
+        "url": f"{teacher_browser.server.base_url}/api/conversations/search",
+        "body": {
+            "child_id": 8,
+            "date_from": "2026-08-01",
+            "date_to": "2026-08-31",
+            "analysis_status": ["succeeded", "failed"],
+            "review_status": ["confirmed", "unavailable"],
+            "end_reason": ["complete", "manual"],
+            "keyword": "50%_\\ 私密词",
+            "sort": "completed_asc",
+            "limit": 20,
+        },
     }
+    assert "私密词" not in page.url
+    assert "Cursor_42" not in page.url
+    assert urlsplit(page.url).fragment == "search"
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
-    assert page.locator("#main button:visible, #main a:visible, #main select:visible").evaluate_all("nodes => nodes.every(node => { const r=node.getBoundingClientRect(); return r.width>=44 && r.height>=44; })")
+    assert page.locator("#main button:visible, #main a:visible, #main select:visible, #main input[type=date]:visible, #main input[type=text]:visible").evaluate_all("nodes => nodes.every(node => { const r=node.getBoundingClientRect(); return r.width>=44 && r.height>=44; })")
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_history_append_failure_retains_rows_and_retries_same_cursor(teacher_browser, viewport):
+@pytest.mark.parametrize("failure_mode", ["http", "parse"])
+def test_search_append_failure_retains_rows_and_retries_frozen_body(
+    teacher_browser,
+    viewport,
+    failure_mode,
+):
     context = teacher_browser.new_context()
     page = context.new_page()
     page.set_default_timeout(5_000)
     page.set_viewport_size(viewport)
-    history_urls = []
+    search_bodies = []
     held_routes = []
     page.route(
         f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
         lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)),
     )
 
-    def history(route):
-        history_urls.append(route.request.url)
-        if len(history_urls) == 1:
-            body = {"items": [history_item(42)], "next_before_id": 42}
+    def search(route):
+        search_bodies.append(route.request.post_data_json)
+        if len(search_bodies) == 1:
+            body = {"items": [history_item(42)], "next_cursor": "Cursor_42"}
             route.fulfill(status=200, content_type="application/json", body=json.dumps(body, ensure_ascii=False))
             return
         held_routes.append(route)
 
-    page.route(f"{teacher_browser.server.base_url}/api/conversations/history**", history)
-    page.goto(f"{teacher_browser.server.base_url}/teacher.html#search?child_id=8", wait_until="domcontentloaded")
+    page.route(f"{teacher_browser.server.base_url}/api/conversations/search**", search)
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#search", wait_until="domcontentloaded")
     setup(page)
     page.get_by_role("heading", name="会话 #42", exact=True).wait_for()
     panel = page.locator(".report-history-panel")
     button = page.get_by_role("button", name="加载更多", exact=True)
-    with page.expect_request(lambda request: "before_id=42" in request.url) as append_request:
+    page.get_by_label("关键词", exact=True).fill("尚未提交的变化")
+    with page.expect_request(lambda request: request.url.endswith("/api/conversations/search") and request.method == "POST") as append_request:
         button.click()
-    assert urlsplit(append_request.value.url).query == "limit=20&child_id=8&before_id=42"
+    assert append_request.value.post_data_json["cursor"] == "Cursor_42"
     loading = page.get_by_text("正在加载更多历史记录…", exact=True)
     loading.wait_for()
     assert len(held_routes) == 1
@@ -437,7 +470,16 @@ def test_history_append_failure_retains_rows_and_retries_same_cursor(teacher_bro
     assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
     assert page.locator("#main button:visible, #main a:visible, #main select:visible").evaluate_all("nodes => nodes.every(node => { const r=node.getBoundingClientRect(); return r.width>=44 && r.height>=44; })")
 
-    held_routes[0].fulfill(status=503, content_type="text/plain", body="raw append secret")
+    if failure_mode == "http":
+        held_routes[0].fulfill(status=503, content_type="text/plain", body="raw append secret")
+    else:
+        malformed = history_item(999)
+        malformed["child"]["avatar"] = "https://private.example/avatar.webp"
+        held_routes[0].fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({"items": [malformed], "next_cursor": None}),
+        )
     alert = page.get_by_text("更多历史记录加载失败，已保留当前结果。请重试。", exact=True)
     alert.wait_for()
     assert alert.get_attribute("role") == "alert"
@@ -448,17 +490,23 @@ def test_history_append_failure_retains_rows_and_retries_same_cursor(teacher_bro
     assert button.evaluate("node => document.activeElement === node")
     assert page.locator(".search-view").get_attribute("aria-busy") is None
     assert panel.get_attribute("aria-busy") is None
-    assert urlsplit(history_urls[1]).query == "limit=20&child_id=8&before_id=42"
+    expected_append = {
+        "child_id": None, "date_from": None, "date_to": None,
+        "analysis_status": [], "review_status": [], "end_reason": [],
+        "keyword": None, "sort": "completed_desc", "limit": 20,
+        "cursor": "Cursor_42",
+    }
+    assert search_bodies[1] == expected_append
 
-    with page.expect_request(lambda request: "before_id=42" in request.url) as retry_request:
+    with page.expect_request(lambda request: request.url.endswith("/api/conversations/search") and request.method == "POST") as retry_request:
         button.click()
     page.get_by_text("正在加载更多历史记录…", exact=True).wait_for()
     assert len(held_routes) == 2
-    assert urlsplit(retry_request.value.url).query == "limit=20&child_id=8&before_id=42"
-    body = {"items": [history_item(41)], "next_before_id": None}
+    assert retry_request.value.post_data_json == expected_append
+    body = {"items": [history_item(41)], "next_cursor": None}
     held_routes[1].fulfill(status=200, content_type="application/json", body=json.dumps(body, ensure_ascii=False))
     page.get_by_role("heading", name="会话 #41", exact=True).wait_for()
-    assert urlsplit(history_urls[2]).query == "limit=20&child_id=8&before_id=42"
+    assert search_bodies[2] == expected_append
     assert page.locator(".report-history-row").count() == 2
     assert page.get_by_role("button", name="加载更多", exact=True).count() == 0
     assert page.get_by_text("第 2 页", exact=True).count() == 1
@@ -469,7 +517,74 @@ def test_history_append_failure_retains_rows_and_retries_same_cursor(teacher_bro
     assert status.get_attribute("aria-live") is None
 
 
-def test_history_held_first_page_exposes_busy_loading_then_polite_empty(teacher_browser):
+@pytest.mark.parametrize("outcome", ["resolve", "reject"])
+def test_search_new_search_supersedes_abort_insensitive_pending_append(
+    teacher_browser,
+    outcome,
+):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page_errors = []
+    page.on("pageerror", lambda error: page_errors.append(str(error)))
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#today", wait_until="domcontentloaded")
+    setup(page)
+    page.get_by_role("heading", name="今日任务", exact=True).wait_for()
+    page.evaluate("""children => {
+      const original = window.DuckAPI;
+      const item = (id, child) => ({
+        id,
+        child: {id: child.id, name: child.name, nickname: child.nickname, avatar: child.avatar},
+        date: '2026-08-23', completed_at: '2026-08-23T09:00:00Z',
+        status: 'ended', end_reason: 'complete', message_count: 4, round: 2,
+        analysis_status: 'succeeded', review_status: 'confirmed', revision: 3,
+      });
+      window.__searchItem = item;
+      window.DuckAPI = Object.freeze({
+        ...original,
+        request(path, options) {
+          if (path === '/api/children?include_inactive=true') return Promise.resolve(children);
+          if (path === '/api/conversations/search' && options.body.cursor === 'Append_Cursor') {
+            return new Promise((resolve, reject) => {
+              window.__lateAppend = {resolve, reject, signal: options.signal};
+            });
+          }
+          if (path === '/api/conversations/search' && options.body.child_id === 8) {
+            return Promise.resolve({items: [item(88, children[1])], next_cursor: null});
+          }
+          if (path === '/api/conversations/search') {
+            return Promise.resolve({items: [item(42, children[0])], next_cursor: 'Append_Cursor'});
+          }
+          return original.request(path, options);
+        },
+      });
+    }""", CHILDREN)
+    page.evaluate("location.hash = '#search'")
+    page.get_by_role("heading", name="会话 #42", exact=True).wait_for()
+    page.get_by_role("button", name="加载更多", exact=True).click()
+    page.wait_for_function("() => Boolean(window.__lateAppend)")
+
+    page.get_by_label("筛选幼儿", exact=True).select_option("8")
+    page.get_by_role("button", name="搜索历史", exact=True).click()
+    page.get_by_role("heading", name="会话 #88", exact=True).wait_for()
+    page.evaluate("""outcome => {
+      if (outcome === 'resolve') window.__lateAppend.resolve({
+        items: [window.__searchItem(41, {id: 7, name: '过期分页', nickname: null, avatar: null})],
+        next_cursor: null,
+      });
+      else window.__lateAppend.reject(new Error('private stale append detail'));
+    }""", outcome)
+    page.wait_for_timeout(50)
+
+    assert page.get_by_role("heading", name="会话 #88", exact=True).count() == 1
+    assert page.get_by_role("heading", name="会话 #42", exact=True).count() == 0
+    assert page.get_by_role("heading", name="会话 #41", exact=True).count() == 0
+    assert page.locator(".search-view").get_attribute("aria-busy") is None
+    assert "private stale append detail" not in page.locator("#main").inner_text()
+    assert page_errors == []
+
+
+def test_search_held_first_page_exposes_busy_loading_then_polite_empty(teacher_browser):
     context = teacher_browser.new_context()
     page = context.new_page()
     page_errors = []
@@ -484,22 +599,22 @@ def test_history_held_first_page_exposes_busy_loading_then_polite_empty(teacher_
         ...original,
         request(path, options) {
           if (path === '/api/children?include_inactive=true') return Promise.resolve(children);
-          if (path === '/api/conversations/history?limit=20&child_id=8') {
-            return new Promise(resolve => { window.__historyFirstPageResolve = resolve; });
+          if (path === '/api/conversations/search' && options.method === 'POST') {
+            return new Promise(resolve => { window.__searchFirstPageResolve = resolve; });
           }
           return original.request(path, options);
         },
       });
     }""", CHILDREN)
-    page.evaluate("location.hash = '#search?child_id=8'")
-    page.wait_for_function("() => Boolean(window.__historyFirstPageResolve)")
+    page.evaluate("location.hash = '#search'")
+    page.wait_for_function("() => Boolean(window.__searchFirstPageResolve)")
     view = page.locator(".search-view")
     loading = page.get_by_text("正在加载历史记录…", exact=True)
     assert view.get_attribute("aria-busy") == "true"
     assert loading.get_attribute("role") == "status"
     assert loading.get_attribute("aria-live") == "polite"
 
-    page.evaluate("() => window.__historyFirstPageResolve({items: [], next_before_id: null})")
+    page.evaluate("() => window.__searchFirstPageResolve({items: [], next_cursor: null})")
     empty = page.get_by_text("暂无历史记录", exact=True)
     empty.wait_for()
     assert empty.get_attribute("role") == "status"
@@ -509,30 +624,33 @@ def test_history_held_first_page_exposes_busy_loading_then_polite_empty(teacher_
     assert page_errors == []
 
 
-def test_history_invalid_child_alerts_focuses_selector_and_skips_request(teacher_browser):
+def test_search_invalid_date_range_alerts_and_skips_new_request(teacher_browser):
     context = teacher_browser.new_context()
     page = context.new_page()
     page.set_default_timeout(5_000)
-    history_urls = []
+    search_bodies = []
     page.route(
         f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
         lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)),
     )
 
-    def history(route):
-        history_urls.append(route.request.url)
-        route.fulfill(status=200, content_type="application/json", body='{"items":[],"next_before_id":null}')
+    def search(route):
+        search_bodies.append(route.request.post_data_json)
+        route.fulfill(status=200, content_type="application/json", body='{"items":[],"next_cursor":null}')
 
-    page.route(f"{teacher_browser.server.base_url}/api/conversations/history**", history)
-    page.goto(f"{teacher_browser.server.base_url}/teacher.html#search?child_id=999", wait_until="domcontentloaded")
+    page.route(f"{teacher_browser.server.base_url}/api/conversations/search**", search)
+    page.goto(f"{teacher_browser.server.base_url}/teacher.html#search", wait_until="domcontentloaded")
     setup(page)
-    alert = page.get_by_text("所选幼儿不存在，请重新选择。", exact=True)
+    page.get_by_text("暂无历史记录", exact=True).wait_for()
+    page.get_by_label("开始日期", exact=True).fill("2026-09-02")
+    page.get_by_label("结束日期", exact=True).fill("2026-09-01")
+    page.get_by_role("button", name="搜索历史", exact=True).click()
+    alert = page.get_by_text("日期范围无效，请检查后重试。", exact=True)
     alert.wait_for()
-    selector = page.get_by_label("筛选幼儿", exact=True)
     assert alert.get_attribute("role") == "alert"
-    assert selector.evaluate("node => document.activeElement === node")
+    assert page.get_by_label("开始日期", exact=True).evaluate("node => document.activeElement === node")
     assert page.locator(".search-view").get_attribute("aria-busy") is None
-    assert history_urls == []
+    assert len(search_bodies) == 1
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
@@ -577,28 +695,28 @@ def test_growth_initial_failure_has_accessible_retry(teacher_browser, viewport):
 
 @pytest.mark.parametrize("recovery", ["empty", "results"])
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
-def test_history_initial_failure_has_accessible_retry(teacher_browser, viewport, recovery):
+def test_search_initial_failure_has_accessible_exact_retry(teacher_browser, viewport, recovery):
     context = teacher_browser.new_context()
     page = context.new_page()
     page.set_default_timeout(5_000)
     page.set_viewport_size(viewport)
-    calls = []
+    bodies = []
     page.route(
         f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
         lambda route: route.fulfill(status=200, content_type="application/json", body=json.dumps(CHILDREN, ensure_ascii=False)),
     )
 
-    def history(route):
-        calls.append(route.request.url)
-        if len(calls) == 1:
+    def search(route):
+        bodies.append(route.request.post_data_json)
+        if len(bodies) == 1:
             route.fulfill(status=502, content_type="text/html", body="<h1>raw secret</h1>")
             return
         items = [] if recovery == "empty" else [history_item()]
         route.fulfill(status=200, content_type="application/json", body=json.dumps({
-            "items": items, "next_before_id": None,
+            "items": items, "next_cursor": None,
         }, ensure_ascii=False))
 
-    page.route(f"{teacher_browser.server.base_url}/api/conversations/history**", history)
+    page.route(f"{teacher_browser.server.base_url}/api/conversations/search**", search)
     page.goto(f"{teacher_browser.server.base_url}/teacher.html#search", wait_until="domcontentloaded")
     setup(page)
     retry = page.get_by_role("button", name="重试历史记录", exact=True)
@@ -618,7 +736,8 @@ def test_history_initial_failure_has_accessible_retry(teacher_browser, viewport,
         page.get_by_role("link", name="打开会话 #42 的审阅", exact=True).wait_for()
         assert status.inner_text() == ""
         assert status.get_attribute("role") is None
-    assert len(calls) == 2
+    assert len(bodies) == 2
+    assert bodies[0] == bodies[1]
 
 
 @pytest.mark.parametrize("outcome", ["resolve", "reject"])
@@ -693,30 +812,37 @@ def test_search_ignores_abort_insensitive_late_a_after_b(teacher_browser, outcom
         ...original,
         request(path, options) {
           if (path === '/api/children?include_inactive=true') return Promise.resolve(children);
-          if (path.includes('/api/conversations/history?') && path.includes('child_id=7')) {
+          if (path === '/api/conversations/search' && options.body.child_id === null) {
+            return Promise.resolve({items: [], next_cursor: null});
+          }
+          if (path === '/api/conversations/search' && options.body.child_id === 7) {
             return new Promise((resolve, reject) => {
-              window.__lateHistory = {resolve, reject, signal: options.signal};
+              window.__lateSearch = {resolve, reject, signal: options.signal};
             });
           }
-          if (path.includes('/api/conversations/history?') && path.includes('child_id=8')) {
-            return Promise.resolve({items: [item(88, children[1])], next_before_id: null});
+          if (path === '/api/conversations/search' && options.body.child_id === 8) {
+            return Promise.resolve({items: [item(88, children[1])], next_cursor: null});
           }
           return original.request(path, options);
         },
       });
     }""", CHILDREN)
-    page.evaluate("location.hash = '#search?child_id=7'")
-    page.wait_for_function("() => Boolean(window.__lateHistory)")
-    page.evaluate("location.hash = '#search?child_id=8'")
+    page.evaluate("location.hash = '#search'")
+    page.get_by_text("暂无历史记录", exact=True).wait_for()
+    page.get_by_label("筛选幼儿", exact=True).select_option("7")
+    page.get_by_role("button", name="搜索历史", exact=True).click()
+    page.wait_for_function("() => Boolean(window.__lateSearch)")
+    page.get_by_label("筛选幼儿", exact=True).select_option("8")
+    page.get_by_role("button", name="搜索历史", exact=True).click()
     page.get_by_role("link", name="打开会话 #88 的审阅", exact=True).wait_for()
     page.evaluate("""outcome => {
-      if (outcome === 'resolve') window.__lateHistory.resolve({
+      if (outcome === 'resolve') window.__lateSearch.resolve({
         items: [window.__historyItem(77, {
           id: 7, name: '小雨', nickname: '雨雨', avatar: null,
         })],
-        next_before_id: null,
+        next_cursor: null,
       });
-      else window.__lateHistory.reject(new Error('raw secret'));
+      else window.__lateSearch.reject(new Error('raw secret'));
     }""", outcome)
     page.wait_for_timeout(50)
 

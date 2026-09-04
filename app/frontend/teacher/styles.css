@@ -1083,9 +1083,33 @@ textarea { min-height: 46px; width: 100%; }
 .search-hero h1 { font-size: 26px; line-height: 1.35; overflow-wrap: anywhere; }
 .search-hero-eyebrow { color: var(--teacher-action-primary); font-size: 13px; font-weight: 700; overflow-wrap: anywhere; }
 .search-hero-description { line-height: 1.55; min-width: 0; overflow-wrap: anywhere; }
-.search-filter { align-items: end; display: grid; gap: 12px; grid-template-columns: minmax(0, 1fr) auto; padding: 14px 18px; }
+.search-filter { display: grid; gap: 16px; min-width: 0; padding: 16px 18px; }
 .search-filter .teacher-field { min-width: 0; }
 .search-filter button { padding-left: 18px; padding-right: 18px; }
+.search-filter-grid {
+  align-items: end;
+  display: grid;
+  gap: 12px;
+  grid-template-columns: minmax(150px, 1fr) repeat(2, minmax(145px, .8fr)) minmax(220px, 1.4fr) minmax(160px, .9fr);
+  min-width: 0;
+}
+.search-filter-groups { display: grid; gap: 12px; grid-template-columns: repeat(3, minmax(0, 1fr)); min-width: 0; }
+.search-choice-group { border: 1px solid var(--teacher-border-subtle); border-radius: 12px; min-width: 0; padding: 8px 10px 10px; }
+.search-choice-group legend { font-size: 13px; font-weight: 700; padding: 0 5px; }
+.search-choice-list { display: flex; flex-wrap: wrap; gap: 4px 10px; min-width: 0; }
+.search-choice {
+  align-items: center;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 7px;
+  min-height: 44px;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.search-choice input[type="checkbox"] { flex: 0 0 auto; height: 20px; min-height: 20px; width: 20px; }
+.search-filter-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 12px; justify-content: space-between; min-width: 0; }
+.search-filter-actions p { min-width: 0; overflow-wrap: anywhere; }
+.search-filter-actions .btn { margin-left: auto; min-width: 132px; }
 .report-history-panel { min-width: 0; overflow: hidden; padding: 0; }
 .report-history-panel-header { align-items: center; display: flex; gap: 16px; justify-content: space-between; min-width: 0; padding: 14px 16px 10px; }
 .report-history-panel-header h2 { font-size: 18px; line-height: 1.35; margin: 0; overflow-wrap: anywhere; }
@@ -1105,6 +1129,19 @@ textarea { min-height: 46px; width: 100%; }
 .report-history-row { align-items: center; border-top: 1px solid var(--teacher-border-subtle); min-height: 84px; padding: 12px 16px; }
 .report-history-id { font-size: 15px; line-height: 1.4; margin: 0; min-width: 0; overflow-wrap: anywhere; }
 .report-history-date { color: var(--teacher-text-secondary); min-width: 0; overflow-wrap: anywhere; }
+.report-history-child-identity { align-items: center; display: grid; gap: 10px; grid-template-columns: 40px minmax(0, 1fr); min-width: 0; }
+.report-history-avatar {
+  align-items: center;
+  background: var(--teacher-surface-soft);
+  border-radius: 50%;
+  display: inline-flex;
+  font-weight: 700;
+  height: 40px;
+  justify-content: center;
+  overflow: hidden;
+  width: 40px;
+}
+.report-history-avatar img { height: 100%; object-fit: cover; width: 100%; }
 .report-history-child-meta { display: grid; gap: 4px; min-width: 0; }
 .report-history-child { font-weight: 600; min-width: 0; overflow-wrap: anywhere; }
 .report-history-rounds { color: var(--teacher-text-secondary); font-size: 13px; }
@@ -1153,6 +1190,8 @@ h1[tabindex="-1"]:focus-visible, h2[tabindex="-1"]:focus-visible {
   .metrics { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .reports-view { gap: 12px; }
   .report-hero { grid-template-columns: minmax(0, 1fr); }
+  .search-filter-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .search-filter-grid .teacher-field:nth-child(4) { grid-column: span 2; }
   .management-hero { gap: 16px; }
   .management-copy h1 { font-size: 25px; }
   .management-row-actions { max-width: 190px; }
@@ -1181,6 +1220,10 @@ h1[tabindex="-1"]:focus-visible, h2[tabindex="-1"]:focus-visible {
   .monthly-roster-row { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .monthly-roster-row .teacher-field:first-child { grid-column: 1 / -1; }
   .monthly-roster-remove { grid-column: 1 / -1; width: 100%; }
+  .search-filter-grid, .search-filter-groups { grid-template-columns: minmax(0, 1fr); }
+  .search-filter-grid .teacher-field:nth-child(4) { grid-column: auto; }
+  .search-filter-actions { align-items: stretch; flex-direction: column; }
+  .search-filter-actions .btn { margin-left: 0; width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

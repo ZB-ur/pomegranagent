@@ -770,6 +770,130 @@ def test_release_monthly_roster_dialog_keeps_fixed_actions_and_scrollable_rows(
     )
 
 
+@pytest.mark.parametrize("viewport", TEACHER_VIEWPORTS)
+def test_release_search_filters_results_and_focus_stay_in_bounds(
+    teacher_browser,
+    viewport,
+    record_property,
+):
+    context = teacher_browser.new_context()
+    page = context.new_page()
+    page.set_default_timeout(5_000)
+    page.set_viewport_size(viewport)
+    _install_static_routes(page, teacher_browser)
+    children = [{
+        "id": 71,
+        "name": "视口验收幼儿名字很长但不能挤出筛选网格",
+        "nickname": "视口验收",
+        "avatar": None,
+        "active": True,
+        "deactivated_at": None,
+        "future_roster_entries": 0,
+        "has_active_conversation": False,
+    }]
+    search_calls = []
+
+    def search(route):
+        request = _assert_fixture_request(
+            route,
+            teacher_browser,
+            method="POST",
+            path="/api/conversations/search",
+        )
+        search_calls.append(request.post_data_json)
+        _fulfill_json(route, {
+            "items": [{
+                "id": 701,
+                "child": {"id": 71, "name": children[0]["name"], "nickname": children[0]["nickname"], "avatar": None},
+                "date": "2026-08-23",
+                "completed_at": "2026-08-23T09:00:00Z",
+                "status": "ended",
+                "end_reason": "complete",
+                "message_count": 4,
+                "round": 2,
+                "analysis_status": "succeeded",
+                "review_status": "confirmed",
+                "revision": 3,
+            }],
+            "next_cursor": "Release_Cursor_701",
+        })
+
+    page.route(
+        f"{teacher_browser.server.base_url}/api/children?include_inactive=true",
+        lambda route: _fulfill_json(route, children),
+    )
+    page.route(f"{teacher_browser.server.base_url}/api/conversations/search", search)
+    page.goto(
+        f"{teacher_browser.server.base_url}/teacher.html#search",
+        wait_until="domcontentloaded",
+    )
+    page.get_by_label("设置教师 PIN", exact=True).fill(PIN)
+    page.get_by_label("再次输入教师 PIN", exact=True).fill(PIN)
+    page.get_by_role("button", name="设置并解锁", exact=True).click()
+    page.get_by_role("link", name="打开会话 #701 的审阅", exact=True).wait_for()
+
+    form = page.locator(".search-filter")
+    primary = page.locator(".search-filter-grid")
+    groups = page.locator(".search-filter-groups")
+    panel = page.locator(".report-history-panel")
+    row = page.locator(".report-history-row")
+    for container, children_locator in [
+        (primary, primary.locator(":scope > .teacher-field")),
+        (groups, groups.locator(":scope > .search-choice-group")),
+    ]:
+        container_box = _rect(container)
+        boxes = [_rect(children_locator.nth(index)) for index in range(children_locator.count())]
+        for box in boxes:
+            assert container_box["left"] <= box["left"] <= box["right"] <= container_box["right"] + 1
+            assert container_box["top"] <= box["top"] <= box["bottom"] <= container_box["bottom"] + 1
+        for index, first in enumerate(boxes):
+            for second in boxes[index + 1:]:
+                assert (
+                    first["right"] <= second["left"] + 1
+                    or second["right"] <= first["left"] + 1
+                    or first["bottom"] <= second["top"] + 1
+                    or second["bottom"] <= first["top"] + 1
+                ), (first, second)
+
+    form_box = _rect(form)
+    panel_box = _rect(panel)
+    row_box = _rect(row)
+    assert form_box["bottom"] <= panel_box["top"] + 1
+    assert panel_box["left"] <= row_box["left"] <= row_box["right"] <= panel_box["right"] + 1
+    control_heights = page.locator(
+        ".search-filter select, .search-filter input[type=date], "
+        ".search-filter input[type=text], .search-filter button, .search-choice"
+    ).evaluate_all("nodes => nodes.map(node => node.getBoundingClientRect().height)")
+    assert control_heights and min(control_heights) >= 43, control_heights
+
+    keyword = page.get_by_label("关键词", exact=True)
+    _keyboard_focus(page, keyword)
+    focus = _focus_diagnostics(keyword)
+    assert focus["focused"] is True
+    assert min(focus["bestRatios"]) >= 3, focus
+    assert page.evaluate("document.documentElement.scrollWidth <= document.documentElement.clientWidth")
+    assert search_calls == [{
+        "child_id": None,
+        "date_from": None,
+        "date_to": None,
+        "analysis_status": [],
+        "review_status": [],
+        "end_reason": [],
+        "keyword": None,
+        "sort": "completed_desc",
+        "limit": 20,
+    }]
+    record_property(
+        "task8.search_geometry",
+        json.dumps({
+            "filter_height": form_box["height"],
+            "focus_ratios": focus["bestRatios"],
+            "minimum_target_height": min(control_heights),
+            "viewport": viewport,
+        }, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+    )
+
+
 def _named_child_rows(database: Path, name: str) -> list[tuple[str, str | None]]:
     with sqlite3.connect(f"{database.as_uri()}?mode=ro", uri=True) as connection:
         return connection.execute(
