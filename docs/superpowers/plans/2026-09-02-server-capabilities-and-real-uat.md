@@ -573,7 +573,14 @@ git commit -m "feat: add deterministic full demo seed"
 - Modify: `tests/test_interaction_acceptance_runner.py`
 - Modify: `tests/browser/child_server.py`
 - Modify: `tests/browser/conftest.py`
+- Modify: `tests/browser/test_child_shell.py`
 - Modify: `tests/browser/test_release_viewports.py`
+- Modify: `tests/conftest.py`
+- Create: `tests/fixtures/interaction_acceptance/p5_selector_oracle.json`
+- Create: `tests/fixtures/live_provider/avatars/PROVENANCE.json`
+- Modify: `tests/test_database_safety.py`
+- Modify: `tests/test_frontend_foundation.py`
+- Modify: `tests/test_review_atomicity.py`
 
 **Interfaces:**
 - Produces: a non-default `run_live_provider_uat.py` command that retains one complete evidence directory and owns only its own process group.
@@ -608,7 +615,7 @@ Add the four new teacher capabilities, runtime/media public reads, two teacher v
 - [ ] **Step 6: Commit harness and gate changes**
 
 ```bash
-git add scripts/run_live_provider_uat.py scripts/live_provider_uat_server.py tests/test_live_provider_uat_harness.py docs/live-provider-uat-checklist.md tests/fixtures/live_provider/avatars .gitignore scripts/run_interaction_acceptance.py tests/test_interaction_acceptance_runner.py tests/browser/child_server.py tests/browser/conftest.py tests/browser/test_release_viewports.py
+git add scripts/run_live_provider_uat.py scripts/live_provider_uat_server.py tests/test_live_provider_uat_harness.py docs/live-provider-uat-checklist.md tests/fixtures/live_provider/avatars .gitignore scripts/run_interaction_acceptance.py tests/test_interaction_acceptance_runner.py tests/browser/child_server.py tests/browser/conftest.py tests/browser/test_child_shell.py tests/browser/test_release_viewports.py tests/conftest.py tests/fixtures/interaction_acceptance/p5_selector_oracle.json tests/test_database_safety.py tests/test_frontend_foundation.py tests/test_review_atomicity.py
 git commit -m "test: add retained live provider UAT"
 ```
 
@@ -635,11 +642,18 @@ Start the harness, then use the connected in-app browser to walk the approved ch
 
 - [ ] **Step 9: Final evidence validation**
 
-Verify every manifest screenshot hash, confirm no secret/PIN/cookie pattern in artifacts, compare protected main-checkout DB/WAL/SHM/log/TTS hashes, and open the retained DB read-only to confirm live conversation, analysis, confirmed review, weekly metric, and search result provenance.
+Accept evidence only after the harness exits successfully with a terminal
+`COMPLETE` manifest. The harness performs the authoritative registered-secret
+and forbidden-pattern scans over its bounded artifact inventory; do not run a
+broad text search across `reviewed-source/`, because ordinary source literals
+are not retained credentials and would create false positives. Verify every
+manifest screenshot hash, compare protected main-checkout DB/WAL/SHM/log/TTS
+hashes, and open the retained DB read-only to confirm live conversation,
+analysis, confirmed review, weekly metric, and search result provenance.
 
 ```bash
-if rg -n "DEEPSEEK_API_KEY|Authorization:|Bearer |teacher_session|pin" artifacts/real-uat/<run-id>; then exit 1; fi
-shasum -a 256 -c artifacts/real-uat/<run-id>/SHA256SUMS
+python -c 'import json; value=json.load(open("artifacts/real-uat/<run-id>/manifest.json", encoding="utf-8")); assert value["status"] == "COMPLETE"'
+(cd artifacts/real-uat/<run-id> && shasum -a 256 -c SHA256SUMS)
 ```
 
 - [ ] **Step 10: Commit only curated documentation, never raw retained evidence**
