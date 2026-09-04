@@ -3246,6 +3246,7 @@ backend | ^test_provider_settings_normalize_official_deepseek_openai_base_urls\[
 backend | ^test_provider_settings_default_to_the_compatible_deepseek_v1_path$ | 1 | 4,7,8,14
 backend | ^test_provider_settings_reject_nonofficial_deepseek_origins_and_paths\[(insecure-scheme|attacker-origin|lookalike-suffix-origin|official-prefix-origin|userinfo-username|userinfo-password|nondefault-port|query|fragment|other-version-path|endpoint-path|nested-compatible-path)\]$ | 12 | 4,7,8,14
 backend | ^test_(fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_failure|execute_retained_uat_rejects_teacher_pin_not_matching_runtime_scrypt)$ | 2 | 14
+backend | ^test_finish_live_server_retries_cleanup_after_stopper_fails_before_signal$ | 1 | 14
 """
 
 

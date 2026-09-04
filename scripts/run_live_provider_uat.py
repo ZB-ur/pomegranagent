@@ -455,6 +455,9 @@ class LiveServerSession:
     output: object
     finished: bool = False
     provider_events: tuple[Mapping[str, object], ...] = ()
+    process_stopped: bool = False
+    output_closed: bool = False
+    telemetry_finished: bool = False
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -2476,7 +2479,7 @@ def finish_live_server(
     stopper: Callable[[OwnedProcess], None] = stop_owned_process_group,
     peek_exit: Callable[[OwnedProcess], int | None] | None = None,
 ) -> tuple[Mapping[str, object], ...]:
-    """Stop, reap, flush, and drain the one session exactly once."""
+    """Retry incomplete cleanup while preserving each completed component."""
 
     if not isinstance(session, LiveServerSession):
         raise HarnessSafetyError("live server session is invalid")
@@ -2484,37 +2487,49 @@ def finish_live_server(
         return session.provider_events
     error: BaseException | None = None
     observe = _peek_owned_exit if peek_exit is None else peek_exit
-    if observe(session.owned) is not None:
-        error = HarnessSafetyError("live server exited unexpectedly")
-    try:
-        stopper(session.owned)
-    except BaseException as exc:
-        error = exc
-    try:
-        session.output.flush()
-        os.fsync(session.output.fileno())
-    except BaseException as exc:
-        if error is None:
-            error = exc
-    finally:
+    if not session.process_stopped:
+        if observe(session.owned) is not None:
+            error = HarnessSafetyError("live server exited unexpectedly")
         try:
-            session.output.close()
+            stopper(session.owned)
+        except BaseException as exc:
+            error = exc
+        else:
+            session.process_stopped = True
+    if not session.output_closed:
+        try:
+            session.output.flush()
+            os.fsync(session.output.fileno())
         except BaseException as exc:
             if error is None:
                 error = exc
-    try:
-        events = tuple(session.telemetry.finish())
-    except BaseException as exc:
-        events = ()
-        if error is None:
-            error = exc
-    session.provider_events = events
-    session.finished = True
+        else:
+            try:
+                session.output.close()
+            except BaseException as exc:
+                if error is None:
+                    error = exc
+            else:
+                session.output_closed = True
+    if not session.telemetry_finished:
+        try:
+            events = tuple(session.telemetry.finish())
+        except BaseException as exc:
+            if error is None:
+                error = exc
+        else:
+            session.provider_events = events
+            session.telemetry_finished = True
+    session.finished = (
+        session.process_stopped
+        and session.output_closed
+        and session.telemetry_finished
+    )
     if error is not None:
         if isinstance(error, HarnessSafetyError):
             raise error
         raise HarnessSafetyError("live server cleanup failed") from error
-    return events
+    return session.provider_events
 
 
 def atomic_write_json(

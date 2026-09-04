@@ -2469,6 +2469,85 @@ def test_live_server_session_closes_parent_fds_and_finishes_once(tmp_path):
     assert session.output.closed is True
 
 
+def test_finish_live_server_retries_cleanup_after_stopper_fails_before_signal(
+    tmp_path,
+):
+    module = _module()
+    process = _FakeProcess()
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
+    output = (tmp_path / "server.log").open("w+b")
+    output.write(b"safe buffered server output\n")
+    retained_events = ({"operation": "chat_reply"},)
+
+    class CountingTelemetry:
+        def __init__(self):
+            self.finish_calls = 0
+
+        def finish(self):
+            self.finish_calls += 1
+            if self.finish_calls > 1:
+                pytest.fail("telemetry finish must not be repeated after it succeeds")
+            return retained_events
+
+    telemetry = CountingTelemetry()
+    session = module.LiveServerSession(
+        port=43123,
+        owned=owned,
+        telemetry=telemetry,
+        output=output,
+    )
+    stopper_calls = []
+
+    def flaky_stopper(candidate):
+        stopper_calls.append(candidate.pgid)
+        if len(stopper_calls) == 1:
+            raise OSError("synthetic failure before any process signal")
+        candidate.process.returncode = -signal.SIGTERM
+
+    with pytest.raises(module.HarnessSafetyError, match="cleanup failed"):
+        module.finish_live_server(
+            session,
+            stopper=flaky_stopper,
+            peek_exit=lambda _owned: None,
+        )
+
+    assert stopper_calls == [process.pid]
+    assert process.returncode is None
+    assert session.finished is False
+    assert output.closed is True
+    assert telemetry.finish_calls == 1
+    assert session.provider_events == retained_events
+
+    retried = module.finish_live_server(
+        session,
+        stopper=flaky_stopper,
+        peek_exit=lambda _owned: None,
+    )
+
+    assert stopper_calls == [process.pid, process.pid]
+    assert process.returncode == -signal.SIGTERM
+    assert retried == retained_events
+    assert session.provider_events == retained_events
+    assert session.finished is True
+    assert output.closed is True
+    assert telemetry.finish_calls == 1
+
+    repeated = module.finish_live_server(
+        session,
+        stopper=lambda _owned: pytest.fail("finished session must not stop twice"),
+        peek_exit=lambda _owned: pytest.fail("finished session must not be observed"),
+    )
+
+    assert repeated == retained_events
+    assert stopper_calls == [process.pid, process.pid]
+    assert telemetry.finish_calls == 1
+
+
 def test_finish_live_server_still_cleans_owned_group_when_leader_already_exited(tmp_path):
     module = _module()
     process = _FakeProcess()
