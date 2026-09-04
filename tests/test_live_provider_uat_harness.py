@@ -5,6 +5,7 @@ import asyncio
 from dataclasses import replace
 from datetime import date, datetime, timezone
 import hashlib
+import hmac
 import importlib
 import json
 import io
@@ -771,6 +772,109 @@ def _provider_values():
     }
 
 
+@pytest.mark.parametrize(
+    ("base_url", "canonical"),
+    [
+        pytest.param(
+            "https://api.deepseek.com",
+            "https://api.deepseek.com",
+            id="official-root",
+        ),
+        pytest.param(
+            "https://api.deepseek.com/",
+            "https://api.deepseek.com",
+            id="official-root-trailing-slash",
+        ),
+        pytest.param(
+            "https://api.deepseek.com/v1",
+            "https://api.deepseek.com/v1",
+            id="compatible-v1",
+        ),
+        pytest.param(
+            "https://api.deepseek.com/v1/",
+            "https://api.deepseek.com/v1",
+            id="compatible-v1-trailing-slash",
+        ),
+    ],
+)
+def test_provider_settings_normalize_official_deepseek_openai_base_urls(
+    base_url,
+    canonical,
+):
+    module = _module()
+
+    selected = module.select_provider_settings(
+        {},
+        {**_provider_values(), "DEEPSEEK_BASE_URL": base_url},
+    )
+
+    assert selected["DEEPSEEK_BASE_URL"] == canonical
+
+
+def test_provider_settings_default_to_the_compatible_deepseek_v1_path():
+    module = _module()
+    values = _provider_values()
+    values.pop("DEEPSEEK_BASE_URL")
+
+    selected = module.select_provider_settings({}, values)
+
+    assert selected["DEEPSEEK_BASE_URL"] == "https://api.deepseek.com/v1"
+
+
+@pytest.mark.parametrize(
+    "base_url",
+    [
+        pytest.param("http://api.deepseek.com/v1", id="insecure-scheme"),
+        pytest.param("https://attacker.example/v1", id="attacker-origin"),
+        pytest.param(
+            "https://api.deepseek.example/v1",
+            id="lookalike-suffix-origin",
+        ),
+        pytest.param(
+            "https://api.deepseek.com.attacker.example/v1",
+            id="official-prefix-origin",
+        ),
+        pytest.param(
+            "https://user@api.deepseek.com/v1",
+            id="userinfo-username",
+        ),
+        pytest.param(
+            "https://user:pass@api.deepseek.com/v1",
+            id="userinfo-password",
+        ),
+        pytest.param(
+            "https://api.deepseek.com:444/v1",
+            id="nondefault-port",
+        ),
+        pytest.param(
+            "https://api.deepseek.com/v1?token=x",
+            id="query",
+        ),
+        pytest.param(
+            "https://api.deepseek.com/v1#fragment",
+            id="fragment",
+        ),
+        pytest.param("https://api.deepseek.com/v2", id="other-version-path"),
+        pytest.param(
+            "https://api.deepseek.com/chat/completions",
+            id="endpoint-path",
+        ),
+        pytest.param(
+            "https://api.deepseek.com/v1/chat/completions",
+            id="nested-compatible-path",
+        ),
+    ],
+)
+def test_provider_settings_reject_nonofficial_deepseek_origins_and_paths(base_url):
+    module = _module()
+
+    with pytest.raises(module.HarnessSafetyError, match="provider configuration"):
+        module.select_provider_settings(
+            {},
+            {**_provider_values(), "DEEPSEEK_BASE_URL": base_url},
+        )
+
+
 def test_provider_settings_use_exact_allowlist_and_reject_unsafe_values():
     module = _module()
     dotenv_values = {
@@ -1150,7 +1254,7 @@ def test_live_server_validates_exact_runtime_paths_and_redacts_log_records(tmp_p
         "APP_REVIEWED_SOURCE_TREE_OID": source_tree,
         "APP_TTS_CACHE_PATH": str(tts),
         "DEEPSEEK_API_KEY": secret,
-        "DEEPSEEK_BASE_URL": "https://api.deepseek.example/v1",
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
         "DEEPSEEK_MAX_TOKENS": "8192",
         "DEEPSEEK_MODEL": "deepseek-safe-model",
         "DEEPSEEK_TIMEOUT": "120",
@@ -2848,7 +2952,7 @@ def test_live_server_retains_runtime_root_and_resource_inode_identity(tmp_path):
         **_install_server_source_boundary(run_root),
         "APP_TTS_CACHE_PATH": str(run_root / "tts-cache"),
         "DEEPSEEK_API_KEY": "sk-server-secret-1234567890",
-        "DEEPSEEK_BASE_URL": "https://api.deepseek.example/v1",
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
         "DEEPSEEK_MAX_TOKENS": "8192",
         "DEEPSEEK_MODEL": "deepseek-safe-model",
         "DEEPSEEK_TIMEOUT": "120",
@@ -4094,7 +4198,7 @@ def test_compressed_png_metadata_secret_is_rejected_without_echo(tmp_path):
     assert secret not in str(scan_error.value)
 
 
-def _create_seed_provenance_database(plan):
+def _create_seed_provenance_database(plan, *, teacher_pin=None):
     from PIL import Image
 
     plan.media.mkdir(mode=0o700)
@@ -4106,6 +4210,18 @@ def _create_seed_provenance_database(plan):
         lossless=True,
     )
     seed_avatar = seed_avatar_path.read_bytes()
+    pin_salt = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    pin_hash = (
+        "b" * 128
+        if teacher_pin is None
+        else hashlib.scrypt(
+            teacher_pin.encode("ascii"),
+            salt=bytes.fromhex(pin_salt),
+            n=2**14,
+            r=8,
+            p=1,
+        ).hex()
+    )
     with sqlite3.connect(plan.database) as connection:
         schema_fixture = Path(__file__).with_name("fixtures") / "schema_2.sql"
         schema_ddl = schema_fixture.read_text(encoding="utf-8").split(
@@ -4129,17 +4245,18 @@ def _create_seed_provenance_database(plan):
                 version_num VARCHAR(32) NOT NULL PRIMARY KEY
             );
             INSERT INTO alembic_version VALUES ('20260902_0002');
-            INSERT INTO teacher_credentials
-                (id, pin_salt, pin_hash, created_at, updated_at)
-            VALUES
-                (1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
-                 '2026-09-01 00:00:00.000000', '2026-09-01 00:00:00.000000');
             INSERT INTO teacher_sessions (id, token_hash, created_at)
             VALUES
                 (1, 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
                  '2026-09-01 00:00:00.000000');
             """
+        )
+        connection.execute(
+            "INSERT INTO teacher_credentials "
+            "(id, pin_salt, pin_hash, created_at, updated_at) "
+            "VALUES (1, ?, ?, '2026-09-01 00:00:00.000000', "
+            "'2026-09-01 00:00:00.000000')",
+            (pin_salt, pin_hash),
         )
         connection.execute(
             "INSERT INTO avatar_media "
@@ -4857,10 +4974,23 @@ def test_database_provenance_rejects_seed_entities_incomplete_projection_and_unf
         module.validate_database_provenance(plan, entity_ids, baseline)
 
 
-def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_failure(
-    tmp_path, monkeypatch,
+def _exercise_fake_harness_dry_run(
+    tmp_path,
+    monkeypatch,
+    *,
+    credential_matches: bool,
 ):
     module = _module()
+    real_compare_digest = hmac.compare_digest
+    constant_time_comparisons = []
+    credential_terminal_order = []
+
+    def observed_compare_digest(candidate, retained):
+        constant_time_comparisons.append((candidate, retained))
+        credential_terminal_order.append("teacher-credential-compare")
+        return real_compare_digest(candidate, retained)
+
+    monkeypatch.setattr(hmac, "compare_digest", observed_compare_digest)
     terminal_events = []
     real_atomic_write_json = module.atomic_write_json
     real_manifest_scan = module._assert_secret_free_payload
@@ -4868,8 +4998,13 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
     real_terminal_verify = module._verify_complete_precommit_state
 
     def observed_atomic_write(path, value, **kwargs):
+        committing_complete = (
+            path.name == "manifest.json" and value.get("status") == "COMPLETE"
+        )
+        if committing_complete:
+            credential_terminal_order.append("COMPLETE")
         result = real_atomic_write_json(path, value, **kwargs)
-        if path.name == "manifest.json" and value.get("status") == "COMPLETE":
+        if committing_complete:
             terminal_events.append("COMPLETE")
         return result
 
@@ -4905,7 +5040,7 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
         "PATH": "/synthetic/bin",
         "LANG": "C.UTF-8",
         "DEEPSEEK_API_KEY": provider_secret,
-        "DEEPSEEK_BASE_URL": "https://api.deepseek.example/v1",
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
         "DEEPSEEK_MODEL": "deepseek-safe-model",
         "DEEPSEEK_TIMEOUT": "120",
         "DEEPSEEK_MAX_TOKENS": "8192",
@@ -4953,7 +5088,10 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
         plan.app_log.write_bytes(b"")
         plan.tts_cache.mkdir(mode=0o700)
         plan.screenshots.mkdir(mode=0o700)
-        _create_seed_provenance_database(plan)
+        _create_seed_provenance_database(
+            plan,
+            teacher_pin=teacher_secret if credential_matches else "593184",
+        )
         return {
             "archive_directory": None,
             "database_path": str(plan.database),
@@ -5082,34 +5220,57 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
         return safe_events(live_plan[0])
 
     stdout = io.StringIO()
-    plan = module.execute_retained_uat(
-        repository=repository,
-        expected_head=HEAD,
-        environ=environment,
-        dotenv_values={},
-        input_stream=io.StringIO(
-            module.canonical_json_line({
-                "kind": "teacher_credential",
-                "type": "register_secret",
-                "value": teacher_secret,
-            })
-            + module.canonical_json_line({"type": "finalize"})
-        ),
-        output_stream=stdout,
-        python_executable=PYTHON,
-        now=lambda: fixed_now,
-        nonce=lambda: "123456789abc",
-        business_today=lambda: date(2026, 9, 4),
-        source_materializer=lambda candidate: replace(
-            candidate,
-            source_tree_oid="b" * 40,
-        ),
-        capture_resources=capture_resources,
-        seed_runner=seed_runner,
-        server_starter=server_starter,
-        readiness_probe=readiness_probe,
-        server_finisher=server_finisher,
-    )
+    def execute():
+        return module.execute_retained_uat(
+            repository=repository,
+            expected_head=HEAD,
+            environ=environment,
+            dotenv_values={},
+            input_stream=io.StringIO(
+                module.canonical_json_line({
+                    "kind": "teacher_credential",
+                    "type": "register_secret",
+                    "value": teacher_secret,
+                })
+                + module.canonical_json_line({"type": "finalize"})
+            ),
+            output_stream=stdout,
+            python_executable=PYTHON,
+            now=lambda: fixed_now,
+            nonce=lambda: "123456789abc",
+            business_today=lambda: date(2026, 9, 4),
+            source_materializer=lambda candidate: replace(
+                candidate,
+                source_tree_oid="b" * 40,
+            ),
+            capture_resources=capture_resources,
+            seed_runner=seed_runner,
+            server_starter=server_starter,
+            readiness_probe=readiness_probe,
+            server_finisher=server_finisher,
+        )
+
+    def comparison_shapes():
+        return [
+            (type(candidate) is type(retained), len(candidate), len(retained))
+            for candidate, retained in constant_time_comparisons
+        ]
+
+    if not credential_matches:
+        with pytest.raises(module.HarnessSafetyError, match="teacher credential"):
+            execute()
+        assert comparison_shapes() == [(True, 128, 128)]
+        assert credential_terminal_order == ["teacher-credential-compare"]
+        plan = live_plan[0]
+        manifest_payload = plan.manifest.read_text(encoding="utf-8")
+        assert json.loads(manifest_payload)["status"] == "FAILED"
+        assert "COMPLETE" not in terminal_events
+        assert "PASS" not in manifest_payload
+        return
+
+    plan = execute()
+    assert comparison_shapes() == [(True, 128, 128)]
+    assert credential_terminal_order == ["teacher-credential-compare", "COMPLETE"]
 
     assert stdout.getvalue().count("\n") == 1
     runtime = json.loads(stdout.getvalue())
@@ -5201,3 +5362,25 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
         ("start", 43210, 43210),
         ("stop", 43210, signal.SIGTERM),
     ]
+
+
+def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_failure(
+    tmp_path,
+    monkeypatch,
+):
+    _exercise_fake_harness_dry_run(
+        tmp_path,
+        monkeypatch,
+        credential_matches=True,
+    )
+
+
+def test_execute_retained_uat_rejects_teacher_pin_not_matching_runtime_scrypt(
+    tmp_path,
+    monkeypatch,
+):
+    _exercise_fake_harness_dry_run(
+        tmp_path,
+        monkeypatch,
+        credential_matches=False,
+    )

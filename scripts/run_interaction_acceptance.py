@@ -3241,6 +3241,11 @@ backend | ^test_search_fails_closed_when_review_status_drifts_during_projection$
 backend | ^test_protected_teacher_json_write_inventory_uses_manual_body_dependencies$ | 1 | 3,14
 backend | ^test_unauthenticated_teacher_write_rejects_before_receiving_json_body\[(post-/api/children|put-/api/children/\{child_id\}|post-/api/ducks|put-/api/ducks/\{duck_id\}|post-/api/roster/auto|post-/api/roster/month|put-/api/roster/\{roster_date\}|put-/api/conversations/\{conversation_id\}/review|post-/api/dimensions|put-/api/dimensions/\{dim_id\}|put-/api/ducks/\{duck_id\}/archive)\]$ | 11 | 3,14
 backend | ^test_manual_body_dependency_preserves_strict_content_type_behavior$ | 1 | 3,14
+backend | ^test_roster_telemetry_never_reads_or_reports_a_body_rejected_by_auth\[(valid-single-chunk|malformed-single-chunk|malformed-multiple-chunks)\]$ | 3 | 3,14
+backend | ^test_provider_settings_normalize_official_deepseek_openai_base_urls\[(official-root|official-root-trailing-slash|compatible-v1|compatible-v1-trailing-slash)\]$ | 4 | 4,7,8,14
+backend | ^test_provider_settings_default_to_the_compatible_deepseek_v1_path$ | 1 | 4,7,8,14
+backend | ^test_provider_settings_reject_nonofficial_deepseek_origins_and_paths\[(insecure-scheme|attacker-origin|lookalike-suffix-origin|official-prefix-origin|userinfo-username|userinfo-password|nondefault-port|query|fragment|other-version-path|endpoint-path|nested-compatible-path)\]$ | 12 | 4,7,8,14
+backend | ^test_(fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_failure|execute_retained_uat_rejects_teacher_pin_not_matching_runtime_scrypt)$ | 2 | 14
 """
 
 
@@ -4439,6 +4444,7 @@ def build_command_specs(repo_root: Path, artifact_root: Path) -> tuple[CommandSp
         "tests/test_weekly_reports.py",
         "tests/test_conversation_search.py",
         "tests/test_demo_seed.py",
+        "tests/test_live_provider_uat_harness.py",
         "tests/e2e.py",
     )
 

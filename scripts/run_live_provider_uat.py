@@ -14,6 +14,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
 import hashlib
+import hmac
 import http.client
 import io
 import json
@@ -1513,17 +1514,19 @@ def _canonical_provider_values(values: Mapping[str, object]) -> dict[str, str]:
         raise _provider_configuration_error() from None
     if (
         parsed.scheme != "https"
-        or not parsed.hostname
+        or parsed.hostname != "api.deepseek.com"
         or parsed.username is not None
         or parsed.password is not None
         or parsed.query
         or parsed.fragment
-        or any(part == ".." for part in parsed.path.split("/"))
         or any(character.isspace() for character in selected["DEEPSEEK_BASE_URL"])
-        or port is not None and not (1 <= port <= 65535)
+        or port not in {None, 443}
+        or parsed.path not in {"", "/", "/v1", "/v1/"}
     ):
         raise _provider_configuration_error()
-    selected["DEEPSEEK_BASE_URL"] = selected["DEEPSEEK_BASE_URL"].rstrip("/")
+    selected["DEEPSEEK_BASE_URL"] = "https://api.deepseek.com" + (
+        "/v1" if parsed.path in {"/v1", "/v1/"} else ""
+    )
     if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", selected["DEEPSEEK_MODEL"]) is None:
         raise _provider_configuration_error()
     if re.fullmatch(r"[1-9][0-9]{0,2}", selected["DEEPSEEK_TIMEOUT"]) is None:
@@ -2997,6 +3000,67 @@ def _database_evidence(path: Path) -> dict[str, object]:
         "wal": _file_evidence(Path(f"{path}-wal")),
         "shm": _file_evidence(Path(f"{path}-shm")),
     }
+
+
+def _verify_retained_teacher_credential(plan: RunPlan, teacher_pin: str) -> None:
+    """Bind the controller PIN to the credential actually retained by the UAT DB."""
+
+    failed = HarnessSafetyError("retained teacher credential verification failed")
+    if (
+        not isinstance(teacher_pin, str)
+        or re.fullmatch(r"[0-9]{4,6}", teacher_pin) is None
+    ):
+        raise failed
+    assert_run_plan_identity(plan)
+    try:
+        with _sqlite_shadow(plan.database) as shadow, sqlite3.connect(
+            f"{shadow.as_uri()}?mode=ro",
+            uri=True,
+        ) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            if connection.execute("PRAGMA query_only").fetchone() != (1,):
+                raise failed
+            if connection.execute(
+                "SELECT type FROM sqlite_schema WHERE name = 'teacher_credentials'"
+            ).fetchall() != [("table",)]:
+                raise failed
+            columns = tuple(
+                row[1]
+                for row in connection.execute(
+                    'PRAGMA table_info("teacher_credentials")'
+                ).fetchall()
+            )
+            if columns != _RUNTIME_DB_COLUMNS["teacher_credentials"]:
+                raise failed
+            rows = connection.execute(
+                "SELECT pin_salt, pin_hash FROM teacher_credentials LIMIT 2"
+            ).fetchall()
+            if len(rows) != 1:
+                raise failed
+            pin_salt, retained_hash = rows[0]
+            if (
+                not isinstance(pin_salt, str)
+                or re.fullmatch(r"[0-9a-f]{32}", pin_salt) is None
+                or not isinstance(retained_hash, str)
+                or re.fullmatch(r"[0-9a-f]{128}", retained_hash) is None
+            ):
+                raise failed
+    except (HarnessSafetyError, OSError, sqlite3.Error, TypeError, ValueError):
+        raise failed from None
+
+    try:
+        candidate_hash = hashlib.scrypt(
+            teacher_pin.encode("ascii"),
+            salt=bytes.fromhex(pin_salt),
+            n=2**14,
+            r=8,
+            p=1,
+        ).hex()
+    except (UnicodeError, TypeError, ValueError):
+        raise failed from None
+    if not hmac.compare_digest(candidate_hash, retained_hash):
+        raise failed
+    assert_run_plan_identity(plan)
 
 
 def _git_capture(root: Path, runner, argv: tuple[str, ...]) -> bytes:
@@ -6186,10 +6250,14 @@ def execute_retained_uat(
             raise HarnessSafetyError("controller finalize was not requested")
         if not control.has_teacher_secret:
             raise HarnessSafetyError("controller teacher credential was not registered")
+        teacher_pin = control.secret_for_scan()
+        if not isinstance(teacher_pin, str):
+            raise HarnessSafetyError("controller teacher credential was not registered")
         provider_events = server_finisher(session)
         session_finished = True
         if plan.source_root_identity is not None:
             assert_reviewed_source_pinned(plan)
+        _verify_retained_teacher_credential(plan, teacher_pin)
 
         controller = controller_validator(plan)
         if any(
@@ -6238,11 +6306,7 @@ def execute_retained_uat(
         atomic_write_json(plan.resources_after, after, pinned_plan=plan)
         assert_protected_resources_equal(before_second, after)
         provider_secrets = (str(provider["DEEPSEEK_API_KEY"]),)
-        runtime_secrets = tuple(
-            secret
-            for secret in (control.secret_for_scan(),)
-            if isinstance(secret, str) and secret
-        )
+        runtime_secrets = (teacher_pin,)
         scan_retained_artifacts(
             plan.root,
             provider_secrets=provider_secrets,
