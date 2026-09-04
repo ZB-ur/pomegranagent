@@ -16,6 +16,7 @@ from PIL import Image
 ROOT = Path(__file__).resolve().parents[2]
 BROWSER_ENTRY = ROOT / "app/frontend/child/browser.mjs"
 CHILD_SERVER = ROOT / "tests/browser/child_server.py"
+BROWSER_CONFTEST = ROOT / "tests/browser/conftest.py"
 VIEWPORTS = [{"width": 1024, "height": 576}, {"width": 1280, "height": 720}]
 VIEWPORT_IDS = ["1024x576", "1280x720"]
 READY_GEOMETRY = {
@@ -42,6 +43,17 @@ def browser_source() -> str:
 
 def load_child_server_module():
     spec = importlib.util.spec_from_file_location("task6b_child_server", CHILD_SERVER)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_browser_conftest_module():
+    spec = importlib.util.spec_from_file_location(
+        "task6b_browser_conftest",
+        BROWSER_CONFTEST,
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -463,6 +475,18 @@ def test_real_resource_snapshots_are_read_only(tmp_path):
             "tts_cache",
             "media",
         )
+        assert module.FileSnapshot._fields == (
+            "kind",
+            "mode",
+            "device",
+            "inode",
+            "link_count",
+            "size",
+            "mtime_ns",
+            "sha256",
+            "symlink_target",
+            "error",
+        )
         assert first == second
         assert first.database == module.file_snapshot(database)
         assert first.database_wal == module.file_snapshot(wal)
@@ -500,6 +524,252 @@ def test_real_resource_snapshots_keep_stable_missing_resources_typed(tmp_path):
     assert first.log.kind is module.FileKind.MISSING
     assert first.tts_cache.root.kind is module.FileKind.MISSING
     assert first.media.root.kind is module.FileKind.MISSING
+
+
+def _browser_resource_paths(module, tmp_path):
+    database = tmp_path / "app.db"
+    log = tmp_path / "app.log"
+    tts = tmp_path / "tts"
+    media = tmp_path / "media"
+    with sqlite3.connect(database) as connection:
+        connection.execute("CREATE TABLE sample (value TEXT)")
+        connection.execute("INSERT INTO sample VALUES ('synthetic')")
+    log.write_bytes(b"synthetic-log")
+    media.mkdir()
+    return database, log, tts, media
+
+
+def test_browser_resource_guard_allows_stable_missing_optional_paths_and_keeps_them_equality_sensitive(
+    tmp_path,
+):
+    module = load_child_server_module()
+    database, log, tts, media = _browser_resource_paths(module, tmp_path)
+
+    baseline = module.capture_resource_snapshots(database, log, tts, media)
+    stable = module.capture_resource_snapshots(database, log, tts, media)
+
+    assert baseline == stable
+    assert baseline.database_wal.kind is module.FileKind.MISSING
+    assert baseline.database_shm.kind is module.FileKind.MISSING
+    assert baseline.tts_cache.root.kind is module.FileKind.MISSING
+    module.assert_safe_resource_snapshots(baseline, phase="baseline")
+    module.assert_safe_resource_snapshots(stable, phase="final")
+
+    tts.mkdir()
+    changed = module.capture_resource_snapshots(database, log, tts, media)
+    module.assert_safe_resource_snapshots(changed, phase="final")
+    assert changed != baseline
+
+
+@pytest.mark.parametrize(
+    ("missing_name", "expected_issue"),
+    [
+        ("database", "database has forbidden kind missing"),
+        ("log", "log has forbidden kind missing"),
+    ],
+)
+def test_browser_resource_guard_rejects_missing_required_primary_files(
+    tmp_path,
+    missing_name,
+    expected_issue,
+):
+    module = load_child_server_module()
+    database, log, tts, media = _browser_resource_paths(module, tmp_path)
+    {"database": database, "log": log}[missing_name].unlink()
+
+    snapshots = module.capture_resource_snapshots(database, log, tts, media)
+
+    with pytest.raises(
+        AssertionError,
+        match=re.escape(
+            f"browser baseline resource snapshot unsafe: {expected_issue}"
+        ),
+    ):
+        module.assert_safe_resource_snapshots(snapshots, phase="baseline")
+
+
+@pytest.mark.parametrize("phase", ["baseline", "final"])
+@pytest.mark.parametrize(
+    ("case", "expected_issue"),
+    [
+        ("root-symlink", "tts_cache root has forbidden kind symlink"),
+        (
+            "nested-symlink",
+            "tts_cache entry nested-link has forbidden kind symlink",
+        ),
+        ("root-special", "tts_cache root has forbidden kind special"),
+        ("nested-special", "tts_cache entry nested-fifo has forbidden kind special"),
+        ("root-unreadable", "log has forbidden kind unreadable (PermissionError)"),
+        (
+            "nested-unreadable",
+            "tts_cache entry blocked.bin has forbidden kind unreadable (PermissionError)",
+        ),
+        ("root-hardlink", "log has link_count 2, expected 1"),
+        (
+            "nested-hardlink",
+            "tts_cache entry linked.bin has link_count 2, expected 1",
+        ),
+        ("scan-error", "tts_cache scan failed at . (PermissionError)"),
+    ],
+)
+def test_browser_resource_guard_rejects_exact_unsafe_fixture_states(
+    monkeypatch,
+    tmp_path,
+    phase,
+    case,
+    expected_issue,
+):
+    module = load_child_server_module()
+    database, log, tts, media = _browser_resource_paths(module, tmp_path)
+    target = tmp_path / "link-target"
+    original_open = module.os.open
+    original_scandir = module.os.scandir
+
+    if case == "root-symlink":
+        target.mkdir()
+        tts.symlink_to(target, target_is_directory=True)
+    elif case == "root-special":
+        os.mkfifo(tts)
+    else:
+        tts.mkdir()
+        if case == "nested-symlink":
+            (tts / "nested-link").symlink_to("missing-target")
+        elif case == "nested-special":
+            os.mkfifo(tts / "nested-fifo")
+        elif case == "root-unreadable":
+            def deny_log(candidate, *args, **kwargs):
+                if Path(candidate) == log:
+                    raise PermissionError("synthetic root denial")
+                return original_open(candidate, *args, **kwargs)
+
+            monkeypatch.setattr(module.os, "open", deny_log)
+        elif case == "nested-unreadable":
+            (tts / "blocked.bin").write_bytes(b"blocked")
+
+            def deny_nested(candidate, *args, **kwargs):
+                if candidate == "blocked.bin" and kwargs.get("dir_fd") is not None:
+                    raise PermissionError("synthetic nested denial")
+                return original_open(candidate, *args, **kwargs)
+
+            monkeypatch.setattr(module.os, "open", deny_nested)
+        elif case == "root-hardlink":
+            os.link(log, tmp_path / "outside-log-hardlink")
+        elif case == "nested-hardlink":
+            nested = tts / "linked.bin"
+            nested.write_bytes(b"same-content")
+            os.link(nested, tmp_path / "outside-nested-hardlink")
+        elif case == "scan-error":
+            tts_identity = (tts.stat().st_dev, tts.stat().st_ino)
+
+            def deny_scan(candidate):
+                if isinstance(candidate, int):
+                    details = os.fstat(candidate)
+                    if (details.st_dev, details.st_ino) == tts_identity:
+                        raise PermissionError("synthetic scan denial")
+                return original_scandir(candidate)
+
+            monkeypatch.setattr(module.os, "scandir", deny_scan)
+
+    snapshots = module.capture_resource_snapshots(database, log, tts, media)
+    stable = module.capture_resource_snapshots(database, log, tts, media)
+
+    assert stable == snapshots
+    with pytest.raises(
+        AssertionError,
+        match=re.escape(
+            f"browser {phase} resource snapshot unsafe: {expected_issue}"
+        ),
+    ):
+        module.assert_safe_resource_snapshots(snapshots, phase=phase)
+
+
+def test_real_resource_snapshots_detect_same_content_external_hardlink_mutation(tmp_path):
+    module = load_child_server_module()
+    database, log, tts, media = _browser_resource_paths(module, tmp_path)
+    tts.mkdir()
+    external_link = tmp_path / "outside-log-hardlink"
+
+    before = module.capture_resource_snapshots(database, log, tts, media)
+    os.link(log, external_link)
+    after = module.capture_resource_snapshots(database, log, tts, media)
+
+    assert before.log.sha256 == after.log.sha256
+    assert before.log.inode == after.log.inode
+    assert before.log.link_count == 1
+    assert after.log.link_count == 2
+    assert before != after
+    with pytest.raises(
+        AssertionError,
+        match=re.escape(
+            "browser final resource snapshot unsafe: log has link_count 2, expected 1"
+        ),
+    ):
+        module.assert_safe_resource_snapshots(after, phase="final")
+
+
+@pytest.mark.parametrize(
+    ("unsafe_case", "expected_issue"),
+    [
+        ("missing-database", "database has forbidden kind missing"),
+        ("missing-log", "log has forbidden kind missing"),
+        ("root-symlink", "tts_cache root has forbidden kind symlink"),
+    ],
+)
+def test_child_server_fixture_rejects_unsafe_baseline_before_process_launch(
+    monkeypatch,
+    tmp_path,
+    unsafe_case,
+    expected_issue,
+):
+    child_module = load_child_server_module()
+    fixture_module = load_browser_conftest_module()
+    protected = tmp_path / "protected"
+    protected.mkdir()
+    database = protected / "app.db"
+    log = protected / "logs/app.log"
+    tts = protected / "tts"
+    media = protected / "media"
+    log.parent.mkdir()
+    if unsafe_case != "missing-database":
+        with sqlite3.connect(database) as connection:
+            connection.execute("CREATE TABLE sample (value TEXT)")
+    if unsafe_case != "missing-log":
+        log.write_bytes(b"synthetic-log")
+    if unsafe_case == "root-symlink":
+        target = protected / "tts-target"
+        target.mkdir()
+        tts.symlink_to(target, target_is_directory=True)
+
+    monkeypatch.setattr(child_module, "REAL_DATABASE_PATH", database)
+    monkeypatch.setattr(child_module, "REAL_LOG_PATH", log)
+    monkeypatch.setattr(child_module, "REAL_TTS_CACHE_PATH", tts)
+    monkeypatch.setattr(child_module, "REAL_MEDIA_ROOT", media)
+    monkeypatch.setattr(
+        fixture_module,
+        "_load_child_server_module",
+        lambda: child_module,
+    )
+    launch_calls = []
+
+    def launch_spy(*args, **kwargs):
+        launch_calls.append((args, kwargs))
+        raise AssertionError("process launch attempted")
+
+    monkeypatch.setattr(fixture_module.subprocess, "Popen", launch_spy)
+    fixture = fixture_module.child_server.__wrapped__(
+        chromium_browser=object(),
+        tmp_path=tmp_path,
+        unused_tcp_port=43123,
+    )
+
+    with pytest.raises(
+        AssertionError,
+        match=re.escape(
+            f"browser baseline resource snapshot unsafe: {expected_issue}"
+        ),
+    ):
+        next(fixture)
+    assert launch_calls == []
 
 
 def test_real_resource_snapshots_detect_missing_to_dangling_symlink(tmp_path):

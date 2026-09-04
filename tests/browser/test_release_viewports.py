@@ -22,6 +22,7 @@ from tests.browser.test_teacher_accessibility import (
 from tests.browser.test_teacher_review_loading import queue_row, review_detail
 
 
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 TEACHER_VIEWPORTS = [
     pytest.param({"width": 1024, "height": 768}, id="1024x768"),
     pytest.param({"width": 1440, "height": 900}, id="1440x900"),
@@ -49,6 +50,55 @@ LIVE_AVATAR_PROVENANCE = (
     Path(__file__).resolve().parents[1]
     / "fixtures/live_provider/avatars/PROVENANCE.json"
 )
+LIVE_AVATAR_PROVENANCE_SHA256 = (
+    "ffd5aa9988dbc99093c979d02ba85018c150e00388f2eeeaa5a7444b53f6ad72"
+)
+EXPECTED_LIVE_AVATAR_PROVENANCE = {
+    "schema_version": 2,
+    "authorization": {
+        "basis": "project-owner-supplied IP asset",
+        "scope": "internal product/testing",
+        "external_redistribution": "not asserted",
+    },
+    "fixtures": [
+        {
+            "path": "child.png",
+            "sha256": "89b67c4243f1a5812e48ba115e0035a392cdd1897590b69d4a88755142b8ecd6",
+            "origin": {
+                "repository_path": "app/frontend/assets/duck-front-128.png",
+                "sha256": "89b67c4243f1a5812e48ba115e0035a392cdd1897590b69d4a88755142b8ecd6",
+            },
+            "derivation": {
+                "steps": ["byte-for-byte copy"],
+                "output_sha256": "89b67c4243f1a5812e48ba115e0035a392cdd1897590b69d4a88755142b8ecd6",
+            },
+            "metadata_evidence": {
+                "unsafe_fields_absent": ["exif", "photoshop", "icc_profile", "xmp"],
+                "exif_entry_count": 0,
+            },
+        },
+        {
+            "path": "duck.jpg",
+            "sha256": "a34318126cc0371919ee33751be4042897ee1e86b10070bbf454ef3b32956d22",
+            "origin": {
+                "repository_path": "app/frontend/assets/duck-side-512.png",
+                "sha256": "275c8db008ff40a16f9fec1236271bf9f44d7ea9a94aae98170fd55078b24378",
+            },
+            "derivation": {
+                "steps": [
+                    "/usr/bin/sips -s format jpeg -s formatOptions 90 --resampleHeightWidth 128 128",
+                    "/opt/homebrew/bin/jpegtran -copy none -optimize",
+                ],
+                "pre_normalization_sha256": "d2c0e097af4e7923ea87e79eb485907d3b7058e155bd15f62b075cad7e7104c2",
+                "normalized_sha256": "a34318126cc0371919ee33751be4042897ee1e86b10070bbf454ef3b32956d22",
+            },
+            "metadata_evidence": {
+                "unsafe_fields_absent": ["exif", "photoshop", "icc_profile", "xmp"],
+                "exif_entry_count": 0,
+            },
+        },
+    ],
+}
 
 
 def _parse_avatar_multipart(payload: bytes, content_type: str) -> tuple[str, str, bytes]:
@@ -117,23 +167,18 @@ REVIEW_WORKSPACE_BREAKPOINTS = [
 
 
 def test_live_avatar_fixtures_have_provenance_and_no_unsafe_metadata():
-    provenance = json.loads(LIVE_AVATAR_PROVENANCE.read_text(encoding="utf-8"))
-    assert provenance["schema_version"] == 1
+    provenance_bytes = LIVE_AVATAR_PROVENANCE.read_bytes()
+    assert hashlib.sha256(provenance_bytes).hexdigest() == LIVE_AVATAR_PROVENANCE_SHA256
+    provenance = json.loads(provenance_bytes.decode("utf-8", errors="strict"))
+    assert provenance == EXPECTED_LIVE_AVATAR_PROVENANCE
     records = {item["path"]: item for item in provenance["fixtures"]}
     assert set(records) == {fixture.name for _kind, fixture, *_rest in LIVE_AVATAR_FIXTURES}
 
     for _kind, fixture, image_format, image_size, expected_sha256 in LIVE_AVATAR_FIXTURES:
         record = records[fixture.name]
         assert record["sha256"] == expected_sha256
-        assert record["origin"] == {
-            "introduced_commit": "7bc5934a0976d6189cc6481005be45fcd272fb7a",
-            "upstream_source": "unrecorded",
-        }
-        assert record["license"] == {
-            "scope": "repository acceptance testing only",
-            "status": "unverified",
-        }
-        assert isinstance(record["derivation"], str) and record["derivation"]
+        source = REPOSITORY_ROOT / record["origin"]["repository_path"]
+        assert hashlib.sha256(source.read_bytes()).hexdigest() == record["origin"]["sha256"]
         assert hashlib.sha256(fixture.read_bytes()).hexdigest() == expected_sha256
         with Image.open(fixture) as decoded:
             decoded.load()

@@ -41,6 +41,7 @@ class FileSnapshot(NamedTuple):
     mode: int | None = None
     device: int | None = None
     inode: int | None = None
+    link_count: int | None = None
     size: int | None = None
     mtime_ns: int | None = None
     sha256: str | None = None
@@ -289,6 +290,7 @@ def _snapshot_fields(details: os.stat_result) -> dict[str, int]:
         "mode": stat.S_IMODE(details.st_mode),
         "device": details.st_dev,
         "inode": details.st_ino,
+        "link_count": details.st_nlink,
         "size": details.st_size,
         "mtime_ns": details.st_mtime_ns,
     }
@@ -299,6 +301,7 @@ def _snapshot_identity(details: os.stat_result) -> tuple[int, ...]:
         details.st_mode,
         details.st_dev,
         details.st_ino,
+        details.st_nlink,
         details.st_size,
         details.st_mtime_ns,
     )
@@ -464,6 +467,7 @@ def directory_snapshot(path: Path) -> DirectorySnapshot:
                     stat.S_IMODE(opened.st_mode) != snapshot.mode
                     or opened.st_dev != snapshot.device
                     or opened.st_ino != snapshot.inode
+                    or opened.st_nlink != snapshot.link_count
                     or opened.st_size != snapshot.size
                     or opened.st_mtime_ns != snapshot.mtime_ns
                 ):
@@ -490,6 +494,7 @@ def directory_snapshot(path: Path) -> DirectorySnapshot:
             stat.S_IMODE(opened.st_mode) != root.mode
             or opened.st_dev != root.device
             or opened.st_ino != root.inode
+            or opened.st_nlink != root.link_count
             or opened.st_size != root.size
             or opened.st_mtime_ns != root.mtime_ns
         ):
@@ -555,6 +560,106 @@ def capture_resource_snapshots(
         directory_snapshot(tts_cache),
         directory_snapshot(media),
     )
+
+
+def _file_snapshot_issue(
+    label: str,
+    snapshot: FileSnapshot,
+    *,
+    allowed_kinds: frozenset[FileKind],
+) -> str | None:
+    if snapshot.kind not in allowed_kinds:
+        error = f" ({snapshot.error})" if snapshot.error is not None else ""
+        return f"{label} has forbidden kind {snapshot.kind.value}{error}"
+    if snapshot.kind is FileKind.REGULAR and snapshot.link_count != 1:
+        return f"{label} has link_count {snapshot.link_count}, expected 1"
+    if snapshot.error is not None:
+        return f"{label} has unexpected snapshot error {snapshot.error}"
+    return None
+
+
+def _directory_snapshot_issues(
+    label: str,
+    snapshot: DirectorySnapshot,
+) -> tuple[str, ...]:
+    issues = []
+    root_issue = _file_snapshot_issue(
+        f"{label} root",
+        snapshot.root,
+        allowed_kinds=frozenset({FileKind.MISSING, FileKind.DIRECTORY}),
+    )
+    if root_issue is not None:
+        issues.append(root_issue)
+    if snapshot.scan_error is not None:
+        issues.append(
+            f"{label} scan failed at {snapshot.scan_source or '.'} "
+            f"({snapshot.scan_error})"
+        )
+    elif snapshot.scan_source is not None:
+        issues.append(f"{label} scan_source present without scan_error")
+    for entry in snapshot.entries:
+        entry_issue = _file_snapshot_issue(
+            f"{label} entry {entry.relative_path}",
+            entry.snapshot,
+            allowed_kinds=frozenset({FileKind.REGULAR, FileKind.DIRECTORY}),
+        )
+        if entry_issue is not None:
+            issues.append(entry_issue)
+    return tuple(issues)
+
+
+def assert_safe_resource_snapshots(
+    snapshots: ResourceSnapshots,
+    *,
+    phase: str,
+) -> None:
+    if phase not in {"baseline", "final"}:
+        raise ValueError(f"unsupported browser resource snapshot phase: {phase!r}")
+
+    issues = []
+    required_file_kinds = frozenset({FileKind.REGULAR})
+    for label, snapshot in (
+        ("database", snapshots.database),
+        ("log", snapshots.log),
+    ):
+        issue = _file_snapshot_issue(
+            label,
+            snapshot,
+            allowed_kinds=required_file_kinds,
+        )
+        if issue is not None:
+            issues.append(issue)
+
+    optional_file_kinds = frozenset({FileKind.MISSING, FileKind.REGULAR})
+    for label, snapshot in (
+        ("database_wal", snapshots.database_wal),
+        ("database_shm", snapshots.database_shm),
+    ):
+        issue = _file_snapshot_issue(
+            label,
+            snapshot,
+            allowed_kinds=optional_file_kinds,
+        )
+        if issue is not None:
+            issues.append(issue)
+
+    if (
+        snapshots.database.kind is FileKind.REGULAR
+        and snapshots.database_logical is None
+    ):
+        issues.append("database logical digest is missing")
+    elif (
+        snapshots.database.kind is FileKind.MISSING
+        and snapshots.database_logical is not None
+    ):
+        issues.append("database logical digest exists for a missing database")
+
+    issues.extend(_directory_snapshot_issues("tts_cache", snapshots.tts_cache))
+    issues.extend(_directory_snapshot_issues("media", snapshots.media))
+    if issues:
+        raise AssertionError(
+            f"browser {phase} resource snapshot unsafe: " + "; ".join(issues)
+        )
 
 
 def make_loopback_connect_guard(tripwire: Path, original_connect: Callable):

@@ -2524,7 +2524,16 @@ browser | ^test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds\[(102
 browser | ^test_release_avatar_upload_and_fallback_stay_in_bounds\[(1024x768|1440x900)\]$ | 2 | 12,14"""
 
 
-_P5_TASK9_BRIEF_SHA256 = "74b1ed539b8674daf4ddc32713d42767f12bad1e7508db43bcd2645fd18b6e37"
+_P5_SELECTOR_ORACLE = (
+    Path(__file__).resolve().parent
+    / "fixtures/interaction_acceptance/p5_selector_oracle.json"
+)
+_P5_SELECTOR_ORACLE_SHA256 = (
+    "3c07aa2a66c32839f47b0e313aa796cf08bb5dc2cd6197eb14b0a22045c2f6a4"
+)
+_P6_SELECTOR_ADDITIONS_SHA256 = (
+    "38ef5ceacb3b34e5a64e92f5d98b1a7deeeee5a9831281671c4ebac7241b9031"
+)
 
 
 def _selector_rows(text):
@@ -2537,26 +2546,67 @@ def _selector_rows(text):
     return tuple(rows)
 
 
+def test_p5_selector_oracle_fixture_has_frozen_sha_and_literal_schema():
+    oracle_bytes = _P5_SELECTOR_ORACLE.read_bytes()
+
+    assert hashlib.sha256(oracle_bytes).hexdigest() == _P5_SELECTOR_ORACLE_SHA256
+    oracle = json.loads(oracle_bytes.decode("utf-8", errors="strict"))
+    assert type(oracle) is dict
+    assert tuple(oracle) == ("schema_version", "release", "row_count", "rows")
+    assert oracle["schema_version"] == 1
+    assert oracle["release"] == "P5"
+    assert oracle["row_count"] == 97
+    assert type(oracle["rows"]) is list
+    assert len(oracle["rows"]) == 97
+    for row in oracle["rows"]:
+        assert type(row) is dict
+        assert tuple(row) == (
+            "command_id",
+            "node_pattern",
+            "expected_count",
+            "gates",
+        )
+        assert row["command_id"] in {
+            "backend",
+            "shared_node",
+            "child_node",
+            "teacher_node",
+            "browser",
+        }
+        assert type(row["node_pattern"]) is str and row["node_pattern"]
+        assert type(row["expected_count"]) is int and row["expected_count"] > 0
+        assert type(row["gates"]) is list and row["gates"]
+        assert all(type(gate) is int and 1 <= gate <= 14 for gate in row["gates"])
+        assert row["gates"] == sorted(set(row["gates"]))
+
+
 def _p5_frozen_manifest_rows():
-    brief_path = (
-        Path(__file__).resolve().parents[1]
-        / ".superpowers"
-        / "sdd"
-        / "2026-08-23-teacher-workbench-and-acceptance"
-        / "task-9-brief.md"
+    oracle_bytes = _P5_SELECTOR_ORACLE.read_bytes()
+    assert hashlib.sha256(oracle_bytes).hexdigest() == _P5_SELECTOR_ORACLE_SHA256
+    oracle = json.loads(oracle_bytes.decode("utf-8", errors="strict"))
+    assert tuple(oracle) == ("schema_version", "release", "row_count", "rows")
+    assert (oracle["schema_version"], oracle["release"], oracle["row_count"]) == (
+        1,
+        "P5",
+        97,
     )
-    brief_bytes = brief_path.read_bytes()
-    assert hashlib.sha256(brief_bytes).hexdigest() == _P5_TASK9_BRIEF_SHA256
-    brief = brief_bytes.decode("utf-8", errors="strict")
-    marker = "```text\nbackend |"
-    start = brief.index(marker, brief.index("complete machine-readable selector")) + len(
-        "```text\n"
+    assert len(oracle["rows"]) == 97
+    return tuple(
+        (
+            row["command_id"],
+            row["node_pattern"],
+            row["expected_count"],
+            tuple(row["gates"]),
+        )
+        for row in oracle["rows"]
     )
-    end = brief.index("\n```", start)
-    return _selector_rows(brief[start:end])
 
 
 def _p6_frozen_manifest_rows():
+    assert (
+        hashlib.sha256(_P6_SELECTOR_ADDITIONS_TEXT.encode("utf-8")).hexdigest()
+        == _P6_SELECTOR_ADDITIONS_SHA256
+    )
     return _selector_rows(_P6_SELECTOR_ADDITIONS_TEXT)
 
 
@@ -2564,7 +2614,7 @@ def _frozen_manifest_rows():
     return _p5_frozen_manifest_rows() + _p6_frozen_manifest_rows()
 
 
-def test_p5_task9_selector_oracle_is_an_exact_ordered_prefix_with_p6_additions_separate():
+def test_literal_p5_selector_oracle_is_exact_ordered_prefix_with_p6_suffix_separate():
     module = importlib.import_module("scripts.run_interaction_acceptance")
     p5_rows = _p5_frozen_manifest_rows()
     p6_rows = _p6_frozen_manifest_rows()

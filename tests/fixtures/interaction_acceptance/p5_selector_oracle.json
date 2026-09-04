@@ -1,0 +1,833 @@
+{
+  "schema_version": 1,
+  "release": "P5",
+  "row_count": 97,
+  "rows": [
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_pytest_application_logging_uses_only_the_disposable_runtime_file$",
+      "expected_count": 1,
+      "gates": [
+        1,
+        14
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_pytest_subprocess_does_not_change_application_db$",
+      "expected_count": 1,
+      "gates": [
+        1
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_review_atomic_pytest_subprocess_does_not_change_the_real_application_log$",
+      "expected_count": 1,
+      "gates": [
+        1
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_health_returns_frozen_runtime_versions$",
+      "expected_count": 1,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_version_manifest_is_no_store$",
+      "expected_count": 1,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_teacher_navigation_is_blocked_until_runtime_ready$",
+      "expected_count": 1,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_teacher_navigation_requires_both_runtime_and_authentication_and_can_relock$",
+      "expected_count": 1,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_chat_writes_one_pair_after_ai_success$",
+      "expected_count": 1,
+      "gates": [
+        3
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_duplicate_request_replays_stored_pair_without_a_second_ai_call$",
+      "expected_count": 1,
+      "gates": [
+        3
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_internal_chat_fault_marks_current_claim_failed_and_allows_retry\\[(commit|context)\\]$",
+      "expected_count": 2,
+      "gates": [
+        3,
+        4,
+        14
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_fixed_max_round_commit_fault_marks_current_claim_failed_and_allows_retry$",
+      "expected_count": 1,
+      "gates": [
+        3,
+        7,
+        14
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_complete_replays_the_frozen_snapshot_without_a_second_job$",
+      "expected_count": 1,
+      "gates": [
+        3,
+        7
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_completion_write_failure_rolls_back_the_job_and_end_state\\[(commit|flush)\\]$",
+      "expected_count": 2,
+      "gates": [
+        3,
+        7,
+        14
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_process_builds_the_frozen_input_outside_a_database_session_and_projects_once$",
+      "expected_count": 1,
+      "gates": [
+        7
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_restart_recovers_only_expired_processing_jobs_and_preserves_attempts$",
+      "expected_count": 1,
+      "gates": [
+        7
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_failure_uses_bounded_backoff_then_a_sanitized_terminal_state\\[(1-pending-1|2-pending-5|3-failed-0)\\]$",
+      "expected_count": 3,
+      "gates": [
+        7,
+        14
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_teacher_retry_requires_session_and_reuses_the_failed_job$",
+      "expected_count": 1,
+      "gates": [
+        7
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_teacher_retry_has_frozen_pending_and_terminal_state_contracts\\[(pending-2-200-None|processing-1-409-ANALYSIS_IN_PROGRESS|succeeded-1-409-ANALYSIS_ALREADY_SUCCEEDED)\\]$",
+      "expected_count": 3,
+      "gates": [
+        7
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_lifespan_uses_the_injected_single_worker_for_health_and_teardown$",
+      "expected_count": 1,
+      "gates": [
+        7
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_auto_generates_five_rotating_weekday_pairs_and_replays_first_snapshot$",
+      "expected_count": 1,
+      "gates": [
+        3,
+        11
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_draft_review_replaces_the_full_document_and_refetches_identically$",
+      "expected_count": 1,
+      "gates": [
+        3,
+        8
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_confirm_requires_complete_reasoned_scores_then_leaves_every_queue$",
+      "expected_count": 1,
+      "gates": [
+        8
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_reliable_end_to_end_flow$",
+      "expected_count": 1,
+      "gates": [
+        7,
+        8,
+        14
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_teacher_queue_uses_job_matrix_frozen_counts_sort_and_historical_child$",
+      "expected_count": 1,
+      "gates": [
+        9
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_succeeded_detail_has_one_complete_ordered_document_or_a_stable_corruption_error$",
+      "expected_count": 1,
+      "gates": [
+        9
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_child_deactivation_preserves_history_and_reactivation_restores_today_visibility$",
+      "expected_count": 1,
+      "gates": [
+        12
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_resource_state_routes_are_locked_and_hard_delete_is_an_auth_first_tombstone$",
+      "expected_count": 1,
+      "gates": [
+        12
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_hard_delete_tombstones_have_stable_missing_codes_and_no_target_lookup_or_write$",
+      "expected_count": 1,
+      "gates": [
+        12
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_resource_route_inventory_flattens_direct_and_included_routes_and_rejects_legacy_parameter_aliases$",
+      "expected_count": 1,
+      "gates": [
+        12
+      ]
+    },
+    {
+      "command_id": "backend",
+      "node_pattern": "^test_teacher_composes_safe_management_and_reports_without_legacy_routes$",
+      "expected_count": 1,
+      "gates": [
+        12
+      ]
+    },
+    {
+      "command_id": "shared_node",
+      "node_pattern": "^version mismatch enters maintenance before any business request$",
+      "expected_count": 1,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "shared_node",
+      "node_pattern": "^bootstrapVersionGate and ready share one pending successful gate promise$",
+      "expected_count": 1,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "shared_node",
+      "node_pattern": "^caller abort stays AbortError while timeout becomes REQUEST_TIMEOUT$",
+      "expected_count": 1,
+      "gates": [
+        3,
+        14
+      ]
+    },
+    {
+      "command_id": "child_node",
+      "node_pattern": "^unbound and matching bound drafts become child-retryable without changing their request identity$",
+      "expected_count": 1,
+      "gates": [
+        5
+      ]
+    },
+    {
+      "command_id": "child_node",
+      "node_pattern": "^a COMPLETE_FAILED recovery reload returns to saving_conversation at the same remote boundary$",
+      "expected_count": 1,
+      "gates": [
+        5,
+        7
+      ]
+    },
+    {
+      "command_id": "child_node",
+      "node_pattern": "^pending completion keeps the remote completion boundary and never reopens chat$",
+      "expected_count": 1,
+      "gates": [
+        5,
+        7
+      ]
+    },
+    {
+      "command_id": "child_node",
+      "node_pattern": "^ended chat saved through the machine restores only the completion path$",
+      "expected_count": 1,
+      "gates": [
+        5,
+        7
+      ]
+    },
+    {
+      "command_id": "child_node",
+      "node_pattern": "^uses the exact 1500 ms silence boundary and replaces one live timer on results and speech end$",
+      "expected_count": 1,
+      "gates": [
+        10
+      ]
+    },
+    {
+      "command_id": "child_node",
+      "node_pattern": "^a timeout before deferred loader invocation falls back safely and ignores its late blob$",
+      "expected_count": 1,
+      "gates": [
+        10
+      ]
+    },
+    {
+      "command_id": "teacher_node",
+      "node_pattern": "^Today validates every queue DTO shape, fixed labels, and queue-specific combinations$",
+      "expected_count": 1,
+      "gates": [
+        7
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_child_health_validation_fallback_preserves_foundation_maintenance\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_locked_bootstrap_makes_only_runtime_and_auth_requests\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_runtime_failure_keeps_maintenance_and_makes_zero_auth_or_business_requests\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_auth_status_failure_is_safe_and_makes_zero_business_requests\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        2
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_chat_retryable_fault_reuses_persisted_request_id_once\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        3
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_first_chat_timeout_retains_draft_and_reuses_request_id_once\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        3,
+        4,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_chat_fault_matrix_retains_draft_without_success_copy\\[(http_500|non_json|offline)-(1024x576|1280x720)\\]$",
+      "expected_count": 6,
+      "gates": [
+        3,
+        4,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_completion_delay_is_single_flight_and_saves_once\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        3,
+        7,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_review_put_timeout_preserves_dirty_values_and_restores_focus\\[(seed_review_timeout_1024|review_timeout_1440)\\]$",
+      "expected_count": 2,
+      "gates": [
+        3,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_review_delayed_save_is_single_flight_and_disables_every_editor_control\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        3,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_resource_state_delay_is_single_flight\\[(seed_child_deactivate_1024|child_reactivate_1024|duck_deactivate_1024|duck_reactivate_1024|(child|duck)_(deactivate|reactivate)_1440)\\]$",
+      "expected_count": 8,
+      "gates": [
+        3,
+        12,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_roster_delay_is_single_flight\\[(seed_daily_1024|auto_1024|daily_1440|auto_1440)\\]$",
+      "expected_count": 4,
+      "gates": [
+        3,
+        11,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_roster_settled_faults_preserve_snapshot_and_request_id\\[(seed_daily_json_500_1024|auto_json_500_1024|(daily|auto)_(html_502|offline)_1024|(daily|auto)_(json_500|html_502|offline)_1440)\\]$",
+      "expected_count": 12,
+      "gates": [
+        3,
+        11,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_reload_during_submit_restores_same_draft_and_ignores_old_response\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        5
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_pagehide_destroy_makes_held_callback_inert\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        5,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_microphone_denial_focuses_visible_teacher_help_then_opens_dialog\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        6
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_completion_replay_reaches_completed_once_after_strict_save\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        3,
+        7
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_child_core_flow_is_page_keyboard_only_and_saves_once\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        7,
+        13,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_today_renders_pending_processing_and_failed_rows_with_retry_boundaries\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        7,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_today_each_panel_has_its_fixed_empty_state\\[(pending|processing|failed)-(1024x768|1440x900)\\]$",
+      "expected_count": 6,
+      "gates": [
+        7
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_today_analysis_retry_is_single_flight_and_refreshes_three_queues_in_order\\[(accepted|replayed)-(1024x768|1440x900)\\]$",
+      "expected_count": 4,
+      "gates": [
+        3,
+        7,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_today_analysis_retry_failures_restore_only_the_row_action_with_safe_copy\\[(mismatch|malformed|401|404|409|500|non-json)-(1024x768|1440x900)\\]$",
+      "expected_count": 14,
+      "gates": [
+        7,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_today_analysis_retry_offline_is_single_flight_until_transport_rejects\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        3,
+        7,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_review_editor_saves_the_complete_normalized_draft_and_refreshes_only_queue\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        8
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_review_complete_confirm_uses_confirm_action_and_removes_the_pending_row\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        8
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_review_queue_and_detail_show_identity_time_id_and_status\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        9
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_tts_cold_start_uses_reachable_five_second_fallback\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        10,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_tts_faults_settle_and_do_not_block_completion\\[(edge_http_500|edge_non_json|edge_offline|play_rejected|audio_error|browser_speech_error)-(1024x576|1280x720)\\]$",
+      "expected_count": 12,
+      "gates": [
+        10,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_child_deactivation_uses_named_dialog_and_real_undo\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        12
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_children_management_is_labeled_strict_and_never_sends_delete\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        12
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_management_exposes_reversible_state_without_delete\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        12
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_resource_state_settled_faults_never_claim_success\\[(seed_child_deactivate_json_500_1024|child_reactivate_json_500_1024|duck_deactivate_json_500_1024|duck_reactivate_json_500_1024|(child|duck)_(deactivate|reactivate)_(html_502|offline)_1024|(child|duck)_(deactivate|reactivate)_(json_500|html_502|offline)_1440)\\]$",
+      "expected_count": 24,
+      "gates": [
+        12,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_manual_space_stop_requires_one_explicit_end\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        13
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_space_is_single_action_for_native_and_global_paths\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        13
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_keyboard_focus_visible_uses_start_to_ready_flow\\[(1024x576|1280x720)\\]$",
+      "expected_count": 2,
+      "gates": [
+        13
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_fault_recovery_preserves_accessibility_and_projection_constraints\\[(chat_retryable|completion_failure)-(1024x576|1280x720)\\]$",
+      "expected_count": 4,
+      "gates": [
+        13,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_complete_review_flow_is_page_keyboard_only\\[(seed_keyboard_review_1024|keyboard_review_1440)\\]$",
+      "expected_count": 2,
+      "gates": [
+        13
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_dirty_review_dialog_is_named_keyboard_operable_and_restores_focus\\[(seed_dirty_dialog_1024|dirty_dialog_1440)\\]$",
+      "expected_count": 2,
+      "gates": [
+        13
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_authenticated_routes_have_frozen_accessibility_structure\\[(seed_a11y_today_1024|a11y_(children|ducks|roster|review|growth|search)_1024|a11y_(today|children|ducks|roster|review|growth|search)_1440)\\]$",
+      "expected_count": 14,
+      "gates": [
+        13
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_release_focus_indicator_meets_three_to_one\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        13
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_completion_fault_matrix_never_claims_saved_copy\\[(http_500|non_json|offline|boundary_mismatch)-(1024x576|1280x720)\\]$",
+      "expected_count": 8,
+      "gates": [
+        3,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_representative_read_validators_cover_missing_transport_faults\\[(seed_today_roster_html_502_1024|today_roster_offline_1024|review_pending_html_502_1024|review_pending_offline_1024|today_roster_html_502_1440|today_roster_offline_1440|review_pending_html_502_1440|review_pending_offline_1440)\\]$",
+      "expected_count": 8,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_teacher_review_save_failures_keep_exact_values_dirty_and_never_refresh\\[(server|non-json|offline)-\\\\u4fdd\\\\u5b58\\\\u5931\\\\u8d25\\\\uff0c\\\\u8bf7\\\\u7a0d\\\\u540e\\\\u91cd\\\\u8bd5\\\\u3002-(1024x768|1440x900)\\]$",
+      "expected_count": 6,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_child_server_import_preflight_blocks_provider_env$",
+      "expected_count": 1,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_main_import_filehandler_is_redirected_from_real_log$",
+      "expected_count": 1,
+      "gates": [
+        1,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_edge_tts_fake_stream_trips_before_network$",
+      "expected_count": 1,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_nonstarting_worker_has_no_start_side_effect$",
+      "expected_count": 1,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_browser_subprocess_environment_is_minimal$",
+      "expected_count": 1,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_real_resource_snapshots_are_read_only$",
+      "expected_count": 1,
+      "gates": [
+        1,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_socket_guard_blocks_non_loopback$",
+      "expected_count": 1,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_fixture_teardown_closes_before_process_assertions$",
+      "expected_count": 1,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_context_loopback_policy_allows_only_exact_origin\\[(data:text/plain,synthetic-False|http://127\\.0\\.0\\.1/-False|http://127\\.0\\.0\\.1:43123/-True|http://127\\.0\\.0\\.1:43123/api/health\\?x=1-True|http://127\\.0\\.0\\.1:43124/-False|http://127\\.0\\.0\\.1:not-a-port/-False|http://\\[::1\\]:43123/-False|http://example\\.invalid:43123/-False|http://localhost:43123/-False|http://user:pass@127\\.0\\.0\\.1:43123/-False|https://127\\.0\\.0\\.1:43123/-False)\\]$",
+      "expected_count": 11,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_loopback_server_uses_disposable_resources$",
+      "expected_count": 1,
+      "gates": [
+        1,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_child_page_registers_fail_closed_business_routes_before_navigation$",
+      "expected_count": 1,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_page_specific_routes_cannot_widen_loopback_policy$",
+      "expected_count": 1,
+      "gates": [
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_browser_parent_logging_is_redirected_from_real_application_log$",
+      "expected_count": 1,
+      "gates": [
+        1,
+        14
+      ]
+    },
+    {
+      "command_id": "browser",
+      "node_pattern": "^test_release_teacher_action_persists_to_disposable_sqlite\\[(1024x768|1440x900)\\]$",
+      "expected_count": 2,
+      "gates": [
+        14
+      ]
+    }
+  ]
+}

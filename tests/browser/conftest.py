@@ -300,13 +300,19 @@ def chromium_browser(browser_parent_logging_guard):
         yield lambda: playwright.chromium.launch(headless=True)
 
 
-def _verify_server_safety(module, server: BrowserServer) -> None:
-    after = module.capture_resource_snapshots(
+def _capture_safe_resource_snapshots(module, *, phase: str):
+    snapshots = module.capture_resource_snapshots(
         module.REAL_DATABASE_PATH,
         module.REAL_LOG_PATH,
         module.REAL_TTS_CACHE_PATH,
         module.REAL_MEDIA_ROOT,
     )
+    module.assert_safe_resource_snapshots(snapshots, phase=phase)
+    return snapshots
+
+
+def _verify_server_safety(module, server: BrowserServer) -> None:
+    after = _capture_safe_resource_snapshots(module, phase="final")
     assert after == server.real_snapshots, "browser fixture changed a real application resource"
     for name in (
         "BROWSER_AI_TRIPWIRE_PATH",
@@ -330,12 +336,7 @@ def child_server(chromium_browser, tmp_path, unused_tcp_port):
     (runtime_dir / "logs").mkdir()
     (runtime_dir / "tts-cache").mkdir()
     environment = module.build_browser_environment(os.environ, runtime_dir, port=unused_tcp_port)
-    snapshots = module.capture_resource_snapshots(
-        module.REAL_DATABASE_PATH,
-        module.REAL_LOG_PATH,
-        module.REAL_TTS_CACHE_PATH,
-        module.REAL_MEDIA_ROOT,
-    )
+    snapshots = _capture_safe_resource_snapshots(module, phase="baseline")
     process = subprocess.Popen(
         [sys.executable, str(CHILD_SERVER_SCRIPT)],
         cwd=ROOT,
