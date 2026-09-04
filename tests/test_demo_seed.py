@@ -52,6 +52,12 @@ def test_fixed_anchor_seed_has_exact_graph_and_stable_logical_hashes(
     second = _seed(tmp_path / "second")
     shifted = _seed(tmp_path / "shifted", anchor_date=ANCHOR + timedelta(days=1))
 
+    assert first.media_sha256 == (
+        "313c1c00a376081da5da91a0c15c171569531c50a774efb1582e8267afa3a6a7"
+    )
+    assert first.record_sha256 == (
+        "8aeee91e57d72e20127dfa56685ea27129c3291948d774d57e28c0365ec051ec"
+    )
     assert first.record_sha256 == second.record_sha256
     assert first.media_sha256 == second.media_sha256
     assert shifted.record_sha256 != first.record_sha256
@@ -206,6 +212,54 @@ def test_fixed_anchor_seed_has_exact_graph_and_stable_logical_hashes(
         engine.dispose()
 
 
+def test_business_timestamps_are_shanghai_local_times_persisted_as_utc(
+    tmp_path: Path,
+) -> None:
+    result = _seed(tmp_path / "utc")
+    engine = create_engine(f"sqlite:///{result.database_path}")
+    try:
+        with Session(engine) as session:
+            assert session.get(
+                models.AvatarMedia,
+                "70000000-0000-4000-8000-000000000001",
+            ).created_at == datetime(2026, 9, 1, 16, 0)
+            assert session.get(models.Child, 8).deactivated_at == datetime(
+                2026, 9, 1, 16, 0
+            )
+            assert session.get(models.Duck, 3).deactivated_at == datetime(
+                2026, 9, 1, 16, 0
+            )
+
+            conversation = session.get(models.Conversation, 13)
+            assert conversation.started_at == datetime(2026, 9, 2, 1, 40)
+            assert conversation.ended_at == datetime(2026, 9, 2, 1, 55)
+            assert session.get(models.Message, 131).created_at == datetime(
+                2026, 9, 2, 1, 41
+            )
+            assert session.get(models.Message, 132).created_at == datetime(
+                2026, 9, 2, 1, 42
+            )
+
+            job = session.get(models.AnalysisJob, 113)
+            assert job.available_at == datetime(2026, 9, 2, 1, 55)
+            assert job.started_at == datetime(2026, 9, 2, 1, 55, 1)
+            assert job.finished_at == datetime(2026, 9, 2, 1, 55, 4)
+            assert job.created_at == datetime(2026, 9, 2, 1, 55)
+            assert job.updated_at == datetime(2026, 9, 2, 1, 55, 4)
+
+            assert session.get(models.FeedingLog, 13).occurred_at == datetime(
+                2026, 9, 2, 1, 53
+            )
+            assert session.get(models.EmotionLog, 13).occurred_at == datetime(
+                2026, 9, 2, 1, 54
+            )
+            assert session.get(models.InsightNote, 13).created_at == datetime(
+                2026, 9, 2, 1, 55, 2
+            )
+    finally:
+        engine.dispose()
+
+
 def test_seeded_reports_growth_search_and_worker_are_demo_ready(tmp_path: Path) -> None:
     result = _seed(tmp_path / "readable")
     engine = create_engine(f"sqlite:///{result.database_path}")
@@ -223,26 +277,42 @@ def test_seeded_reports_growth_search_and_worker_are_demo_ready(tmp_path: Path) 
     try:
         with Session(engine) as session:
             report = weekly_report(session, date(2026, 8, 31), date(2026, 9, 7))
-            assert report.completed_conversations > 0
-            assert report.participating_children > 0
-            assert report.confirmed_reviews > 0
-            assert report.failed_analyses > 0
+            assert report.completed_conversations == 13
+            assert report.participating_children == 7
+            assert report.confirmed_reviews == 4
+            assert report.failed_analyses == 4
             assert report.pending_reviews_total == 9
+            assert session.get(models.Conversation, 9).date == "2026-08-30"
+            assert session.get(models.Conversation, 20).date == "2026-09-07"
 
-            growth = session.execute(
-                text(
-                    "select c.date, s.dimension_id, s.score "
-                    "from assessments a join conversations c on c.id = a.conversation_id "
-                    "join assessment_scores s on s.assessment_id = a.id "
-                    "where a.child_id = 1 and a.status = 'confirmed' "
-                    "order by c.date, s.dimension_id"
-                )
-            ).all()
-            assert len({row.date for row in growth}) >= 4
-            assert all(
-                len([row for row in growth if row.date == day]) == 3
-                for day in {row.date for row in growth}
-            )
+            from app.backend.main import growth_analysis
+
+            growth = growth_analysis(child_id=1, db=session, _teacher=None)
+            series_by_key = {
+                dimension["key"]: dimension["points"]
+                for dimension in growth["dimensions"]
+            }
+            assert growth["child_id"] == 1
+            assert series_by_key == {
+                "language": [
+                    {"date": "2026-08-12", "score": 2},
+                    {"date": "2026-08-19", "score": 3},
+                    {"date": "2026-08-26", "score": 4},
+                    {"date": "2026-09-02", "score": 5},
+                ],
+                "empathy": [
+                    {"date": "2026-08-12", "score": 2},
+                    {"date": "2026-08-19", "score": 4},
+                    {"date": "2026-08-26", "score": 4},
+                    {"date": "2026-09-02", "score": 5},
+                ],
+                "diligence": [
+                    {"date": "2026-08-12", "score": 2},
+                    {"date": "2026-08-19", "score": 2},
+                    {"date": "2026-08-26", "score": 4},
+                    {"date": "2026-09-02", "score": 4},
+                ],
+            }
 
             ordinary = search_conversations(
                 session,
@@ -406,6 +476,39 @@ def test_force_and_archive_options_are_fail_closed(tmp_path: Path) -> None:
         )
 
 
+@pytest.mark.parametrize("collision", ["media", "log", "archive"])
+def test_seed_rejects_the_implicit_lock_path_as_a_reserved_resource(
+    tmp_path: Path,
+    collision: str,
+) -> None:
+    from app.backend.services.demo_seed import DemoSeedSafetyError, seed_full_demo
+
+    root = tmp_path / "reserved-lock"
+    database = root / "demo.db"
+    lock_path = database.with_name(f".{database.name}.full-demo.lock")
+    arguments = {
+        "anchor_date": ANCHOR,
+        "database_path": database,
+        "media_root": root / "media",
+        "log_path": root / "logs" / "app.log",
+        "force": True,
+        "archive_directory": tmp_path / "archives" / "reserved-lock",
+    }
+    target_by_collision = {
+        "media": "media_root",
+        "log": "log_path",
+        "archive": "archive_directory",
+    }
+    arguments[target_by_collision[collision]] = lock_path
+
+    with pytest.raises(DemoSeedSafetyError, match="overlap"):
+        seed_full_demo(**arguments)
+
+    assert not database.exists()
+    assert not lock_path.exists()
+    assert not arguments["archive_directory"].exists()
+
+
 def test_all_demo_rows_roll_back_when_a_late_insert_fails(tmp_path: Path) -> None:
     from app.backend.schema_migrations import ensure_database_schema
     from app.backend.services.demo_seed import (
@@ -530,6 +633,45 @@ def test_force_stages_before_archive_and_restores_every_old_resource_on_install_
     assert Path(f"{database}-shm").read_bytes() == b"old-shm"
     assert (media / "old-avatar.webp").read_bytes() == b"old-media"
     assert log.read_bytes() == b"old-log"
+    assert not archive.exists()
+
+
+def test_force_removes_fresh_archive_after_archive_failure_restores_old_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.backend.services import demo_seed
+
+    database, media, log = _old_bundle(tmp_path / "archive-restore")
+    archive = tmp_path / "archives" / "archive-failure"
+    original_replace = demo_seed._replace_path
+    failed = False
+
+    def fail_once_when_archiving_media(source: Path, target: Path) -> None:
+        nonlocal failed
+        if source == media.resolve() and target == archive.resolve() / "media" and not failed:
+            failed = True
+            raise OSError("injected media archive failure")
+        original_replace(source, target)
+
+    monkeypatch.setattr(demo_seed, "_replace_path", fail_once_when_archiving_media)
+
+    with pytest.raises(demo_seed.DemoSeedInstallError, match="restored"):
+        demo_seed.seed_full_demo(
+            anchor_date=ANCHOR,
+            database_path=database,
+            media_root=media,
+            log_path=log,
+            force=True,
+            archive_directory=archive,
+        )
+
+    assert database.read_bytes() == b"old-database"
+    assert Path(f"{database}-wal").read_bytes() == b"old-wal"
+    assert Path(f"{database}-shm").read_bytes() == b"old-shm"
+    assert (media / "old-avatar.webp").read_bytes() == b"old-media"
+    assert log.read_bytes() == b"old-log"
+    assert not archive.exists()
 
 
 def test_force_does_not_archive_any_old_resource_when_staging_fails(

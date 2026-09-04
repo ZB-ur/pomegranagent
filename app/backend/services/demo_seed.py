@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 from dataclasses import dataclass
-from datetime import date, datetime, time, timedelta
+from datetime import date, datetime, time, timedelta, timezone
 from hashlib import sha256
 from io import BytesIO
 import json
@@ -13,6 +13,7 @@ import shutil
 import stat
 import tempfile
 from typing import Iterator
+from zoneinfo import ZoneInfo
 
 from PIL import Image
 from sqlalchemy import Engine, create_engine, select
@@ -28,6 +29,7 @@ FULL_DEMO_PATH = Path(__file__).resolve().parents[1] / "demo_data" / "full_demo.
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
 _AVATAR_PREFIX = "/api/media/avatars/"
 _RESOURCE_LABELS = ("database", "database-wal", "database-shm", "media", "log")
+_BUSINESS_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 class DemoSeedError(RuntimeError):
@@ -164,6 +166,10 @@ def _overlaps(first: Path, second: Path) -> bool:
     return first == second or first in second.parents or second in first.parents
 
 
+def _seed_lock_path(database_path: Path) -> Path:
+    return database_path.with_name(f".{database_path.name}.full-demo.lock")
+
+
 def _validate_target_paths(
     *,
     database_path: Path,
@@ -191,10 +197,11 @@ def _validate_target_paths(
         if candidate in broad_roots or len(candidate.parts) < 3:
             raise DemoSeedSafetyError(f"{label} target is too broad")
     targets = [database_path, Path(f"{database_path}-wal"), Path(f"{database_path}-shm"), media_root, log_path]
-    if len(set(targets)) != len(targets):
+    protected_targets = [*targets, _seed_lock_path(database_path)]
+    if len(set(protected_targets)) != len(protected_targets):
         raise DemoSeedSafetyError("demo resource targets overlap")
-    for index, first in enumerate(targets):
-        for second in targets[index + 1:]:
+    for index, first in enumerate(protected_targets):
+        for second in protected_targets[index + 1:]:
             if _overlaps(first, second):
                 raise DemoSeedSafetyError("demo resource targets overlap")
     if force and archive_directory is None:
@@ -202,11 +209,11 @@ def _validate_target_paths(
     if not force and archive_directory is not None:
         raise DemoSeedSafetyError("archive directory requires --force")
     if archive_directory is not None:
-        if any(_overlaps(archive_directory, target) for target in targets):
+        if any(_overlaps(archive_directory, target) for target in protected_targets):
             raise DemoSeedSafetyError("archive directory overlaps demo resources")
         if _exists(archive_directory):
             raise DemoSeedSafetyError("archive directory must not already exist")
-    for target in [*targets, *([archive_directory] if archive_directory else [])]:
+    for target in [*protected_targets, *([archive_directory] if archive_directory else [])]:
         _reject_symlink_components(target)
 
 
@@ -345,6 +352,23 @@ def _restore_archived_resources(
     return True
 
 
+def _remove_fresh_archive_directory(archive_directory: Path) -> bool:
+    """Remove only the known-empty directories created for this invocation."""
+
+    try:
+        for child in (archive_directory / "database", archive_directory / "log"):
+            try:
+                child.rmdir()
+            except FileNotFoundError:
+                pass
+        archive_directory.rmdir()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
 def _archive_existing_bundle(
     *,
     database_path: Path,
@@ -389,6 +413,11 @@ def _archive_existing_bundle(
             raise DemoSeedInstallError(
                 "archive failed and the old demo bundle could not be fully restored"
             ) from exc
+        if not _remove_fresh_archive_directory(archive_directory):
+            raise DemoSeedInstallError(
+                "archive failed; the old demo bundle was restored but the fresh "
+                "archive directory could not be removed"
+            ) from exc
         raise DemoSeedInstallError(
             "archive failed; the old demo bundle was restored"
         ) from exc
@@ -397,7 +426,7 @@ def _archive_existing_bundle(
 @contextmanager
 def _exclusive_seed_lock(database_path: Path) -> Iterator[None]:
     _ensure_parent(database_path)
-    lock_path = database_path.with_name(f".{database_path.name}.full-demo.lock")
+    lock_path = _seed_lock_path(database_path)
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
     try:
         descriptor = os.open(lock_path, flags, 0o600)
@@ -473,7 +502,12 @@ def _stage_avatars(media_root: Path, fixture: dict) -> tuple[_AvatarArtifact, ..
 
 
 def _at(anchor_date: date, day_offset: int, clock: str) -> datetime:
-    return datetime.combine(anchor_date + timedelta(days=day_offset), time.fromisoformat(clock))
+    local_time = datetime.combine(
+        anchor_date + timedelta(days=day_offset),
+        time.fromisoformat(clock),
+        tzinfo=_BUSINESS_TIMEZONE,
+    )
+    return local_time.astimezone(timezone.utc).replace(tzinfo=None)
 
 
 def _insert_full_demo_rows(
@@ -484,7 +518,7 @@ def _insert_full_demo_rows(
     avatars: tuple[_AvatarArtifact, ...],
 ) -> None:
     avatar_by_id = {avatar.media_id: avatar for avatar in avatars}
-    anchor_midnight = datetime.combine(anchor_date, time.min)
+    anchor_midnight = _at(anchor_date, 0, time.min.isoformat())
     for dimension in fixture["dimensions"]:
         db.add(models.AssessmentDimension(
             id=dimension["id"],
@@ -757,6 +791,7 @@ def _install_new_bundle(
     log_path: Path,
     archived: list[tuple[str, Path, Path]],
     archived_hashes: dict[str, str],
+    archive_directory: Path | None,
 ) -> None:
     installed: list[tuple[Path, Path]] = []
     try:
@@ -782,6 +817,13 @@ def _install_new_bundle(
         if not staged_restored or not old_restored:
             raise DemoSeedInstallError(
                 "full-demo install failed and the old bundle could not be fully restored"
+            ) from exc
+        if archive_directory is not None and not _remove_fresh_archive_directory(
+            archive_directory
+        ):
+            raise DemoSeedInstallError(
+                "full-demo install failed; the old bundle was restored but the fresh "
+                "archive directory could not be removed"
             ) from exc
         raise DemoSeedInstallError(
             "full-demo install failed; the old bundle was restored"
@@ -874,6 +916,7 @@ def seed_full_demo(
                 log_path=log_path,
                 archived=archived,
                 archived_hashes=original_hashes,
+                archive_directory=archive_directory,
             )
             return DemoSeedResult(
                 database_path=database_path,
