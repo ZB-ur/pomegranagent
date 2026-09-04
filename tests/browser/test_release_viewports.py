@@ -1409,8 +1409,13 @@ def test_release_avatar_upload_and_fallback_stay_in_bounds(
         dialog = page.get_by_role("dialog", name=f"修改{noun}：{display_name}", exact=True)
         dialog.wait_for()
         file_input = dialog.get_by_label("头像图片", exact=True)
-        file_input.set_input_files(str(fixture_by_kind[kind]))
-        assert file_input.input_value().endswith(fixture_by_kind[kind].name)
+        fixture = fixture_by_kind[kind]
+        file_input.set_input_files({
+            "name": fixture.name,
+            "mimeType": fixture_by_name[fixture.name][2],
+            "buffer": fixture.read_bytes(),
+        })
+        assert file_input.input_value().endswith(fixture.name)
         preview = dialog.locator("[data-avatar-preview]")
         preview_image = preview.locator("img")
         preview_image.wait_for()
