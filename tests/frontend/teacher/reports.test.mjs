@@ -132,6 +132,31 @@ test('search parser enforces exact page, canonical avatars, and opaque cursor', 
 });
 
 
+test('search parser requires timezone-aware UTC completion timestamps', () => {
+  for (const completedAt of [
+    '2026-08-23T09:00:00Z',
+    '2026-08-23T09:00:00+00:00',
+  ]) {
+    const page = parseSearchPage({
+      items: [{ ...SEARCH_ITEM, completed_at: completedAt }],
+      next_cursor: null,
+    });
+    assert.equal(page.items[0].completed_at, completedAt);
+  }
+
+  for (const completedAt of [
+    '2026-08-23',
+    '2026-08-23T09:00:00',
+    '2026-08-23T09:00:00+08:00',
+  ]) {
+    assert.throws(() => parseSearchPage({
+      items: [{ ...SEARCH_ITEM, completed_at: completedAt }],
+      next_cursor: null,
+    }), TypeError);
+  }
+});
+
+
 test('search request builder normalizes an exact private POST snapshot', () => {
   const snapshot = buildSearchRequest({
     child_id: '8',

@@ -61,6 +61,11 @@ function dateString(value) {
   return parsed.getUTCFullYear() === year && parsed.getUTCMonth() === month - 1 && parsed.getUTCDate() === day;
 }
 function timestamp(value) { return typeof value === 'string' && value.trim() && Number.isFinite(Date.parse(value)); }
+function utcTimestamp(value) {
+  if (typeof value !== 'string') return false;
+  const match = /^(\d{4}-\d{2}-\d{2})T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|\+00:00)$/.exec(value);
+  return match !== null && dateString(match[1]);
+}
 
 function dependencies(value) {
   const data = record(value, ['request', 'document', 'createAbortController', 'navigate']);
@@ -151,7 +156,8 @@ export function parseHistoryPage(value) {
 export function parseSearchPage(value) {
   const page = record(value, ['items', 'next_cursor']);
   const items = array(page.items).map(item => parseHistoryItem(item, true));
-  if (new Set(items.map(item => item.id)).size !== items.length ||
+  if (items.some(item => !utcTimestamp(item.completed_at)) ||
+      new Set(items.map(item => item.id)).size !== items.length ||
       !(page.next_cursor === null || (typeof page.next_cursor === 'string' && OPAQUE_CURSOR.test(page.next_cursor))) ||
       (page.next_cursor !== null && items.length === 0)) throw invalid();
   return { ...page, items };
