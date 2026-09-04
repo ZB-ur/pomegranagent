@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..api_errors import APIError
+from .avatar_media import project_avatar_url_for_read
 
 
 _INTERNAL_MESSAGE = "服务暂时不可用，请稍后重试"
@@ -170,7 +171,7 @@ def list_review_queue(
                 id=child.id,
                 name=child.name,
                 nickname=child.nickname,
-                avatar=child.avatar,
+                avatar=project_avatar_url_for_read(child.avatar),
             ),
             date=conversation.date,
             started_at=_utc_datetime(conversation.started_at),
@@ -334,7 +335,7 @@ def get_review_detail(
             id=child.id,
             name=child.name,
             nickname=child.nickname,
-            avatar=child.avatar,
+            avatar=project_avatar_url_for_read(child.avatar),
         ),
         date=conversation.date,
         started_at=_utc_datetime(conversation.started_at),

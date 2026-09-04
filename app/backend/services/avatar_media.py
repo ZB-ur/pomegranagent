@@ -40,6 +40,20 @@ _SUPPORTED_TYPES = {
 logger = logging.getLogger("duck_diary.avatar_media")
 
 
+def project_avatar_url_for_read(avatar: str | None) -> str | None:
+    """Expose only canonical media URLs while retaining legacy DB values."""
+
+    if avatar is None or not avatar.startswith(_AVATAR_URL_PREFIX):
+        return None
+    media_id = avatar.removeprefix(_AVATAR_URL_PREFIX)
+    try:
+        parsed = UUID(media_id)
+    except (AttributeError, TypeError, ValueError):
+        return None
+    canonical = f"{_AVATAR_URL_PREFIX}{parsed}"
+    return avatar if avatar == canonical else None
+
+
 @dataclass(frozen=True)
 class AvatarBlob:
     media: models.AvatarMedia

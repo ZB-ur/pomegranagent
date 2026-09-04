@@ -22,6 +22,10 @@ from .routes.reports import router as reports_router
 from .routes.resources import router as resources_router
 from .routes.roster import router as roster_router
 from .routes.runtime import router as runtime_router
+from .routes.teacher_json import (
+    teacher_json_object_body,
+    teacher_json_object_openapi,
+)
 from .schema_migrations import ensure_database_schema
 from .versioning import VERSION_FILE, load_runtime_version
 
@@ -126,11 +130,11 @@ def list_dimensions(
     ]
 
 
-@app.post("/api/dimensions")
+@app.post("/api/dimensions", openapi_extra=teacher_json_object_openapi)
 def create_dimension(
-    payload: dict,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: dict = Depends(teacher_json_object_body),
+    db: Session = Depends(get_db),
 ):
     dim = models.AssessmentDimension(
         key=payload["key"], name=payload["name"],
@@ -142,12 +146,15 @@ def create_dimension(
     return {"id": dim.id, "key": dim.key, "name": dim.name}
 
 
-@app.put("/api/dimensions/{dim_id}")
+@app.put(
+    "/api/dimensions/{dim_id}",
+    openapi_extra=teacher_json_object_openapi,
+)
 def update_dimension(
     dim_id: int,
-    payload: dict,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: dict = Depends(teacher_json_object_body),
+    db: Session = Depends(get_db),
 ):
     dim = db.get(models.AssessmentDimension, dim_id)
     if not dim:
@@ -231,12 +238,15 @@ def summarize(
     return {"duck_id": duck_id, "summary": summary}
 
 
-@app.put("/api/ducks/{duck_id}/archive")
+@app.put(
+    "/api/ducks/{duck_id}/archive",
+    openapi_extra=teacher_json_object_openapi,
+)
 def update_archive(
     duck_id: int,
-    payload: dict,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: dict = Depends(teacher_json_object_body),
+    db: Session = Depends(get_db),
 ):
     row = db.scalar(select(models.DuckArchive).where(models.DuckArchive.duck_id == duck_id))
     if row:

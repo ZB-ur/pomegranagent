@@ -18,10 +18,14 @@ from ..services.roster import (
     set_daily_roster,
     set_monthly_roster,
 )
+from .teacher_json import json_body_openapi, teacher_json_body
 
 
 router = APIRouter()
 BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
+AUTO_ROSTER_BODY = teacher_json_body(schemas.AutoRosterRequest)
+MONTHLY_ROSTER_BODY = teacher_json_body(schemas.MonthlyRosterRequest)
+DAILY_ROSTER_BODY = teacher_json_body(schemas.DailyRosterRequest)
 
 
 @router.get("/api/roster/today", response_model=list[schemas.RosterTodayChild])
@@ -62,30 +66,42 @@ def legacy_roster_tombstone(
     raise APIError(410, "LEGACY_ENDPOINT_REMOVED", "旧排班接口已下线")
 
 
-@router.post("/api/roster/auto", response_model=schemas.AutoRosterResponse)
+@router.post(
+    "/api/roster/auto",
+    response_model=schemas.AutoRosterResponse,
+    openapi_extra=json_body_openapi(schemas.AutoRosterRequest),
+)
 def auto_roster(
-    payload: schemas.AutoRosterRequest,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: schemas.AutoRosterRequest = Depends(AUTO_ROSTER_BODY),
+    db: Session = Depends(get_db),
 ) -> schemas.AutoRosterResponse:
     return generate_roster(db, payload, now=BUSINESS_CLOCK.utc_now())
 
 
-@router.post("/api/roster/month", response_model=schemas.MonthlyRosterResponse)
+@router.post(
+    "/api/roster/month",
+    response_model=schemas.MonthlyRosterResponse,
+    openapi_extra=json_body_openapi(schemas.MonthlyRosterRequest),
+)
 def monthly_roster(
-    payload: schemas.MonthlyRosterRequest,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: schemas.MonthlyRosterRequest = Depends(MONTHLY_ROSTER_BODY),
+    db: Session = Depends(get_db),
 ) -> schemas.MonthlyRosterResponse:
     return set_monthly_roster(db, payload, now=BUSINESS_CLOCK.utc_now())
 
 
-@router.put("/api/roster/{roster_date}", response_model=schemas.DailyRosterResponse)
+@router.put(
+    "/api/roster/{roster_date}",
+    response_model=schemas.DailyRosterResponse,
+    openapi_extra=json_body_openapi(schemas.DailyRosterRequest),
+)
 def put_daily_roster(
     roster_date: date,
-    payload: schemas.DailyRosterRequest,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: schemas.DailyRosterRequest = Depends(DAILY_ROSTER_BODY),
+    db: Session = Depends(get_db),
 ) -> schemas.DailyRosterResponse:
     return set_daily_roster(
         db,

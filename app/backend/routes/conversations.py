@@ -28,11 +28,13 @@ from ..services.chat import (
 from ..services.completion import complete_conversation
 from ..services.history import list_conversation_history, search_conversations
 from ..services.reviews import get_review_detail, list_review_queue, save_review
+from .teacher_json import json_body_openapi, teacher_json_body
 
 
 logger = logging.getLogger("duck_diary.chat")
 router = APIRouter()
 BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
+REVIEW_BODY = teacher_json_body(schemas.ReviewRequest)
 
 
 def _active_child_or_error(db: Session, child_id: int) -> models.Child:
@@ -255,12 +257,13 @@ def review_detail(
 @router.put(
     "/api/conversations/{conversation_id}/review",
     response_model=schemas.ReviewResponse,
+    openapi_extra=json_body_openapi(schemas.ReviewRequest),
 )
 def put_review(
     conversation_id: int,
-    payload: schemas.ReviewRequest,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: schemas.ReviewRequest = Depends(REVIEW_BODY),
+    db: Session = Depends(get_db),
 ) -> schemas.ReviewResponse:
     return save_review(
         db,

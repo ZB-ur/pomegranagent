@@ -7,6 +7,7 @@ from datetime import date, datetime, timedelta, timezone
 import json
 import logging
 import re
+import sqlite3
 
 import pytest
 from sqlalchemy import event, select
@@ -553,6 +554,88 @@ def test_search_fails_whole_page_for_selected_projection_corruption(client, db_s
     _error(response, 500, "INTERNAL_ERROR")
     assert "items" not in response.text
     assert f'"id":{corrupt.id}' not in response.text
+
+
+def test_search_fails_closed_when_review_status_drifts_during_projection(
+    db_session,
+    test_db_path,
+):
+    _child, _conversation, _job, assessment = _seed_search(
+        db_session,
+        review_status="pending",
+    )
+    assert assessment is not None
+    assessment_id = assessment.id
+    db_session.expunge_all()
+    engine = db_session.get_bind()
+    mutated = False
+
+    def confirm_after_candidate(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ):
+        nonlocal mutated
+        normalized = " ".join(statement.lower().split())
+        if mutated or " from messages " not in f" {normalized} ":
+            return
+        with sqlite3.connect(test_db_path, timeout=5) as writer:
+            writer.execute(
+                "UPDATE assessments SET status = ? WHERE id = ?",
+                ("confirmed", assessment_id),
+            )
+            writer.commit()
+        mutated = True
+
+    event.listen(engine, "before_cursor_execute", confirm_after_candidate)
+    try:
+        with pytest.raises(APIError) as raised:
+            history_service.search_conversations(
+                db_session,
+                _request(review_status=["pending"]),
+            )
+    finally:
+        event.remove(engine, "before_cursor_execute", confirm_after_candidate)
+
+    assert mutated is True
+    assert raised.value.status_code == 500
+    assert raised.value.code == "INTERNAL_ERROR"
+    assert raised.value.retryable is True
+    with sqlite3.connect(test_db_path) as reader:
+        stored_status = reader.execute(
+            "SELECT status FROM assessments WHERE id = ?",
+            (assessment_id,),
+        ).fetchone()[0]
+    assert stored_status == "confirmed"
+
+
+def test_search_projects_legacy_child_avatar_as_null_without_rewriting_storage(
+    db_session,
+):
+    child = models.Child(
+        name="历史头像幼儿",
+        nickname="历史小名",
+        avatar="uploads/legacy-child.png",
+        active=True,
+    )
+    db_session.add(child)
+    db_session.flush()
+    child, conversation, _job, _assessment = _seed_search(
+        db_session,
+        child=child,
+    )
+    child_id = child.id
+    conversation_id = conversation.id
+    db_session.expunge_all()
+
+    result = history_service.search_conversations(db_session, _request())
+
+    item = next(entry for entry in result.items if entry.id == conversation_id)
+    assert item.child.avatar is None
+    assert db_session.get(models.Child, child_id).avatar == "uploads/legacy-child.png"
 
 
 def test_search_db_exception_rolls_back_and_logs_only_error_type(

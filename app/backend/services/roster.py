@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..api_errors import APIError
+from .avatar_media import project_avatar_url_for_read
 
 
 _DAILY_OPERATION = "daily_roster"
@@ -208,7 +209,7 @@ def get_today_roster(
                 id=child_id,
                 name=name,
                 nickname=nickname,
-                avatar=avatar,
+                avatar=project_avatar_url_for_read(avatar),
             )
         )
     return result

@@ -16,6 +16,7 @@ from sqlalchemy.orm import Session, aliased
 
 from .. import models, schemas
 from ..api_errors import APIError
+from .avatar_media import project_avatar_url_for_read
 
 
 _INTERNAL_MESSAGE = "服务暂时不可用，请稍后重试"
@@ -102,6 +103,8 @@ def _group(rows, attribute: str) -> dict[int, list[object]]:
 def _project_history_items(
     db: Session,
     visible: list[tuple[object, ...]],
+    *,
+    expected_review_snapshots: dict[int, tuple[int | None, str | None]] | None = None,
 ) -> list[schemas.ConversationHistoryItem]:
     """Validate and materialize a complete candidate page in bounded queries."""
     visible_ids = [conversation.id for conversation, *_rest in visible]
@@ -168,6 +171,11 @@ def _project_history_items(
     try:
         for conversation, child, job, message_count, max_message_id, child_round in visible:
             if (
+                expected_review_snapshots is not None
+                and conversation.id not in expected_review_snapshots
+            ):
+                _fail(db)
+            if (
                 job is None
                 or job.frozen_last_message_id != conversation.frozen_last_message_id
                 or job.status not in _JOB_STATUSES
@@ -218,6 +226,12 @@ def _project_history_items(
                 if len(candidates) != 1:
                     _fail(db)
                 assessment = candidates[0]
+                if (
+                    expected_review_snapshots is not None
+                    and expected_review_snapshots[conversation.id]
+                    != (assessment.id, assessment.status)
+                ):
+                    _fail(db)
                 if (
                     assessment.child_id != child.id
                     or assessment.status not in _REVIEW_STATUSES
@@ -280,6 +294,11 @@ def _project_history_items(
                 ):
                     _fail(db)
                 review_status = assessment.status
+            elif (
+                expected_review_snapshots is not None
+                and expected_review_snapshots[conversation.id] != (None, None)
+            ):
+                _fail(db)
 
             items.append(schemas.ConversationHistoryItem(
                 id=conversation.id,
@@ -287,7 +306,7 @@ def _project_history_items(
                     id=child.id,
                     name=child.name,
                     nickname=child.nickname,
-                    avatar=child.avatar,
+                    avatar=project_avatar_url_for_read(child.avatar),
                 ),
                 date=conversation.date,
                 completed_at=_utc(conversation.ended_at),
@@ -461,6 +480,7 @@ def _search_candidate_statement(
     snapshot_max_id: int | None,
 ):
     snapshot_conversation = aliased(models.Conversation)
+    candidate_assessment = aliased(models.Assessment)
     snapshot_expression = (
         literal(snapshot_max_id)
         if snapshot_max_id is not None
@@ -475,11 +495,17 @@ def _search_candidate_statement(
             func.max(models.Message.id),
             func.sum(case((models.Message.role == "child", 1), else_=0)),
             snapshot_expression.label("snapshot_max_id"),
+            candidate_assessment.id.label("assessment_id"),
+            candidate_assessment.status.label("assessment_status"),
         )
         .join(models.Child, models.Child.id == models.Conversation.child_id)
         .outerjoin(
             models.AnalysisJob,
             models.AnalysisJob.conversation_id == models.Conversation.id,
+        )
+        .outerjoin(
+            candidate_assessment,
+            candidate_assessment.conversation_id == models.Conversation.id,
         )
         .outerjoin(
             models.Message,
@@ -495,7 +521,13 @@ def _search_candidate_statement(
             models.Conversation.frozen_last_message_id.is_not(None),
             models.Conversation.id <= snapshot_expression,
         )
-        .group_by(models.Conversation.id, models.Child.id, models.AnalysisJob.id)
+        .group_by(
+            models.Conversation.id,
+            models.Child.id,
+            models.AnalysisJob.id,
+            candidate_assessment.id,
+            candidate_assessment.status,
+        )
         .limit(payload.limit + 1)
     )
 
@@ -529,14 +561,9 @@ def _search_candidate_statement(
                 models.AnalysisJob.status.in_(("pending", "processing", "failed"))
             )
         if available_statuses:
-            assessment = aliased(models.Assessment)
-            assessment_exists = select(1).where(
-                assessment.conversation_id == models.Conversation.id,
-                assessment.status.in_(available_statuses),
-            ).exists()
             review_predicates.append(and_(
                 models.AnalysisJob.status == "succeeded",
-                assessment_exists,
+                candidate_assessment.status.in_(available_statuses),
             ))
         statement = statement.where(or_(*review_predicates))
     if payload.keyword is not None:
@@ -605,7 +632,15 @@ def search_conversations(
         )).all()
         visible_rows = candidate_rows[:payload.limit]
         projection_rows = [tuple(row[:6]) for row in visible_rows]
-        items = _project_history_items(db, projection_rows)
+        expected_review_snapshots = {
+            row[0].id: (row[7], row[8])
+            for row in visible_rows
+        }
+        items = _project_history_items(
+            db,
+            projection_rows,
+            expected_review_snapshots=expected_review_snapshots,
+        )
 
         next_cursor = None
         if len(candidate_rows) > payload.limit and items:

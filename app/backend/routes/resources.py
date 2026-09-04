@@ -21,10 +21,13 @@ from ..services.deactivation import (
 from ..services.avatar_media import validate_avatar_reference
 from ..services.resource_create import create_child as create_child_resource
 from ..services.resource_create import create_duck as create_duck_resource
+from .teacher_json import json_body_openapi, teacher_json_body
 
 
 router = APIRouter()
 BUSINESS_CLOCK = BusinessClock(SETTINGS.business_timezone)
+CHILD_MUTATION_BODY = teacher_json_body(schemas.ChildMutationRequest)
+DUCK_MUTATION_BODY = teacher_json_body(schemas.DuckMutationRequest)
 
 
 def _incoming_request_id(request: Request) -> str | None:
@@ -64,12 +67,16 @@ def list_children(
     )
 
 
-@router.post("/api/children", response_model=schemas.ChildOut)
+@router.post(
+    "/api/children",
+    response_model=schemas.ChildOut,
+    openapi_extra=json_body_openapi(schemas.ChildMutationRequest),
+)
 def create_child(
     request: Request,
-    payload: schemas.ChildMutationRequest,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: schemas.ChildMutationRequest = Depends(CHILD_MUTATION_BODY),
+    db: Session = Depends(get_db),
 ) -> schemas.ChildOut:
     return create_child_resource(
         db,
@@ -80,12 +87,16 @@ def create_child(
     )
 
 
-@router.put("/api/children/{child_id}", response_model=schemas.ChildOut)
+@router.put(
+    "/api/children/{child_id}",
+    response_model=schemas.ChildOut,
+    openapi_extra=json_body_openapi(schemas.ChildMutationRequest),
+)
 def update_child(
     child_id: int,
-    payload: schemas.ChildMutationRequest,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: schemas.ChildMutationRequest = Depends(CHILD_MUTATION_BODY),
+    db: Session = Depends(get_db),
 ) -> models.Child:
     validate_avatar_reference(db, payload.avatar, media_root=SETTINGS.media_root)
     child = db.get(models.Child, child_id)
@@ -154,12 +165,16 @@ def list_ducks(
     return list_teacher_ducks(db, include_inactive=include_inactive)
 
 
-@router.post("/api/ducks", response_model=schemas.DuckOut)
+@router.post(
+    "/api/ducks",
+    response_model=schemas.DuckOut,
+    openapi_extra=json_body_openapi(schemas.DuckMutationRequest),
+)
 def create_duck(
     request: Request,
-    payload: schemas.DuckMutationRequest,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: schemas.DuckMutationRequest = Depends(DUCK_MUTATION_BODY),
+    db: Session = Depends(get_db),
 ) -> schemas.DuckOut:
     return create_duck_resource(
         db,
@@ -170,12 +185,16 @@ def create_duck(
     )
 
 
-@router.put("/api/ducks/{duck_id}", response_model=schemas.DuckOut)
+@router.put(
+    "/api/ducks/{duck_id}",
+    response_model=schemas.DuckOut,
+    openapi_extra=json_body_openapi(schemas.DuckMutationRequest),
+)
 def update_duck(
     duck_id: int,
-    payload: schemas.DuckMutationRequest,
-    db: Session = Depends(get_db),
     _teacher: models.TeacherSession = Depends(require_teacher_session),
+    payload: schemas.DuckMutationRequest = Depends(DUCK_MUTATION_BODY),
+    db: Session = Depends(get_db),
 ) -> models.Duck:
     validate_avatar_reference(db, payload.avatar, media_root=SETTINGS.media_root)
     duck = db.get(models.Duck, duck_id)

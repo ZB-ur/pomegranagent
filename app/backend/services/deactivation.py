@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from .. import models, schemas
 from ..api_errors import APIError
+from .avatar_media import project_avatar_url_for_read
 
 
 _ERROR_MESSAGES = {
@@ -129,7 +130,7 @@ def list_teacher_children(
             id=child.id,
             name=child.name,
             nickname=child.nickname,
-            avatar=child.avatar,
+            avatar=project_avatar_url_for_read(child.avatar),
             active=child.active,
             deactivated_at=_utc_datetime(child.deactivated_at),
             future_roster_entries=future_roster_entries or 0,
@@ -164,7 +165,7 @@ def list_teacher_ducks(
         schemas.TeacherDuckOut(
             id=duck.id,
             name=duck.name,
-            avatar=duck.avatar,
+            avatar=project_avatar_url_for_read(duck.avatar),
             status=duck.status,
             note=duck.note,
             active=duck.active,
