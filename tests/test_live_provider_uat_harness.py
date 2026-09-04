@@ -3384,14 +3384,62 @@ def test_teacher_pin_sqlite_accepts_exact_resource_create_response_dtos(tmp_path
     )
 
 
+def test_teacher_pin_sqlite_accepts_safe_multiline_duck_note(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    _create_runtime_secret_scan_database(plan.database)
+    with sqlite3.connect(plan.database) as connection:
+        _insert_resource_create_ledger_rows(connection)
+        response_json = connection.execute(
+            "SELECT response_json FROM roster_requests "
+            "WHERE operation = 'duck_create'",
+        ).fetchone()[0]
+        response = json.loads(response_json)
+        response["note"] = "first observation\r\nsecond observation"
+        connection.execute(
+            "UPDATE roster_requests SET response_json = ? "
+            "WHERE operation = 'duck_create'",
+            (
+                json.dumps(
+                    response,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                ),
+            ),
+        )
+        connection.commit()
+
+    module.scan_retained_artifacts(
+        plan.root,
+        provider_secrets=("sk-resource-create-provider-secret",),
+        runtime_secrets=("4839",),
+        pinned_plan=plan,
+    )
+
+
 @pytest.mark.parametrize(
-    ("operation", "field"),
-    (("child_create", "name"), ("duck_create", "note")),
+    ("operation", "field", "leaked_value"),
+    (
+        pytest.param(
+            "child_create",
+            "name",
+            "credential 2026",
+            id="child-name",
+        ),
+        pytest.param(
+            "duck_create",
+            "note",
+            "first observation\r\ncredential 2026\r\nlast observation",
+            id="multiline-duck-note",
+        ),
+    ),
 )
 def test_teacher_pin_sqlite_rejects_resource_response_free_text_leak(
     tmp_path,
     operation,
     field,
+    leaked_value,
 ):
     module = _module()
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
@@ -3403,7 +3451,7 @@ def test_teacher_pin_sqlite_rejects_resource_response_free_text_leak(
             (operation,),
         ).fetchone()[0]
         response = json.loads(response_json)
-        response[field] = "credential 2026"
+        response[field] = leaked_value
         connection.execute(
             "UPDATE roster_requests SET response_json = ? WHERE operation = ?",
             (
@@ -3429,7 +3477,7 @@ def test_teacher_pin_sqlite_rejects_resource_response_free_text_leak(
 
 @pytest.mark.parametrize(
     "mutation",
-    ("replayed", "missing_response", "unknown_operation"),
+    ("replayed", "missing_response", "nul_text", "unknown_operation"),
 )
 def test_teacher_pin_sqlite_rejects_noncanonical_resource_response(
     tmp_path,
@@ -3463,6 +3511,25 @@ def test_teacher_pin_sqlite_rejects_noncanonical_resource_response(
             connection.execute(
                 "UPDATE roster_requests SET response_json = NULL "
                 "WHERE operation = 'child_create'",
+            )
+        elif mutation == "nul_text":
+            response_json = connection.execute(
+                "SELECT response_json FROM roster_requests "
+                "WHERE operation = 'duck_create'",
+            ).fetchone()[0]
+            response = json.loads(response_json)
+            response["note"] = "invalid\x00note"
+            connection.execute(
+                "UPDATE roster_requests SET response_json = ? "
+                "WHERE operation = 'duck_create'",
+                (
+                    json.dumps(
+                        response,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                ),
             )
         else:
             connection.execute(

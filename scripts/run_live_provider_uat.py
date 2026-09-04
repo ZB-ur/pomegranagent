@@ -3830,7 +3830,7 @@ def _database_response_texts(
             isinstance(candidate, str)
             and candidate == candidate.strip()
             and 1 <= len(candidate) <= maximum
-            and not any(character in "\r\n\x00" for character in candidate)
+            and "\x00" not in candidate
         )
 
     if table == "chat_requests":

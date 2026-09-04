@@ -347,9 +347,12 @@ Wait for the harness to stop and exit successfully.
    responses never contain `replayed`; avatars are null or canonical UUIDv4
    media URLs, IDs are positive integers, and child `active` is boolean. Child
    name/nickname and duck name/status/note remain PIN-scanned free text. Unknown
-   operations and malformed response objects fail closed. Dates, IDs, UUIDs,
-   paths, numeric values,
-   digests, checksums, and the validated log timestamp/logger/level envelope
+   operations and malformed response objects fail closed. These resource text
+   fields follow the shipped mutation schema: outer whitespace must already be
+   stripped, internal CR/LF is allowed, the field-specific 64/255/2000 length
+   limits apply, and NUL is rejected. The complete decoded multiline value is
+   still PIN-scanned. Dates, IDs, UUIDs, paths, numeric values, digests,
+   checksums, and the validated log timestamp/logger/level envelope
    are machine metadata and are not raw-substring PIN-scanned. Screenshot PNGs,
    TTS/media bytes, and every unknown file or unknown structured shape remain
    conservatively byte-scanned and fail closed. Thus a PIN equal to a year or
