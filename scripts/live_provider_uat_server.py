@@ -19,6 +19,7 @@ import stat
 import sys
 import threading
 import time
+from urllib.parse import parse_qs
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -82,6 +83,21 @@ ROSTER_TELEMETRY_KEYS = {
     "replace_existing",
     "request_id",
     "status",
+}
+TTS_REQUEST_TELEMETRY_KEYS = {
+    "audio_bytes",
+    "cache_hit",
+    "cache_relative_path",
+    "cache_sha256",
+    "effective_text_sha256",
+    "kind",
+    "method",
+    "order",
+    "path",
+    "requested_text_sha256",
+    "status",
+    "truncated",
+    "voice",
 }
 
 
@@ -792,6 +808,7 @@ class TelemetryWriter:
         if frozenset(event) not in {
             frozenset(TELEMETRY_KEYS),
             frozenset(ROSTER_TELEMETRY_KEYS),
+            frozenset(TTS_REQUEST_TELEMETRY_KEYS),
         }:
             raise ServerSafetyError("telemetry event shape is invalid")
         payload = (
@@ -985,6 +1002,126 @@ class RosterAttemptTelemetry:
                 "order": order,
                 "path": "/api/roster/month",
                 "status": response_status,
+            }
+        )
+
+
+class TTSRequestTelemetry:
+    """Retain safe request/cache facts for every UI TTS endpoint call."""
+
+    def __init__(
+        self,
+        app,
+        *,
+        emit: Callable[[Mapping[str, object]], None],
+        tts_cache: Path,
+    ) -> None:
+        if not callable(app) or not callable(emit) or not _directory_owned(tts_cache):
+            raise ServerSafetyError("TTS request telemetry target is invalid")
+        self._app = app
+        self._emit = emit
+        self._tts_cache = tts_cache
+        self._order = 0
+        self._lock = threading.Lock()
+
+    async def __call__(self, scope, receive, send):
+        if (
+            not isinstance(scope, Mapping)
+            or scope.get("type") != "http"
+            or scope.get("method") != "GET"
+            or scope.get("path") != "/api/tts"
+        ):
+            return await self._app(scope, receive, send)
+        raw_query = scope.get("query_string")
+        try:
+            if not isinstance(raw_query, bytes) or len(raw_query) > 10_000:
+                raise ValueError
+            query = parse_qs(
+                raw_query.decode("ascii", errors="strict"),
+                keep_blank_values=True,
+                strict_parsing=True,
+                max_num_fields=1,
+                encoding="utf-8",
+                errors="strict",
+            )
+            if set(query) != {"text"} or len(query["text"]) != 1:
+                raise ValueError
+            requested_text = query["text"][0]
+            stripped_text = requested_text.strip()
+            effective_text = stripped_text[:500]
+            if not effective_text:
+                raise ValueError
+        except (UnicodeError, ValueError) as exc:
+            raise ServerSafetyError("TTS request telemetry query is invalid") from exc
+        encoded_requested = requested_text.encode("utf-8")
+        encoded_effective = effective_text.encode("utf-8")
+        cache_name = (
+            hashlib.md5(encoded_effective, usedforsecurity=False).hexdigest() + ".mp3"
+        )
+        cache_file = self._tts_cache / cache_name
+        try:
+            cache_file.lstat()
+        except FileNotFoundError:
+            cache_before = None
+        except OSError as exc:
+            raise ServerSafetyError("TTS request telemetry cache is unavailable") from exc
+        else:
+            cache_before = _read_regular_nofollow(cache_file, max_bytes=100_000_000)
+        with self._lock:
+            self._order += 1
+            order = self._order
+
+        response_status = None
+        response_body = bytearray()
+        response_complete = False
+
+        async def measured_send(message):
+            nonlocal response_status, response_complete
+            if not isinstance(message, Mapping):
+                raise ServerSafetyError("TTS request telemetry response is invalid")
+            if message.get("type") == "http.response.start":
+                status = message.get("status")
+                if (
+                    type(status) is not int
+                    or not 100 <= status <= 599
+                    or response_status is not None
+                ):
+                    raise ServerSafetyError("TTS request telemetry response is invalid")
+                response_status = status
+            elif message.get("type") == "http.response.body":
+                chunk = message.get("body", b"")
+                if not isinstance(chunk, bytes) or response_status is None:
+                    raise ServerSafetyError("TTS request telemetry response is invalid")
+                response_body.extend(chunk)
+                if len(response_body) > 100_000_000:
+                    raise ServerSafetyError("TTS request telemetry response is invalid")
+                if not message.get("more_body", False):
+                    response_complete = True
+            await send(message)
+
+        await self._app(scope, receive, measured_send)
+        if response_status != 200 or not response_complete or not response_body:
+            raise ServerSafetyError("TTS request telemetry response is invalid")
+        cache_after = _read_regular_nofollow(cache_file, max_bytes=100_000_000)
+        if bytes(response_body) != cache_after or (
+            cache_before is not None and cache_before != cache_after
+        ):
+            raise ServerSafetyError("TTS request telemetry cache is inconsistent")
+        self._emit(
+            {
+                "audio_bytes": len(cache_after),
+                "cache_hit": cache_before is not None,
+                "cache_relative_path": f"tts-cache/{cache_name}",
+                "cache_sha256": hashlib.sha256(cache_after).hexdigest(),
+                "effective_text_sha256": hashlib.sha256(encoded_effective).hexdigest(),
+                "kind": "tts_request",
+                "method": "GET",
+                "order": order,
+                "path": "/api/tts",
+                "requested_text_sha256": hashlib.sha256(encoded_requested).hexdigest(),
+                "status": response_status,
+                "truncated": len(stripped_text) > 500,
+                "voice": "zh-CN-XiaoxiaoNeural",
             }
         )
 
@@ -1189,8 +1326,14 @@ def main(argv: list[str] | None = None) -> int:
 
     import uvicorn
 
+    instrumented_app = RosterAttemptTelemetry(backend.app, emit=telemetry.emit)
+    instrumented_app = TTSRequestTelemetry(
+        instrumented_app,
+        emit=telemetry.emit,
+        tts_cache=paths.tts_cache,
+    )
     config = uvicorn.Config(
-        RosterAttemptTelemetry(backend.app, emit=telemetry.emit),
+        instrumented_app,
         access_log=False,
         log_config=None,
         proxy_headers=False,

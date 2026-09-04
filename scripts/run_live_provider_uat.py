@@ -106,6 +106,21 @@ ROSTER_TELEMETRY_KEYS = {
     "request_id",
     "status",
 }
+TTS_REQUEST_TELEMETRY_KEYS = {
+    "audio_bytes",
+    "cache_hit",
+    "cache_relative_path",
+    "cache_sha256",
+    "effective_text_sha256",
+    "kind",
+    "method",
+    "order",
+    "path",
+    "requested_text_sha256",
+    "status",
+    "truncated",
+    "voice",
+}
 LATENCY_BUCKETS = {"<1s", "1-5s", "5-30s", "30-120s", ">=120s"}
 REQUIRED_JOURNEY_STEPS = (
     "teacher_credential_setup_login",
@@ -773,6 +788,7 @@ def _git_object_output(
     if (
         not isinstance(argv, tuple)
         or not argv
+        or argv[0] != "git"
         or type(max_bytes) is not int
         or max_bytes < 1
     ):
@@ -783,11 +799,26 @@ def _git_object_output(
     ):
         raise HarnessSafetyError("reviewed source repository identity changed")
     try:
+        git_environment = {
+            name: os.environ[name]
+            for name in SAFE_EXECUTION_ENV
+            if name in os.environ and isinstance(os.environ[name], str)
+        }
+        git_environment.update(
+            {
+                "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_SYSTEM": os.devnull,
+                "GIT_NO_REPLACE_OBJECTS": "1",
+            }
+        )
         completed = runner(
-            argv,
+            ("git", "--no-replace-objects", *argv[1:]),
             cwd=plan.repository,
             capture_output=True,
             check=False,
+            env=dict(sorted(git_environment.items())),
         )
     except (OSError, ValueError) as exc:
         raise HarnessSafetyError("reviewed source Git object read failed") from exc
@@ -807,7 +838,13 @@ def _git_object_output(
 
 
 def _git_blob_oid(payload: bytes) -> str:
-    header = f"blob {len(payload)}\0".encode("ascii")
+    return _git_object_oid("blob", payload)
+
+
+def _git_object_oid(kind: str, payload: bytes) -> str:
+    if kind not in {"blob", "commit", "tree"} or not isinstance(payload, bytes):
+        raise HarnessSafetyError("reviewed source Git object is invalid")
+    header = f"{kind} {len(payload)}\0".encode("ascii")
     return hashlib.sha1(header + payload, usedforsecurity=False).hexdigest()
 
 
@@ -859,17 +896,50 @@ def materialize_reviewed_source(
         max_bytes=64,
         runner=runner,
     )
+    commit_kind = _git_object_output(
+        plan,
+        ("git", "cat-file", "-t", plan.source_head),
+        max_bytes=64,
+        runner=runner,
+    )
+    commit_payload = _git_object_output(
+        plan,
+        ("git", "cat-file", "commit", plan.source_head),
+        max_bytes=16_000_000,
+        runner=runner,
+    )
     try:
         resolved_head = resolved.decode("ascii", errors="strict").strip()
         tree_oid = tree.decode("ascii", errors="strict").strip()
         object_name = object_format.decode("ascii", errors="strict").strip()
+        commit_name = commit_kind.decode("ascii", errors="strict").strip()
+        commit_tree_oid = commit_payload.split(b"\n", 1)[0].decode(
+            "ascii", errors="strict"
+        ).removeprefix("tree ")
     except UnicodeError as exc:
         raise HarnessSafetyError("reviewed source Git identity is invalid") from exc
     if (
         resolved_head != plan.source_head
         or HEAD_PATTERN.fullmatch(tree_oid) is None
         or object_name != "sha1"
+        or commit_name != "commit"
+        or _git_object_oid("commit", commit_payload) != plan.source_head
+        or commit_tree_oid != tree_oid
     ):
+        raise HarnessSafetyError("reviewed source Git identity is invalid")
+    tree_kind = _git_object_output(
+        plan,
+        ("git", "cat-file", "-t", tree_oid),
+        max_bytes=64,
+        runner=runner,
+    )
+    tree_payload = _git_object_output(
+        plan,
+        ("git", "cat-file", "tree", tree_oid),
+        max_bytes=64_000_000,
+        runner=runner,
+    )
+    if tree_kind != b"tree\n" or _git_object_oid("tree", tree_payload) != tree_oid:
         raise HarnessSafetyError("reviewed source Git identity is invalid")
 
     listing = _git_object_output(
@@ -909,7 +979,7 @@ def materialize_reviewed_source(
         "scripts/live_provider_uat_server.py",
         "tests/fixtures/live_provider/avatars/child.png",
         "tests/fixtures/live_provider/avatars/duck.jpg",
-        "version.json",
+        "app/version.json",
     }
     if (
         not required.issubset(expected)
@@ -1119,6 +1189,25 @@ def build_seed_environment(parent: Mapping[str, str]) -> dict[str, str]:
     return dict(sorted(environment.items()))
 
 
+def _reap_child_after_validation_failure(process) -> None:
+    """Boundedly terminate one just-started leader when ownership is not usable."""
+
+    try:
+        if process.poll() is None:
+            process.terminate()
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+        if process.poll() is None:
+            raise HarnessSafetyError("started child cleanup did not reap the leader")
+    except HarnessSafetyError:
+        raise
+    except (OSError, ValueError, subprocess.TimeoutExpired) as exc:
+        raise HarnessSafetyError("started child cleanup failed") from exc
+
+
 def run_seed_process(
     plan: RunPlan,
     *,
@@ -1180,7 +1269,14 @@ def run_seed_process(
             pgid=process.pid,
             sid=process.pid,
         )
-        _owned_identity(owned, getpgid=getpgid, getsid=getsid)
+        try:
+            _owned_identity(owned, getpgid=getpgid, getsid=getsid)
+        except BaseException as validation_error:
+            try:
+                _reap_child_after_validation_failure(process)
+            except BaseException as cleanup_error:
+                raise cleanup_error from validation_error
+            raise
         observe = _peek_owned_exit if peek_exit is None else peek_exit
         observed = _wait_owned_exit_unreaped(
             owned,
@@ -1564,6 +1660,37 @@ def parse_telemetry_line(payload: bytes) -> dict[str, object]:
         ):
             raise HarnessSafetyError("provider telemetry is invalid")
         return value
+    if set(value) == TTS_REQUEST_TELEMETRY_KEYS:
+        if (
+            value["kind"] != "tts_request"
+            or value["method"] != "GET"
+            or value["path"] != "/api/tts"
+            or type(value["order"]) is not int
+            or value["order"] <= 0
+            or value["status"] != 200
+            or type(value["cache_hit"]) is not bool
+            or type(value["truncated"]) is not bool
+            or type(value["audio_bytes"]) is not int
+            or not 1 <= value["audio_bytes"] <= 100_000_000
+            or value["voice"] != "zh-CN-XiaoxiaoNeural"
+            or not isinstance(value["cache_relative_path"], str)
+            or re.fullmatch(
+                r"tts-cache/[0-9a-f]{32}\.mp3",
+                value["cache_relative_path"],
+            )
+            is None
+            or any(
+                not isinstance(value[key], str)
+                or SHA256_PATTERN.fullmatch(value[key]) is None
+                for key in (
+                    "cache_sha256",
+                    "effective_text_sha256",
+                    "requested_text_sha256",
+                )
+            )
+        ):
+            raise HarnessSafetyError("provider telemetry is invalid")
+        return value
     if set(value) != TELEMETRY_KEYS:
         raise HarnessSafetyError("provider telemetry is invalid")
     operation = value["operation"]
@@ -1808,6 +1935,7 @@ def launch_server_process(
     getpgid=os.getpgid,
     getsid=os.getsid,
     source_validator: Callable[[RunPlan], None] = assert_reviewed_source_pinned,
+    validation_stopper: Callable[[OwnedProcess], object] | None = None,
 ) -> OwnedProcess:
     listen_fd = bound_socket.fileno()
     if (
@@ -1848,8 +1976,25 @@ def launch_server_process(
         pgid=process.pid,
         sid=process.pid,
     )
-    _owned_identity(owned, getpgid=getpgid, getsid=getsid)
-    source_validator(plan)
+    identity_validated = False
+    try:
+        _owned_identity(owned, getpgid=getpgid, getsid=getsid)
+        identity_validated = True
+        source_validator(plan)
+    except BaseException as validation_error:
+        try:
+            if identity_validated:
+                stopper = (
+                    stop_owned_process_group
+                    if validation_stopper is None
+                    else validation_stopper
+                )
+                stopper(owned)
+            else:
+                _reap_child_after_validation_failure(process)
+        except BaseException as cleanup_error:
+            raise cleanup_error from validation_error
+        raise
     return owned
 
 
@@ -2062,6 +2207,7 @@ def start_live_server(
     prebind: Callable[[], BoundLoopbackSocket] = prebind_loopback_socket,
     collector_factory: Callable[[int], object] = TelemetryCollector,
     launcher: Callable[..., OwnedProcess] = launch_server_process,
+    startup_stopper: Callable[[OwnedProcess], object] = stop_owned_process_group,
 ) -> LiveServerSession:
     """Launch the sole live child and close every parent-side inherited handle."""
 
@@ -2071,10 +2217,13 @@ def start_live_server(
     read_fd = write_fd = None
     output = None
     collector = None
+    collector_started = False
+    owned = None
     try:
         read_fd, write_fd = os.pipe()
         collector = collector_factory(read_fd)
         collector.start()
+        collector_started = True
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
         if hasattr(os, "O_NOFOLLOW"):
             flags |= os.O_NOFOLLOW
@@ -2097,26 +2246,50 @@ def start_live_server(
             output=output,
             python_executable=python_executable,
         )
-    except BaseException:
+        bound.socket.close()
+        os.close(write_fd)
+        write_fd = None
+        assert_run_plan_identity(plan)
+    except BaseException as startup_error:
+        cleanup_error = None
+        if owned is not None:
+            try:
+                startup_stopper(owned)
+            except BaseException as exc:
+                cleanup_error = exc
         try:
             bound.socket.close()
-        except BaseException:
-            pass
-        for descriptor in (write_fd, read_fd):
-            if descriptor is not None:
-                try:
-                    os.close(descriptor)
-                except OSError:
-                    pass
+        except BaseException as exc:
+            if cleanup_error is None:
+                cleanup_error = exc
+        if write_fd is not None:
+            try:
+                os.close(write_fd)
+            except OSError as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if collector_started:
+            try:
+                collector.finish()
+                read_fd = None
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if read_fd is not None:
+            try:
+                os.close(read_fd)
+            except OSError as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
         if output is not None:
             try:
                 output.close()
-            except BaseException:
-                pass
-        raise
-    bound.socket.close()
-    os.close(write_fd)
-    assert_run_plan_identity(plan)
+            except BaseException as exc:
+                if cleanup_error is None:
+                    cleanup_error = exc
+        if cleanup_error is not None:
+            raise HarnessSafetyError("live server startup cleanup failed") from cleanup_error
+        raise startup_error
     return LiveServerSession(
         port=bound.port,
         owned=owned,
@@ -2179,10 +2352,16 @@ def atomic_write_json(
     replace: Callable[[Path, Path], None] = os.replace,
     nonce: Callable[[], str] = lambda: secrets.token_hex(8),
     pinned_plan: RunPlan | None = None,
+    terminal_commit: bool = False,
 ) -> None:
     """Write one canonical 0600 JSON artifact and durably replace its target."""
 
     destination = _absolute(target)
+    if type(terminal_commit) is not bool or (
+        terminal_commit
+        and (pinned_plan is None or destination != pinned_plan.manifest)
+    ):
+        raise HarnessSafetyError("terminal evidence commit is invalid")
     parent = destination.parent
     parent_descriptor = None
     destination_name = destination.name
@@ -2241,6 +2420,10 @@ def atomic_write_json(
         os.fsync(descriptor)
         os.close(descriptor)
         descriptor = None
+        if terminal_commit:
+            assert_run_plan_identity(pinned_plan)
+            if parent_descriptor is not None:
+                os.fsync(parent_descriptor)
         if parent_descriptor is not None and replace is os.replace:
             os.replace(
                 temporary_name,
@@ -2250,7 +2433,9 @@ def atomic_write_json(
             )
         else:
             replace(temporary, destination)
-        if parent_descriptor is not None:
+        if terminal_commit:
+            pass
+        elif parent_descriptor is not None:
             os.fsync(parent_descriptor)
         else:
             directory_fd = os.open(parent, _directory_open_flags())
@@ -2274,8 +2459,12 @@ def atomic_write_json(
         raise HarnessSafetyError("atomic evidence write failed") from exc
     finally:
         if parent_descriptor is not None:
-            os.close(parent_descriptor)
-    if pinned_plan is not None:
+            try:
+                os.close(parent_descriptor)
+            except OSError:
+                if not terminal_commit:
+                    raise
+    if pinned_plan is not None and not terminal_commit:
         assert_run_plan_identity(pinned_plan)
 
 
@@ -2283,7 +2472,6 @@ def finalize_failed_run(
     plan: RunPlan,
     *,
     reason_code: str,
-    replace_unverified_complete: bool = False,
 ) -> None:
     if re.fullmatch(r"[A-Z][A-Z0-9_]{2,63}", reason_code) is None:
         raise HarnessSafetyError("failed-run reason code is invalid")
@@ -2309,16 +2497,6 @@ def finalize_failed_run(
         except (HarnessSafetyError, UnicodeError, ValueError) as exc:
             raise HarnessSafetyError("existing retained manifest is invalid") from exc
         if existing == payload:
-            return
-        if (
-            replace_unverified_complete
-            and isinstance(existing, Mapping)
-            and existing.get("protocol") == payload["protocol"]
-            and existing.get("run_id") == plan.run_id
-            and existing.get("source_head") == plan.source_head
-            and existing.get("status") == "COMPLETE"
-        ):
-            atomic_write_json(plan.manifest, payload, pinned_plan=plan)
             return
         raise HarnessSafetyError("existing retained manifest cannot be replaced")
     atomic_write_json(plan.manifest, payload, pinned_plan=plan)
@@ -2662,14 +2840,33 @@ def _git_capture(root: Path, runner, argv: tuple[str, ...]) -> bytes:
     return completed.stdout
 
 
-def _dirty_path_records(status: bytes) -> tuple[tuple[str, str, str], ...]:
+def _dirty_path_records(
+    status: bytes,
+) -> tuple[tuple[str, str, str, int, str | None], ...]:
     if not status:
         return ()
     if not status.endswith(b"\0"):
         raise HarnessSafetyError("protected Git porcelain is invalid")
     records = list(status[:-1].split(b"\0"))
-    paths: list[tuple[str, str, str]] = []
+    paths: list[tuple[str, str, str, int, str | None]] = []
     index = 0
+    porcelain_record = 0
+
+    def decode_path(raw_path: bytes) -> str:
+        try:
+            relative = raw_path.decode("utf-8", errors="strict")
+        except UnicodeError as exc:
+            raise HarnessSafetyError("protected Git porcelain is invalid") from exc
+        candidate = Path(relative)
+        if (
+            not relative
+            or candidate.is_absolute()
+            or "\\" in relative
+            or any(part in {"", ".", ".."} for part in candidate.parts)
+        ):
+            raise HarnessSafetyError("protected Git porcelain is invalid")
+        return candidate.as_posix()
+
     while index < len(records):
         record = records[index]
         if len(record) < 4 or record[2:3] != b" ":
@@ -2685,34 +2882,38 @@ def _dirty_path_records(status: bytes) -> tuple[tuple[str, str, str], ...]:
         ):
             raise HarnessSafetyError("protected Git porcelain is invalid")
         raw_paths = [(record[3:], "path")]
+        destination = None
         index += 1
         if b"R" in status_code or b"C" in status_code:
             if index >= len(records):
                 raise HarnessSafetyError("protected Git porcelain is invalid")
             raw_paths = [(record[3:], "current"), (records[index], "original")]
+            destination = decode_path(record[3:])
             index += 1
         for raw_path, role in raw_paths:
-            try:
-                relative = raw_path.decode("utf-8", errors="strict")
-            except UnicodeError as exc:
-                raise HarnessSafetyError("protected Git porcelain is invalid") from exc
-            candidate = Path(relative)
-            if (
-                not relative
-                or candidate.is_absolute()
-                or "\\" in relative
-                or any(part in {"", ".", ".."} for part in candidate.parts)
-            ):
-                raise HarnessSafetyError("protected Git porcelain is invalid")
-            paths.append((candidate.as_posix(), decoded_status, role))
+            paths.append(
+                (
+                    decode_path(raw_path),
+                    decoded_status,
+                    role,
+                    porcelain_record,
+                    destination,
+                )
+            )
+        porcelain_record += 1
     result = tuple(sorted(paths))
-    if len(set(result)) != len(result):
+    if len({(item[3], item[2]) for item in result}) != len(result):
         raise HarnessSafetyError("protected Git porcelain contains duplicate records")
     return result
 
 
 def _dirty_path_names(status: bytes) -> tuple[str, ...]:
-    return tuple(relative for relative, _status, _role in _dirty_path_records(status))
+    return tuple(
+        relative
+        for relative, _status, _role, _record, _destination in _dirty_path_records(
+            status
+        )
+    )
 
 
 def _dirty_path_evidence(
@@ -2720,6 +2921,8 @@ def _dirty_path_evidence(
     relative: str,
     porcelain_status: str,
     porcelain_role: str,
+    porcelain_record: int,
+    porcelain_destination: str | None,
 ) -> dict[str, object]:
     path = root.joinpath(*relative.split("/"))
     file_state = _file_evidence(path)
@@ -2730,6 +2933,8 @@ def _dirty_path_evidence(
         "relative_path": relative,
         "porcelain_status": porcelain_status,
         "porcelain_role": porcelain_role,
+        "porcelain_record": porcelain_record,
+        "porcelain_destination": porcelain_destination,
         "file": file_state,
         "directory": directory,
     }
@@ -2763,8 +2968,21 @@ def capture_protected_resources(
         "git_head": head,
         "git_porcelain": {"sha256": _hash_bytes(porcelain), "size": len(porcelain)},
         "dirty_paths": [
-            _dirty_path_evidence(root, relative, porcelain_status, porcelain_role)
-            for relative, porcelain_status, porcelain_role in dirty_records
+            _dirty_path_evidence(
+                root,
+                relative,
+                porcelain_status,
+                porcelain_role,
+                porcelain_record,
+                porcelain_destination,
+            )
+            for (
+                relative,
+                porcelain_status,
+                porcelain_role,
+                porcelain_record,
+                porcelain_destination,
+            ) in dirty_records
         ],
     }
 
@@ -2796,6 +3014,8 @@ def validate_reviewed_checkout(
             != {
                 "directory",
                 "file",
+                "porcelain_destination",
+                "porcelain_record",
                 "porcelain_role",
                 "porcelain_status",
                 "relative_path",
@@ -2813,6 +3033,8 @@ def validate_reviewed_checkout(
             or not isinstance(item.get("porcelain_status"), str)
             or re.fullmatch(r"[ MADRCUT?!]{2}", item["porcelain_status"]) is None
             or not isinstance(item.get("porcelain_role"), str)
+            or type(item.get("porcelain_record")) is not int
+            or item["porcelain_record"] < 0
         ):
             raise HarnessSafetyError("reviewed checkout dirty state is invalid")
         rename_or_copy = "R" in item["porcelain_status"] or "C" in item["porcelain_status"]
@@ -2820,6 +3042,19 @@ def validate_reviewed_checkout(
             rename_or_copy
             and item["porcelain_role"] not in {"current", "original"}
         ) or (not rename_or_copy and item["porcelain_role"] != "path"):
+            raise HarnessSafetyError("reviewed checkout dirty state is invalid")
+        destination = item.get("porcelain_destination")
+        if rename_or_copy:
+            try:
+                canonical_destination = _canonical_repository_relative_path(destination)
+            except HarnessSafetyError as exc:
+                raise HarnessSafetyError("reviewed checkout dirty state is invalid") from exc
+            if (
+                item["porcelain_role"] == "current"
+                and item.get("relative_path") != canonical_destination
+            ):
+                raise HarnessSafetyError("reviewed checkout dirty state is invalid")
+        elif destination is not None:
             raise HarnessSafetyError("reviewed checkout dirty state is invalid")
         relative = item.get("relative_path")
         try:
@@ -3789,7 +4024,7 @@ def validate_database_provenance(
                 or conversation[0] != child_id
                 or conversation[2] is None
                 or conversation[3] != "ended"
-                or conversation[4] != "max_rounds"
+                or conversation[4] not in {"complete", "max_rounds"}
                 or type(conversation[5]) is not int
             ):
                 raise HarnessSafetyError("database provenance conversation mismatch")
@@ -3798,8 +4033,10 @@ def validate_database_provenance(
                 (conversation_id,),
             ).fetchall()
             if (
-                len(messages) != 6
+                len(messages) not in {2, 4, 6}
                 or messages[-1][0] != conversation[5]
+                or conversation[4]
+                != ("max_rounds" if len(messages) == 6 else "complete")
                 or any(row[0] in baseline_ids["messages"] for row in messages)
                 or [row[1] for row in messages] != ["child", "diary"] * (len(messages) // 2)
                 or any(not isinstance(row[2], str) or not row[2].strip() for row in messages)
@@ -3807,12 +4044,21 @@ def validate_database_provenance(
                 raise HarnessSafetyError("database provenance frozen messages mismatch")
             tts_evidence = entity_ids["tts_evidence"]
             child_name_row = connection.execute(
-                "SELECT name FROM children WHERE id = ?", (child_id,)
+                "SELECT name, nickname FROM children WHERE id = ?", (child_id,)
             ).fetchone()
-            if child_name_row is None or not isinstance(child_name_row[0], str):
+            if (
+                child_name_row is None
+                or not isinstance(child_name_row[0], str)
+                or not child_name_row[0]
+                or (
+                    child_name_row[1] is not None
+                    and not isinstance(child_name_row[1], str)
+                )
+            ):
                 raise HarnessSafetyError("database provenance TTS source mismatch")
+            child_display_name = child_name_row[1] or child_name_row[0]
             greeting = (
-                f"你好呀，{child_name_row[0]}！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～"
+                f"你好呀，{child_display_name}！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～"
             )
             expected_tts = [
                 ("opening_greeting", None, greeting),
@@ -3826,10 +4072,12 @@ def validate_database_provenance(
             for evidence, (kind, source_message_id, text) in zip(
                 tts_evidence, expected_tts, strict=True
             ):
+                stripped_text = text.strip()
+                effective_text = stripped_text[:500]
                 expected_cache = (
                     "tts-cache/"
                     + hashlib.md5(
-                        text.encode("utf-8"), usedforsecurity=False
+                        effective_text.encode("utf-8"), usedforsecurity=False
                     ).hexdigest()
                     + ".mp3"
                 )
@@ -3839,13 +4087,18 @@ def validate_database_provenance(
                     != {
                         "audio_sha256",
                         "cache_relative_path",
+                        "effective_text_sha256",
                         "kind",
                         "source_message_id",
                         "text_sha256",
+                        "truncated",
                     }
                     or evidence["kind"] != kind
                     or evidence["source_message_id"] != source_message_id
                     or evidence["text_sha256"] != _hash_bytes(text.encode("utf-8"))
+                    or evidence["effective_text_sha256"]
+                    != _hash_bytes(effective_text.encode("utf-8"))
+                    or evidence["truncated"] is not (len(stripped_text) > 500)
                     or not isinstance(evidence["audio_sha256"], str)
                     or SHA256_PATTERN.fullmatch(evidence["audio_sha256"]) is None
                     or evidence["cache_relative_path"] != expected_cache
@@ -3855,9 +4108,10 @@ def validate_database_provenance(
                 ):
                     raise HarnessSafetyError("database provenance TTS source mismatch")
             chat_request_ids = entity_ids["chat_request_ids"]
+            request_count = len(messages) // 2
             if (
                 not isinstance(chat_request_ids, list)
-                or len(chat_request_ids) != 3
+                or len(chat_request_ids) != request_count
                 or len(set(chat_request_ids)) != len(chat_request_ids)
                 or any(
                     not isinstance(value, str)
@@ -3867,9 +4121,18 @@ def validate_database_provenance(
                 )
             ):
                 raise HarnessSafetyError("database provenance chat request identities are invalid")
+            provider_request_ids = (
+                chat_request_ids[:2]
+                if request_count == 3
+                else chat_request_ids
+            )
+            local_terminal_request_id = (
+                chat_request_ids[2] if request_count == 3 else None
+            )
             if (
-                entity_ids["provider_chat_request_ids"] != chat_request_ids[:2]
-                or entity_ids["local_terminal_request_id"] != chat_request_ids[2]
+                entity_ids["provider_chat_request_ids"] != provider_request_ids
+                or entity_ids["local_terminal_request_id"]
+                != local_terminal_request_id
             ):
                 raise HarnessSafetyError("database provenance chat provider boundary mismatch")
             for index, request_id in enumerate(chat_request_ids):
@@ -3922,10 +4185,18 @@ def validate_database_provenance(
                     or response.get("reply") != diary_message[2]
                     or response.get("round") != index + 1
                     or response.get("replayed") is not False
-                    or response.get("ended") is not (index == 2)
+                    or response.get("ended") is not (index == request_count - 1)
                     or response.get("end_reason")
-                    != ("max_rounds" if index == 2 else None)
-                    or (index == 2 and response.get("reply") != FROZEN_MAX_ROUNDS_REPLY)
+                    != (
+                        conversation[4]
+                        if index == request_count - 1
+                        else None
+                    )
+                    or (
+                        conversation[4] == "max_rounds"
+                        and index == request_count - 1
+                        and response.get("reply") != FROZEN_MAX_ROUNDS_REPLY
+                    )
                 ):
                     raise HarnessSafetyError("database provenance chat response mismatch")
             jobs = connection.execute(
@@ -4093,11 +4364,11 @@ def validate_database_provenance(
                 != {"analysis_status", "child_id", "date_from", "date_to", "end_reason", "keyword", "review_status", "sort"}
                 or search_request["analysis_status"] != ["succeeded"]
                 or search_request["review_status"] != ["confirmed"]
-                or search_request["end_reason"] != [conversation[4]]
+                or search_request["end_reason"] != ["max_rounds", "complete"]
+                or conversation[4] not in search_request["end_reason"]
                 or search_request["sort"] not in {"completed_asc", "completed_desc"}
                 or search_request["child_id"] not in {None, child_id}
-                or not isinstance(search_request["keyword"], str)
-                or not search_request["keyword"].strip()
+                or search_request["keyword"] != "我"
                 or not search_request["date_from"] <= conversation[1] <= search_request["date_to"]
             ):
                 raise HarnessSafetyError("database provenance search request mismatch")
@@ -4302,26 +4573,25 @@ def _validate_provider_completion(
         or type(analysis_job_id) is not int
         or analysis_job_id <= 0
         or not isinstance(chat_request_ids, list)
-        or len(chat_request_ids) != 3
-        or len(set(chat_request_ids)) != 3
+        or not 1 <= len(chat_request_ids) <= 3
+        or len(set(chat_request_ids)) != len(chat_request_ids)
         or any(
             not isinstance(request_id, str)
             or UUID4_PATTERN.fullmatch(request_id) is None
             for request_id in chat_request_ids
         )
-        or provider_chat_request_ids != chat_request_ids[:2]
-        or local_terminal_request_id != chat_request_ids[2]
+        or provider_chat_request_ids
+        != (chat_request_ids[:2] if len(chat_request_ids) == 3 else chat_request_ids)
+        or local_terminal_request_id
+        != (chat_request_ids[2] if len(chat_request_ids) == 3 else None)
         or not isinstance(roster_attempts, list)
         or len(roster_attempts) != 2
         or not isinstance(tts_evidence, list)
-        or len(tts_evidence) != 4
+        or len(tts_evidence) != len(chat_request_ids) + 1
     ):
         raise HarnessSafetyError("provider telemetry is incomplete")
     roster_events = [
         event for event in summary["events"] if event.get("kind") == "roster_attempt"
-    ]
-    provider_events = [
-        event for event in summary["events"] if event.get("kind") != "roster_attempt"
     ]
     if (
         summary["events"][:2] != roster_events
@@ -4347,9 +4617,11 @@ def _validate_provider_completion(
             != {
                 "audio_sha256",
                 "cache_relative_path",
+                "effective_text_sha256",
                 "kind",
                 "source_message_id",
                 "text_sha256",
+                "truncated",
             }
             or evidence["kind"]
             != ("opening_greeting" if index == 0 else "diary_reply")
@@ -4363,6 +4635,9 @@ def _validate_provider_completion(
             )
             or not isinstance(evidence["text_sha256"], str)
             or SHA256_PATTERN.fullmatch(evidence["text_sha256"]) is None
+            or not isinstance(evidence["effective_text_sha256"], str)
+            or SHA256_PATTERN.fullmatch(evidence["effective_text_sha256"]) is None
+            or type(evidence["truncated"]) is not bool
             or not isinstance(evidence["audio_sha256"], str)
             or SHA256_PATTERN.fullmatch(evidence["audio_sha256"]) is None
             or not isinstance(evidence["cache_relative_path"], str)
@@ -4374,54 +4649,104 @@ def _validate_provider_completion(
         ):
             raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
         validated_tts.append(evidence)
-    if (
-        len({item["text_sha256"] for item in validated_tts}) != 4
-        or len({item["cache_relative_path"] for item in validated_tts}) != 4
-    ):
-        raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
 
-    expected = [
-        ("tts", f"message-text:{validated_tts[0]['text_sha256']}", validated_tts[0]),
-        ("chat_reply", f"chat-request:{chat_request_ids[0]}", None),
-        ("tts", f"message-text:{validated_tts[1]['text_sha256']}", validated_tts[1]),
-        ("chat_reply", f"chat-request:{chat_request_ids[1]}", None),
-        ("tts", f"message-text:{validated_tts[2]['text_sha256']}", validated_tts[2]),
-        ("tts", f"message-text:{validated_tts[3]['text_sha256']}", validated_tts[3]),
-        ("extract_info", f"analysis-job:{analysis_job_id}", None),
-        ("assess_conversation", f"analysis-job:{analysis_job_id}", None),
-    ]
-    if len(provider_events) != len(expected):
-        raise HarnessSafetyError("provider telemetry is incomplete")
-    for event, (operation, correlation, evidence) in zip(
-        provider_events, expected, strict=True
-    ):
+    cache_sizes: list[int] = []
+    for evidence in validated_tts:
+        cache_path = plan.root / str(evidence["cache_relative_path"])
+        if cache_path.parent != plan.tts_cache:
+            raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
+        cache = _file_evidence(cache_path)
         if (
-            event["operation"] != operation
-            or event["status"] != "ok"
-            or event["correlation_id"] != correlation
+            cache.get("kind") != "regular"
+            or cache.get("sha256") != evidence["audio_sha256"]
+            or type(cache.get("size")) is not int
+            or cache["size"] <= 0
         ):
-            raise HarnessSafetyError("provider telemetry is incomplete or unrelated")
-        if operation == "tts":
-            assert evidence is not None
+            raise HarnessSafetyError("provider telemetry TTS cache mismatch")
+        cache_sizes.append(cache["size"])
+
+    expected: list[tuple[str, object, object]] = []
+    seen_cache_paths: set[str] = set()
+
+    def append_tts(index: int) -> None:
+        evidence = validated_tts[index]
+        cache_path = str(evidence["cache_relative_path"])
+        cache_hit = cache_path in seen_cache_paths
+        if not cache_hit:
+            expected.append(("tts_provider", evidence, cache_sizes[index]))
+        expected.append(
+            (
+                "tts_request",
+                evidence,
+                {"cache_hit": cache_hit, "order": index + 1, "size": cache_sizes[index]},
+            )
+        )
+        seen_cache_paths.add(cache_path)
+
+    append_tts(0)
+    for index, request_id in enumerate(chat_request_ids):
+        if request_id in provider_chat_request_ids:
+            expected.append(("deepseek", "chat_reply", f"chat-request:{request_id}"))
+        append_tts(index + 1)
+    expected.extend(
+        (
+            ("deepseek", "extract_info", f"analysis-job:{analysis_job_id}"),
+            ("deepseek", "assess_conversation", f"analysis-job:{analysis_job_id}"),
+        )
+    )
+    activity_events = summary["events"][2:]
+    if len(activity_events) != len(expected):
+        raise HarnessSafetyError("provider telemetry is incomplete")
+    for event, expected_event in zip(activity_events, expected, strict=True):
+        event_kind, first, second = expected_event
+        if event_kind == "tts_request":
+            evidence = first
+            endpoint = second
+            assert isinstance(evidence, Mapping)
+            assert isinstance(endpoint, Mapping)
+            expected_endpoint = {
+                "audio_bytes": endpoint["size"],
+                "cache_hit": endpoint["cache_hit"],
+                "cache_relative_path": evidence["cache_relative_path"],
+                "cache_sha256": evidence["audio_sha256"],
+                "effective_text_sha256": evidence["effective_text_sha256"],
+                "kind": "tts_request",
+                "method": "GET",
+                "order": endpoint["order"],
+                "path": "/api/tts",
+                "requested_text_sha256": evidence["text_sha256"],
+                "status": 200,
+                "truncated": evidence["truncated"],
+                "voice": "zh-CN-XiaoxiaoNeural",
+            }
+            if event != expected_endpoint:
+                raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
+        elif event_kind == "tts_provider":
+            evidence = first
+            assert isinstance(evidence, Mapping)
             if (
-                event["voice"] != "zh-CN-XiaoxiaoNeural"
-                or event["cache_relative_path"] != evidence["cache_relative_path"]
-                or event["cache_sha256"] != evidence["audio_sha256"]
+                event.get("operation") != "tts"
+                or event.get("status") != "ok"
+                or event.get("correlation_id")
+                != f"message-text:{evidence['effective_text_sha256']}"
+                or event.get("voice") != "zh-CN-XiaoxiaoNeural"
+                or event.get("cache_relative_path")
+                != evidence["cache_relative_path"]
+                or event.get("cache_sha256") != evidence["audio_sha256"]
+                or event.get("audio_bytes") != second
             ):
                 raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
-        elif event["model"] != selected["DEEPSEEK_MODEL"] or event["parse_valid"] is not True:
-            raise HarnessSafetyError("provider telemetry model or parse boundary mismatch")
-        if evidence is not None:
-            cache_path = plan.root / str(evidence["cache_relative_path"])
-            if cache_path.parent != plan.tts_cache:
-                raise HarnessSafetyError("provider telemetry TTS evidence mismatch")
-            cache = _file_evidence(cache_path)
+        else:
             if (
-                cache.get("kind") != "regular"
-                or cache.get("size") != event["audio_bytes"]
-                or cache.get("sha256") != event["cache_sha256"]
+                event.get("operation") != first
+                or event.get("status") != "ok"
+                or event.get("correlation_id") != second
+                or event.get("model") != selected["DEEPSEEK_MODEL"]
+                or event.get("parse_valid") is not True
             ):
-                raise HarnessSafetyError("provider telemetry TTS cache mismatch")
+                raise HarnessSafetyError(
+                    "provider telemetry model or parse boundary mismatch"
+                )
     return summary
 
 
@@ -4498,21 +4823,16 @@ def _checksum_inventory(payload: bytes) -> dict[str, str]:
     return inventory
 
 
-def _verify_complete_terminal_state(
+def _verify_complete_precommit_state(
     plan: RunPlan,
     *,
     manifest_payload: bytes,
     checksums_payload: bytes,
     provider_summary: Mapping[str, object],
 ) -> None:
-    """Re-read the terminal files and bind embedded hashes to exact inventory bytes."""
+    """Bind all prepared bytes before COMPLETE becomes the last atomic commit."""
 
     try:
-        retained_manifest = _read_pinned_run_file(
-            plan,
-            plan.manifest,
-            max_bytes=10_000_000,
-        )
         retained_checksums = _read_pinned_run_file(
             plan,
             plan.checksums,
@@ -4527,8 +4847,7 @@ def _verify_complete_terminal_state(
         raise HarnessSafetyError("terminal inventory is unavailable") from exc
     expected_provider = canonical_json_line(dict(provider_summary)).encode("utf-8")
     if (
-        retained_manifest != manifest_payload
-        or retained_checksums != checksums_payload
+        retained_checksums != checksums_payload
         or retained_provider != expected_provider
         or _checksum_lines(plan, manifest_payload) != checksums_payload
     ):
@@ -4593,6 +4912,12 @@ def _complete_manifest(
         "release": dict(FROZEN_RELEASE),
         "run_id": plan.run_id,
         "screenshots": controller["screenshots"],
+        "secret_scan": {
+            "actual_values": "PASS",
+            "forbidden_patterns": "PASS",
+            "reviewed_source_forbidden_patterns": "GIT_PINNED_EXEMPT",
+            "status": "PASS",
+        },
         "seed": {
             "media_sha256": seed_result["media_sha256"],
             "record_sha256": seed_result["record_sha256"],
@@ -4632,7 +4957,6 @@ def execute_retained_uat(
     plan = None
     session = None
     session_finished = False
-    unverified_complete_possible = False
     try:
         before_first = capture_resources(repository)
         before_second = capture_resources(repository)
@@ -4791,26 +5115,7 @@ def execute_retained_uat(
             actual_secrets=registered_secrets,
             pinned_plan=plan,
         )
-        unverified_complete_possible = True
-        atomic_write_json(plan.manifest, manifest, pinned_plan=plan)
-        retained_manifest = _read_pinned_run_file(
-            plan,
-            plan.manifest,
-            max_bytes=10_000_000,
-        )
-        if retained_manifest != manifest_payload:
-            raise HarnessSafetyError("complete manifest terminal bytes are inconsistent")
-        _assert_secret_free_payload(
-            retained_manifest,
-            actual_secrets=registered_secrets,
-            role="manifest.json",
-        )
-        scan_retained_artifacts(
-            plan.root,
-            actual_secrets=registered_secrets,
-            pinned_plan=plan,
-        )
-        _verify_complete_terminal_state(
+        _verify_complete_precommit_state(
             plan,
             manifest_payload=manifest_payload,
             checksums_payload=checksums_payload,
@@ -4818,7 +5123,12 @@ def execute_retained_uat(
         )
         if plan.source_root_identity is not None:
             assert_reviewed_source_pinned(plan)
-        unverified_complete_possible = False
+        atomic_write_json(
+            plan.manifest,
+            manifest,
+            pinned_plan=plan,
+            terminal_commit=True,
+        )
         return plan
     except KeyboardInterrupt as exc:
         error: BaseException = HarnessSafetyError("controller interrupted the retained run")
@@ -4851,7 +5161,6 @@ def execute_retained_uat(
         finalize_failed_run(
             plan,
             reason_code=reason,
-            replace_unverified_complete=unverified_complete_possible,
         )
     if isinstance(error, HarnessSafetyError):
         raise error

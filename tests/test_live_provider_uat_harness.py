@@ -18,6 +18,7 @@ import subprocess
 import struct
 import sys
 import types
+from urllib.parse import quote
 import zlib
 
 import pytest
@@ -128,6 +129,8 @@ def test_reviewed_checkout_rejects_dirty_runtime_before_launch_and_preserves_exp
     module = _module()
     unrelated = {
         "relative_path": "notes/release-observation.md",
+        "porcelain_destination": None,
+        "porcelain_record": 0,
         "porcelain_role": "path",
         "porcelain_status": "??",
         "file": {"kind": "regular", "sha256": "1" * 64},
@@ -149,6 +152,8 @@ def test_reviewed_checkout_rejects_dirty_runtime_before_launch_and_preserves_exp
         "dirty_paths": [
             {
                 "relative_path": "app/backend/main.py",
+                "porcelain_destination": None,
+                "porcelain_record": 0,
                 "porcelain_role": "path",
                 "porcelain_status": " M",
                 "file": {"kind": "regular", "sha256": "2" * 64},
@@ -212,8 +217,20 @@ def test_reviewed_checkout_preserves_both_rename_paths_and_rejects_runtime_endpo
 
     assert paths == ("app/backend/main.py", "notes/release-observation.md")
     assert records == (
-        ("app/backend/main.py", "R ", "original"),
-        ("notes/release-observation.md", "R ", "current"),
+        (
+            "app/backend/main.py",
+            "R ",
+            "original",
+            0,
+            "notes/release-observation.md",
+        ),
+        (
+            "notes/release-observation.md",
+            "R ",
+            "current",
+            0,
+            "notes/release-observation.md",
+        ),
     )
     with pytest.raises(module.HarnessSafetyError, match="runtime or UAT dirt"):
         module.validate_reviewed_checkout(
@@ -224,10 +241,12 @@ def test_reviewed_checkout_preserves_both_rename_paths_and_rejects_runtime_endpo
                         "relative_path": path,
                         "porcelain_role": role,
                         "porcelain_status": status,
+                        "porcelain_record": record,
+                        "porcelain_destination": destination,
                         "file": {"kind": "missing"},
                         "directory": None,
                     }
-                    for path, status, role in records
+                    for path, status, role, record, destination in records
                 ],
             },
             expected_head=HEAD,
@@ -241,9 +260,23 @@ def test_dirty_porcelain_records_preserve_copy_and_deleted_missing_roles():
     assert module._dirty_path_records(
         b"C  notes/copied.md\0notes/source.md\0 D notes/deleted.md\0"
     ) == (
-        ("notes/copied.md", "C ", "current"),
-        ("notes/deleted.md", " D", "path"),
-        ("notes/source.md", "C ", "original"),
+        ("notes/copied.md", "C ", "current", 0, "notes/copied.md"),
+        ("notes/deleted.md", " D", "path", 1, None),
+        ("notes/source.md", "C ", "original", 0, "notes/copied.md"),
+    )
+
+
+def test_dirty_porcelain_preserves_one_source_copied_to_two_destinations():
+    module = _module()
+
+    assert module._dirty_path_records(
+        b"C  notes/copy-a.md\0notes/source.md\0"
+        b"C  notes/copy-b.md\0notes/source.md\0"
+    ) == (
+        ("notes/copy-a.md", "C ", "current", 0, "notes/copy-a.md"),
+        ("notes/copy-b.md", "C ", "current", 1, "notes/copy-b.md"),
+        ("notes/source.md", "C ", "original", 0, "notes/copy-a.md"),
+        ("notes/source.md", "C ", "original", 1, "notes/copy-b.md"),
     )
 
 
@@ -294,6 +327,7 @@ def test_real_git_capture_types_rename_copy_and_deletion_endpoints(tmp_path):
     assert evidence[("rename-source.txt", "original")]["file"] == {"kind": "missing"}
     assert evidence[("copied.txt", "current")]["porcelain_status"] == "C "
     assert evidence[("copy-source.txt", "original")]["file"]["kind"] == "regular"
+    assert evidence[("copy-source.txt", "original")]["porcelain_destination"] == "copied.txt"
     assert evidence[("deleted.txt", "path")]["porcelain_status"] == "D "
     assert evidence[("deleted.txt", "path")]["file"] == {"kind": "missing"}
 
@@ -335,7 +369,7 @@ def test_run_plan_creation_is_exclusive_unique_and_retained(tmp_path):
 
 
 def test_reviewed_source_is_materialized_from_literal_git_commit_and_never_worktree(
-    tmp_path,
+    tmp_path, monkeypatch,
 ):
     module = _module()
     root = tmp_path / "repository"
@@ -364,7 +398,9 @@ def test_reviewed_source_is_materialized_from_literal_git_commit_and_never_workt
     fixtures.mkdir(parents=True)
     (fixtures / "child.png").write_bytes(b"reviewed-child")
     (fixtures / "duck.jpg").write_bytes(b"reviewed-duck")
-    (root / "version.json").write_text('{"version":"reviewed"}\n', encoding="utf-8")
+    (root / "app" / "version.json").write_text(
+        '{"version":"reviewed"}\n', encoding="utf-8"
+    )
     subprocess.run(("git", "add", "."), cwd=root, check=True)
     subprocess.run(("git", "commit", "-qm", "reviewed"), cwd=root, check=True)
     source_head = subprocess.run(
@@ -375,21 +411,29 @@ def test_reviewed_source_is_materialized_from_literal_git_commit_and_never_workt
         text=True,
     ).stdout.strip()
     plan = module.create_run_plan(root, source_head)
-
-    # A transient working-tree substitute must never become executable input.
-    seed.write_text("MALICIOUS = 'temporary import'\n", encoding="utf-8")
-    reviewed = module.materialize_reviewed_source(plan)
-    seed.write_text("REVIEWED = 'seed-v1'\n", encoding="utf-8")
-
-    assert reviewed.source_root == reviewed.root / "reviewed-source"
-    assert reviewed.source_head == source_head
-    assert reviewed.source_tree_oid == subprocess.run(
+    expected_tree = subprocess.run(
         ("git", "rev-parse", f"{source_head}^{{tree}}"),
         cwd=root,
         check=True,
         capture_output=True,
         text=True,
     ).stdout.strip()
+
+    # A transient working-tree substitute must never become executable input.
+    seed.write_text("MALICIOUS = 'temporary import'\n", encoding="utf-8")
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "attacker-controlled-git-dir"))
+    git_calls = []
+
+    def git_runner(argv, **kwargs):
+        git_calls.append((tuple(argv), dict(kwargs)))
+        return subprocess.run(argv, **kwargs)
+
+    reviewed = module.materialize_reviewed_source(plan, runner=git_runner)
+    seed.write_text("REVIEWED = 'seed-v1'\n", encoding="utf-8")
+
+    assert reviewed.source_root == reviewed.root / "reviewed-source"
+    assert reviewed.source_head == source_head
+    assert reviewed.source_tree_oid == expected_tree
     assert (reviewed.source_root / "scripts/seed_demo_database.py").read_text(
         encoding="utf-8"
     ) == "REVIEWED = 'seed-v1'\n"
@@ -412,6 +456,24 @@ def test_reviewed_source_is_materialized_from_literal_git_commit_and_never_workt
     source_manifest = json.loads(reviewed.source_manifest.read_text(encoding="utf-8"))
     assert source_manifest["source_head"] == source_head
     assert source_manifest["tree_oid"] == reviewed.source_tree_oid
+    assert git_calls
+    assert all(call[0][:2] == ("git", "--no-replace-objects") for call in git_calls)
+    assert all("GIT_DIR" not in call[1]["env"] for call in git_calls)
+    assert all(call[1]["env"]["GIT_NO_REPLACE_OBJECTS"] == "1" for call in git_calls)
+    assert (
+        "git",
+        "--no-replace-objects",
+        "cat-file",
+        "commit",
+        source_head,
+    ) in [call[0] for call in git_calls]
+    assert (
+        "git",
+        "--no-replace-objects",
+        "cat-file",
+        "tree",
+        reviewed.source_tree_oid,
+    ) in [call[0] for call in git_calls]
     assert any(
         item["path"] == "scripts/seed_demo_database.py"
         and item["blob_oid"]
@@ -426,6 +488,37 @@ def test_reviewed_source_is_materialized_from_literal_git_commit_and_never_workt
     source_seed.write_text("MALICIOUS = 'inside source'\n", encoding="utf-8")
     with pytest.raises(module.HarnessSafetyError, match="reviewed source"):
         module.assert_reviewed_source_pinned(reviewed)
+
+
+def test_candidate_real_git_tree_materializes_app_version(tmp_path):
+    module = _module()
+    repository = tmp_path / "candidate"
+    subprocess.run(
+        (
+            "git",
+            "clone",
+            "--quiet",
+            "--no-checkout",
+            "--shared",
+            str(module.PROJECT_ROOT),
+            str(repository),
+        ),
+        check=True,
+    )
+    source_head = subprocess.run(
+        ("git", "rev-parse", "HEAD"),
+        cwd=repository,
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    reviewed = module.materialize_reviewed_source(
+        module.create_run_plan(repository, source_head)
+    )
+
+    assert (reviewed.source_root / "app" / "version.json").is_file()
+    assert not (reviewed.source_root / "version.json").exists()
 
 
 def test_run_plan_rejects_symlinked_artifact_ancestry(tmp_path):
@@ -1219,9 +1312,13 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
             {
                 "audio_sha256": hashlib.sha256(audio).hexdigest(),
                 "cache_relative_path": f"tts-cache/{cache_name}",
+                "effective_text_sha256": hashlib.sha256(
+                    text.strip()[:500].encode("utf-8")
+                ).hexdigest(),
                 "kind": "opening_greeting" if index == 0 else "diary_reply",
                 "source_message_id": None if index == 0 else 400 + index * 2,
                 "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "truncated": len(text.strip()) > 500,
             }
         )
     entity_ids = {
@@ -1281,7 +1378,7 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
             "audio_bytes": cache.stat().st_size,
             "cache_relative_path": evidence["cache_relative_path"],
             "cache_sha256": evidence["audio_sha256"],
-            "correlation_id": "message-text:" + evidence["text_sha256"],
+            "correlation_id": "message-text:" + evidence["effective_text_sha256"],
             "error_class": None,
             "latency_bucket": "1-5s",
             "model": None,
@@ -1294,14 +1391,36 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
             "voice": "zh-CN-XiaoxiaoNeural",
         }
 
+    def tts_request_event(evidence, order, *, cache_hit=False):
+        cache = plan.root / evidence["cache_relative_path"]
+        return {
+            "audio_bytes": cache.stat().st_size,
+            "cache_hit": cache_hit,
+            "cache_relative_path": evidence["cache_relative_path"],
+            "cache_sha256": evidence["audio_sha256"],
+            "effective_text_sha256": evidence["effective_text_sha256"],
+            "kind": "tts_request",
+            "method": "GET",
+            "order": order,
+            "path": "/api/tts",
+            "requested_text_sha256": evidence["text_sha256"],
+            "status": 200,
+            "truncated": evidence["truncated"],
+            "voice": "zh-CN-XiaoxiaoNeural",
+        }
+
     events = (
         *entity_ids["monthly_roster_attempts"],
         tts_event(tts_evidence[0]),
+        tts_request_event(tts_evidence[0], 1),
         ai_event("chat_reply", f"chat-request:{request_ids[0]}"),
         tts_event(tts_evidence[1]),
+        tts_request_event(tts_evidence[1], 2),
         ai_event("chat_reply", f"chat-request:{request_ids[1]}"),
         tts_event(tts_evidence[2]),
+        tts_request_event(tts_evidence[2], 3),
         tts_event(tts_evidence[3]),
+        tts_request_event(tts_evidence[3], 4),
         ai_event("extract_info", "analysis-job:501"),
         ai_event("assess_conversation", "analysis-job:501"),
     )
@@ -1312,15 +1431,15 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
         provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
         entity_ids=entity_ids,
     )
-    assert len(summary["events"]) == 10
+    assert len(summary["events"]) == 14
 
     mutations = (
-        (*events[:8], {**events[8], "model": "wrong-model"}, events[9]),
-        (*events[:7], {**events[7], "voice": "zh-CN-YunxiNeural"}, *events[8:]),
-        (*events[:3], {**events[3], "correlation_id": f"chat-request:{request_ids[2]}"}, *events[4:]),
-        (*events[:7], {**events[7], "cache_sha256": "0" * 64}, *events[8:]),
-        (*events[:7], *events[8:]),
-        (*events[:6], ai_event("chat_reply", f"chat-request:{request_ids[2]}"), *events[6:]),
+        (*events[:12], {**events[12], "model": "wrong-model"}, events[13]),
+        (*events[:10], {**events[10], "voice": "zh-CN-YunxiNeural"}, *events[11:]),
+        (*events[:4], {**events[4], "correlation_id": f"chat-request:{request_ids[2]}"}, *events[5:]),
+        (*events[:11], {**events[11], "cache_sha256": "0" * 64}, *events[12:]),
+        (*events[:11], *events[12:]),
+        (*events[:10], ai_event("chat_reply", f"chat-request:{request_ids[2]}"), *events[10:]),
         ({**events[0], "canonical_body_sha256": "b" * 64}, *events[1:]),
     )
     for mutation in mutations:
@@ -1339,6 +1458,173 @@ def test_provider_completion_requires_exact_model_voice_correlation_and_run_owne
             provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
             entity_ids=entity_ids,
         )
+
+
+def test_provider_completion_accepts_early_complete_and_requires_cache_hit_endpoint(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.tts_cache.mkdir(mode=0o700)
+    request_ids = [
+        "55555555-5555-4555-8555-555555555551",
+        "55555555-5555-4555-8555-555555555552",
+    ]
+    texts = [
+        "你好呀，小星！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～",
+        "鸭" * 500 + "甲",
+        "鸭" * 500 + "乙",
+    ]
+    effective_texts = [texts[0], "鸭" * 500, "鸭" * 500]
+    audio_by_effective = {
+        effective_texts[0]: b"ID3 greeting audio",
+        effective_texts[1]: b"ID3 shared reply audio",
+    }
+    evidence = []
+    for index, (text, effective) in enumerate(
+        zip(texts, effective_texts, strict=True)
+    ):
+        audio = audio_by_effective[effective]
+        cache_name = hashlib.md5(
+            effective.encode("utf-8"), usedforsecurity=False
+        ).hexdigest() + ".mp3"
+        (plan.tts_cache / cache_name).write_bytes(audio)
+        evidence.append(
+            {
+                "audio_sha256": hashlib.sha256(audio).hexdigest(),
+                "cache_relative_path": f"tts-cache/{cache_name}",
+                "effective_text_sha256": hashlib.sha256(
+                    effective.encode("utf-8")
+                ).hexdigest(),
+                "kind": "opening_greeting" if index == 0 else "diary_reply",
+                "source_message_id": None if index == 0 else 400 + index * 2,
+                "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+                "truncated": index > 0,
+            }
+        )
+    roster = [
+        {
+            "canonical_body_sha256": "a" * 64,
+            "error_code": "ROSTER_DATE_CONFLICT",
+            "kind": "roster_attempt",
+            "method": "POST",
+            "order": 1,
+            "path": "/api/roster/month",
+            "replace_existing": False,
+            "request_id": "33333333-3333-4333-8333-333333333333",
+            "status": 409,
+        },
+        {
+            "canonical_body_sha256": "a" * 64,
+            "error_code": None,
+            "kind": "roster_attempt",
+            "method": "POST",
+            "order": 2,
+            "path": "/api/roster/month",
+            "replace_existing": True,
+            "request_id": "44444444-4444-4444-8444-444444444444",
+            "status": 200,
+        },
+    ]
+    entity_ids = {
+        "analysis_job_id": 501,
+        "chat_request_ids": request_ids,
+        "live_conversation_id": 301,
+        "local_terminal_request_id": None,
+        "monthly_roster_attempts": roster,
+        "provider_chat_request_ids": request_ids,
+        "tts_evidence": evidence,
+    }
+
+    def ai_event(operation, correlation):
+        return {
+            "audio_bytes": 0,
+            "cache_relative_path": None,
+            "cache_sha256": None,
+            "correlation_id": correlation,
+            "error_class": None,
+            "latency_bucket": "1-5s",
+            "model": "deepseek-safe-model",
+            "operation": operation,
+            "parse_valid": True,
+            "provider": "deepseek",
+            "response_bytes": 127,
+            "response_sha256": "e" * 64,
+            "status": "ok",
+            "voice": None,
+        }
+
+    def raw_tts(item):
+        cache = plan.root / item["cache_relative_path"]
+        return {
+            "audio_bytes": cache.stat().st_size,
+            "cache_relative_path": item["cache_relative_path"],
+            "cache_sha256": item["audio_sha256"],
+            "correlation_id": "message-text:" + item["effective_text_sha256"],
+            "error_class": None,
+            "latency_bucket": "1-5s",
+            "model": None,
+            "operation": "tts",
+            "parse_valid": None,
+            "provider": "edge-tts",
+            "response_bytes": 0,
+            "response_sha256": None,
+            "status": "ok",
+            "voice": "zh-CN-XiaoxiaoNeural",
+        }
+
+    def endpoint_tts(item, order, cache_hit):
+        cache = plan.root / item["cache_relative_path"]
+        return {
+            "audio_bytes": cache.stat().st_size,
+            "cache_hit": cache_hit,
+            "cache_relative_path": item["cache_relative_path"],
+            "cache_sha256": item["audio_sha256"],
+            "effective_text_sha256": item["effective_text_sha256"],
+            "kind": "tts_request",
+            "method": "GET",
+            "order": order,
+            "path": "/api/tts",
+            "requested_text_sha256": item["text_sha256"],
+            "status": 200,
+            "truncated": item["truncated"],
+            "voice": "zh-CN-XiaoxiaoNeural",
+        }
+
+    events = (
+        *roster,
+        raw_tts(evidence[0]),
+        endpoint_tts(evidence[0], 1, False),
+        ai_event("chat_reply", f"chat-request:{request_ids[0]}"),
+        raw_tts(evidence[1]),
+        endpoint_tts(evidence[1], 2, False),
+        ai_event("chat_reply", f"chat-request:{request_ids[1]}"),
+        endpoint_tts(evidence[2], 3, True),
+        ai_event("extract_info", "analysis-job:501"),
+        ai_event("assess_conversation", "analysis-job:501"),
+    )
+
+    summary = module._validate_provider_completion(
+        events,
+        plan=plan,
+        provider={**_provider_values(), "DEEPSEEK_MODEL": "deepseek-safe-model"},
+        entity_ids=entity_ids,
+    )
+    assert len(summary["events"]) == 11
+    for invalid in (
+        (*events[:8], {**events[8], "cache_hit": False}, *events[9:]),
+        (*events[:8], raw_tts(evidence[2]), *events[8:]),
+    ):
+        with pytest.raises(module.HarnessSafetyError, match="provider telemetry"):
+            module._validate_provider_completion(
+                invalid,
+                plan=plan,
+                provider={
+                    **_provider_values(),
+                    "DEEPSEEK_MODEL": "deepseek-safe-model",
+                },
+                entity_ids=entity_ids,
+            )
 
 
 def test_edge_tts_telemetry_hashes_exact_audio_and_run_cache_name():
@@ -1494,6 +1780,105 @@ def test_live_server_emits_safe_ordered_monthly_roster_attempt_telemetry():
         ) == event
 
 
+def test_live_server_emits_tts_endpoint_miss_hit_and_truncation_telemetry(tmp_path):
+    server = importlib.import_module("scripts.live_provider_uat_server")
+    harness = _module()
+    cache = tmp_path / "tts-cache"
+    cache.mkdir(mode=0o700)
+    events = []
+    requested = []
+
+    async def app(scope, _receive, send):
+        text = scope["query_string"].decode("ascii").removeprefix("text=")
+        text = __import__("urllib.parse").parse.unquote(text).strip()[:500]
+        requested.append(text)
+        cache_file = cache / (
+            hashlib.md5(text.encode("utf-8"), usedforsecurity=False).hexdigest()
+            + ".mp3"
+        )
+        if not cache_file.exists():
+            cache_file.write_bytes(b"ID3 exact endpoint audio")
+        audio = cache_file.read_bytes()
+        await send({"type": "http.response.start", "status": 200, "headers": []})
+        await send(
+            {
+                "type": "http.response.body",
+                "body": audio,
+                "more_body": False,
+            }
+        )
+
+    wrapped = server.TTSRequestTelemetry(app, emit=events.append, tts_cache=cache)
+    texts = ("鸭" * 500 + "甲", "鸭" * 500 + "乙")
+
+    async def invoke(text):
+        responses = []
+
+        async def receive():
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def send(message):
+            responses.append(message)
+
+        await wrapped(
+            {
+                "type": "http",
+                "method": "GET",
+                "path": "/api/tts",
+                "query_string": f"text={quote(text)}".encode("ascii"),
+            },
+            receive,
+            send,
+        )
+        return responses
+
+    asyncio.run(invoke(texts[0]))
+    asyncio.run(invoke(texts[1]))
+
+    effective = "鸭" * 500
+    cache_relative = "tts-cache/" + hashlib.md5(
+        effective.encode("utf-8"), usedforsecurity=False
+    ).hexdigest() + ".mp3"
+    audio_sha = hashlib.sha256(b"ID3 exact endpoint audio").hexdigest()
+    assert requested == [effective, effective]
+    assert events == [
+        {
+            "audio_bytes": len(b"ID3 exact endpoint audio"),
+            "cache_hit": False,
+            "cache_relative_path": cache_relative,
+            "cache_sha256": audio_sha,
+            "effective_text_sha256": hashlib.sha256(effective.encode("utf-8")).hexdigest(),
+            "kind": "tts_request",
+            "method": "GET",
+            "order": 1,
+            "path": "/api/tts",
+            "requested_text_sha256": hashlib.sha256(texts[0].encode("utf-8")).hexdigest(),
+            "status": 200,
+            "truncated": True,
+            "voice": "zh-CN-XiaoxiaoNeural",
+        },
+        {
+            "audio_bytes": len(b"ID3 exact endpoint audio"),
+            "cache_hit": True,
+            "cache_relative_path": cache_relative,
+            "cache_sha256": audio_sha,
+            "effective_text_sha256": hashlib.sha256(effective.encode("utf-8")).hexdigest(),
+            "kind": "tts_request",
+            "method": "GET",
+            "order": 2,
+            "path": "/api/tts",
+            "requested_text_sha256": hashlib.sha256(texts[1].encode("utf-8")).hexdigest(),
+            "status": 200,
+            "truncated": True,
+            "voice": "zh-CN-XiaoxiaoNeural",
+        },
+    ]
+    for event in events:
+        assert harness.parse_telemetry_line(
+            harness.canonical_json_line(event).encode("utf-8")
+        ) == event
+
+
 class _FakeBoundSocket:
     def __init__(self):
         self.events = []
@@ -1524,6 +1909,8 @@ class _FakeProcess:
         self.returncode = None
         self.waits = list(waits)
         self.wait_timeouts = []
+        self.terminate_calls = 0
+        self.kill_calls = 0
 
     def poll(self):
         return self.returncode
@@ -1538,6 +1925,14 @@ class _FakeProcess:
         elif self.returncode is None:
             self.returncode = 0
         return self.returncode
+
+    def terminate(self):
+        self.terminate_calls += 1
+        self.returncode = -signal.SIGTERM
+
+    def kill(self):
+        self.kill_calls += 1
+        self.returncode = -signal.SIGKILL
 
 
 def test_server_launch_uses_parent_prebound_random_socket_and_direct_group(tmp_path):
@@ -1594,6 +1989,122 @@ def test_server_launch_uses_parent_prebound_random_socket_and_direct_group(tmp_p
         )
     ]
     assert calls[0][1]["stdout"] is calls[0][1]["stderr"]
+
+
+def test_post_popen_validation_failure_reaps_seed_and_server_leaders(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    seed_process = _FakeProcess(pid=43210)
+    server_process = _FakeProcess(pid=43211)
+    bound_socket = _FakeBoundSocket()
+
+    with pytest.raises(module.HarnessSafetyError, match="ownership"):
+        module.run_seed_process(
+            plan,
+            argv=(PYTHON, "seed.py"),
+            environment={
+                "DISABLE_EXTERNAL_AI": "1",
+                "PYTHONNOUSERSITE": "1",
+                "PYTHON_DOTENV_DISABLED": "1",
+                "TZ": "Asia/Shanghai",
+            },
+            popen=lambda *_args, **_kwargs: seed_process,
+            getpgid=lambda _pid: 99999,
+            getsid=lambda pid: pid,
+            source_validator=lambda _plan: None,
+        )
+    assert seed_process.terminate_calls == 1
+    assert seed_process.returncode == -signal.SIGTERM
+
+    validations = 0
+    stopped_groups = []
+
+    def source_validator(_plan):
+        nonlocal validations
+        validations += 1
+        if validations == 2:
+            raise module.HarnessSafetyError("reviewed source changed")
+
+    with pytest.raises(module.HarnessSafetyError, match="reviewed source"):
+        module.launch_server_process(
+            plan,
+            environment={"APP_DB_MODE": "app"},
+            bound_socket=bound_socket,
+            telemetry_fd=72,
+            output=object(),
+            python_executable=PYTHON,
+            popen=lambda *_args, **_kwargs: server_process,
+            getpgid=lambda pid: pid,
+            getsid=lambda pid: pid,
+            source_validator=source_validator,
+            validation_stopper=lambda owned: (
+                stopped_groups.append(owned.pgid),
+                setattr(owned.process, "returncode", -signal.SIGTERM),
+            ),
+        )
+    assert stopped_groups == [server_process.pid]
+    assert server_process.terminate_calls == 0
+    assert server_process.returncode == -signal.SIGTERM
+
+
+def test_start_live_server_cleans_launched_group_when_post_popen_pin_fails(
+    tmp_path,
+    monkeypatch,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.app_log.parent.mkdir(mode=0o700)
+    bound_socket = _FakeBoundSocket()
+    process = _FakeProcess()
+    stopped = []
+    collector_events = []
+    descriptors = {}
+    pin_checks = 0
+    real_pin_check = module.assert_run_plan_identity
+
+    def assert_pin(candidate):
+        nonlocal pin_checks
+        pin_checks += 1
+        if pin_checks == 2:
+            raise module.HarnessSafetyError("retained run root identity changed")
+        real_pin_check(candidate)
+
+    class Collector:
+        def __init__(self, descriptor):
+            descriptors["read"] = descriptor
+
+        def start(self):
+            collector_events.append("start")
+
+        def finish(self):
+            os.close(descriptors["read"])
+            collector_events.append("finish")
+            return ()
+
+    def launch(_plan, **kwargs):
+        descriptors["write"] = kwargs["telemetry_fd"]
+        return module.OwnedProcess(process, process.pid, process.pid, process.pid)
+
+    monkeypatch.setattr(module, "assert_run_plan_identity", assert_pin)
+    with pytest.raises(module.HarnessSafetyError, match="identity changed"):
+        module.start_live_server(
+            plan,
+            environment={"APP_DB_MODE": "app"},
+            python_executable=PYTHON,
+            prebind=lambda: module.BoundLoopbackSocket(bound_socket, 43123),
+            collector_factory=Collector,
+            launcher=launch,
+            startup_stopper=lambda owned: (
+                stopped.append(owned.pgid),
+                setattr(owned.process, "returncode", -signal.SIGTERM),
+            ),
+        )
+
+    assert stopped == [process.pid]
+    assert collector_events == ["start", "finish"]
+    assert bound_socket.closed is True
+    with pytest.raises(OSError):
+        os.fstat(descriptors["write"])
 
 
 def test_live_server_session_closes_parent_fds_and_finishes_once(tmp_path):
@@ -2187,9 +2698,7 @@ def test_failed_finalization_retains_run_and_never_claims_complete(tmp_path):
         module.finalize_failed_run(plan, reason_code="secret provider error text")
 
 
-def test_post_write_terminal_failure_atomically_downgrades_unverified_complete(
-    tmp_path,
-):
+def test_complete_manifest_is_never_replaced_after_terminal_commit(tmp_path):
     module = _module()
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
     unverified = {
@@ -2202,19 +2711,7 @@ def test_post_write_terminal_failure_atomically_downgrades_unverified_complete(
 
     with pytest.raises(module.HarnessSafetyError, match="cannot be replaced"):
         module.finalize_failed_run(plan, reason_code="SAFETY_FAILURE")
-    module.finalize_failed_run(
-        plan,
-        reason_code="SAFETY_FAILURE",
-        replace_unverified_complete=True,
-    )
-
-    assert json.loads(plan.manifest.read_text(encoding="utf-8")) == {
-        "protocol": "pomegranagent-live-uat-manifest/v1",
-        "reason_code": "SAFETY_FAILURE",
-        "run_id": plan.run_id,
-        "source_head": HEAD,
-        "status": "FAILED",
-    }
+    assert json.loads(plan.manifest.read_text(encoding="utf-8")) == unverified
 
 
 def test_complete_manifest_rejects_blocker_issue_even_after_controller_validation(tmp_path):
@@ -2281,9 +2778,7 @@ def test_terminal_inventory_crosslinks_exact_manifest_screenshot_and_provider_by
     manifest_payload = module.canonical_json_line(manifest).encode("utf-8")
     checksums_payload = module._checksum_lines(plan, manifest_payload)
     module._write_owned_bytes(plan.checksums, checksums_payload, pinned_plan=plan)
-    module.atomic_write_json(plan.manifest, manifest, pinned_plan=plan)
-
-    module._verify_complete_terminal_state(
+    module._verify_complete_precommit_state(
         plan,
         manifest_payload=manifest_payload,
         checksums_payload=checksums_payload,
@@ -2293,7 +2788,7 @@ def test_terminal_inventory_crosslinks_exact_manifest_screenshot_and_provider_by
     forged = json.loads(json.dumps(provider_summary))
     forged["events"][0]["cache_sha256"] = "f" * 64
     with pytest.raises(module.HarnessSafetyError, match="terminal inventory"):
-        module._verify_complete_terminal_state(
+        module._verify_complete_precommit_state(
             plan,
             manifest_payload=manifest_payload,
             checksums_payload=checksums_payload,
@@ -2706,7 +3201,7 @@ def _create_seed_provenance_database(plan):
     with sqlite3.connect(plan.database) as connection:
         connection.executescript(
             """
-            CREATE TABLE children (id INTEGER PRIMARY KEY, name TEXT, avatar TEXT);
+            CREATE TABLE children (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT, avatar TEXT);
             CREATE TABLE ducks (id INTEGER PRIMARY KEY, name TEXT, avatar TEXT);
             CREATE TABLE avatar_media (id TEXT PRIMARY KEY, file_name TEXT, mime_type TEXT, width INTEGER, height INTEGER, size_bytes INTEGER, sha256 TEXT);
             CREATE TABLE duty_rosters (id INTEGER PRIMARY KEY, cycle TEXT, date TEXT, child_id INTEGER);
@@ -2733,10 +3228,10 @@ def _create_seed_provenance_database(plan):
             ),
         )
         connection.executemany(
-            "INSERT INTO children VALUES (?, ?, ?)",
+            "INSERT INTO children VALUES (?, ?, ?, ?)",
             (
-                (10, "Seed Child", f"/api/media/avatars/{seed_avatar_id}"),
-                (11, "Seed Partner", None),
+                (10, "Seed Child", None, f"/api/media/avatars/{seed_avatar_id}"),
+                (11, "Seed Partner", None, None),
             ),
         )
         connection.execute("INSERT INTO ducks VALUES (20, 'Seed Duck', NULL)")
@@ -2754,7 +3249,7 @@ def _create_seed_provenance_database(plan):
         )
         connection.executemany(
             "INSERT INTO messages VALUES (?, 30, ?, ?)",
-            ((40, "child", "seed 池塘 child"), (41, "diary", "seed diary")),
+            ((40, "child", "我在 seed 池塘观察"), (41, "diary", "seed diary")),
         )
         connection.execute(
             "INSERT INTO analysis_jobs VALUES (50, 30, 41, 'succeeded', 1)"
@@ -2865,13 +3360,13 @@ def _apply_live_provenance(plan):
         "child_id": None,
         "date_from": "2026-08-31",
         "date_to": "2026-09-06",
-        "end_reason": ["max_rounds"],
-        "keyword": "池塘",
+        "end_reason": ["max_rounds", "complete"],
+        "keyword": "我",
         "review_status": ["confirmed"],
         "sort": "completed_desc",
     }
     tts_texts = [
-        "你好呀，Live Child！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～",
+        "你好呀，小星！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～",
         "你观察到小鸭有什么变化？",
         "你照顾得很认真，还有什么感受？",
         module.FROZEN_MAX_ROUNDS_REPLY,
@@ -2888,9 +3383,13 @@ def _apply_live_provenance(plan):
             {
                 "audio_sha256": hashlib.sha256(tts_audio).hexdigest(),
                 "cache_relative_path": f"tts-cache/{tts_cache_name}",
+                "effective_text_sha256": hashlib.sha256(
+                    tts_text.strip()[:500].encode("utf-8")
+                ).hexdigest(),
                 "kind": "opening_greeting" if index == 0 else "diary_reply",
                 "source_message_id": None if index == 0 else 400 + index * 2,
                 "text_sha256": hashlib.sha256(tts_text.encode("utf-8")).hexdigest(),
+                "truncated": len(tts_text.strip()) > 500,
             }
         )
     with sqlite3.connect(plan.database) as connection:
@@ -2899,9 +3398,14 @@ def _apply_live_provenance(plan):
             avatar_metadata,
         )
         connection.executemany(
-            "INSERT INTO children VALUES (?, ?, ?)",
+            "INSERT INTO children VALUES (?, ?, ?, ?)",
             (
-                (101, "Live Child", "/api/media/avatars/11111111-1111-4111-8111-111111111111"),
+                (
+                    101,
+                    "Live Child",
+                    "小星",
+                    "/api/media/avatars/11111111-1111-4111-8111-111111111111",
+                ),
             ),
         )
         connection.execute(
@@ -3095,11 +3599,114 @@ def test_retained_database_provenance_is_read_only_and_fails_one_broken_chain(tm
         "search_result_id": 301,
         "status": "PROVEN",
     }
+    for bad_request in (
+        {**entity_ids["search_request"], "end_reason": ["max_rounds"]},
+        {**entity_ids["search_request"], "keyword": "池塘"},
+    ):
+        bad_search = {**entity_ids, "search_request": bad_request}
+        with pytest.raises(
+            module.HarnessSafetyError,
+            match="database provenance search request mismatch",
+        ):
+            module.validate_database_provenance(plan, bad_search, baseline)
     with sqlite3.connect(plan.database) as connection:
         connection.execute("UPDATE assessments SET status='draft' WHERE id=601")
         connection.commit()
     with pytest.raises(module.HarnessSafetyError, match="database provenance"):
         module.validate_database_provenance(plan, entity_ids, baseline)
+
+
+def test_database_provenance_accepts_early_completion_and_shared_truncated_tts_cache(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    _create_seed_provenance_database(plan)
+    baseline = module.capture_post_seed_baseline(plan)
+    entity_ids = _apply_live_provenance(plan)
+    first_reply = "鸭" * 500 + "甲"
+    second_reply = "鸭" * 500 + "乙"
+    request_ids = entity_ids["chat_request_ids"][:2]
+    with sqlite3.connect(plan.database) as connection:
+        connection.execute("UPDATE messages SET text = ? WHERE id = 402", (first_reply,))
+        connection.execute("UPDATE messages SET text = ? WHERE id = 404", (second_reply,))
+        connection.execute("DELETE FROM messages WHERE id IN (405, 406)")
+        connection.execute(
+            "DELETE FROM chat_requests WHERE request_id = ?",
+            (entity_ids["chat_request_ids"][2],),
+        )
+        connection.execute(
+            "UPDATE conversations SET end_reason = 'complete', frozen_last_message_id = 404 WHERE id = 301"
+        )
+        connection.execute(
+            "UPDATE analysis_jobs SET frozen_last_message_id = 404 WHERE id = 501"
+        )
+        for index, (request_id, reply) in enumerate(
+            zip(request_ids, (first_reply, second_reply), strict=True)
+        ):
+            response = json.loads(
+                connection.execute(
+                    "SELECT response_json FROM chat_requests WHERE request_id = ?",
+                    (request_id,),
+                ).fetchone()[0]
+            )
+            response.update(
+                {
+                    "end_reason": "complete" if index == 1 else None,
+                    "ended": index == 1,
+                    "reply": reply,
+                }
+            )
+            connection.execute(
+                "UPDATE chat_requests SET response_json = ? WHERE request_id = ?",
+                (
+                    json.dumps(
+                        response,
+                        ensure_ascii=False,
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
+                    request_id,
+                ),
+            )
+        connection.commit()
+
+    for stale in entity_ids["tts_evidence"][1:]:
+        (plan.root / stale["cache_relative_path"]).unlink()
+    effective = "鸭" * 500
+    shared_audio = b"ID3 shared truncated endpoint audio"
+    cache_name = hashlib.md5(
+        effective.encode("utf-8"), usedforsecurity=False
+    ).hexdigest() + ".mp3"
+    (plan.tts_cache / cache_name).write_bytes(shared_audio)
+
+    def evidence(text, message_id):
+        return {
+            "audio_sha256": hashlib.sha256(shared_audio).hexdigest(),
+            "cache_relative_path": f"tts-cache/{cache_name}",
+            "effective_text_sha256": hashlib.sha256(
+                effective.encode("utf-8")
+            ).hexdigest(),
+            "kind": "diary_reply",
+            "source_message_id": message_id,
+            "text_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            "truncated": True,
+        }
+
+    entity_ids["chat_request_ids"] = list(request_ids)
+    entity_ids["provider_chat_request_ids"] = list(request_ids)
+    entity_ids["local_terminal_request_id"] = None
+    entity_ids["tts_evidence"] = [
+        entity_ids["tts_evidence"][0],
+        evidence(first_reply, 402),
+        evidence(second_reply, 404),
+    ]
+    entity_ids["search_request"]["end_reason"] = ["max_rounds", "complete"]
+    entity_ids["search_cursor"] = _search_cursor(
+        entity_ids["search_request"], conversation_id=301, snapshot_max_id=301
+    )
+
+    assert module.validate_database_provenance(plan, entity_ids, baseline)["status"] == "PROVEN"
 
 
 def test_database_provenance_rejects_seed_entities_incomplete_projection_and_unfrozen_search(
@@ -3139,9 +3746,42 @@ def test_database_provenance_rejects_seed_entities_incomplete_projection_and_unf
 
 
 def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_failure(
-    tmp_path,
+    tmp_path, monkeypatch,
 ):
     module = _module()
+    terminal_events = []
+    real_atomic_write_json = module.atomic_write_json
+    real_manifest_scan = module._assert_secret_free_payload
+    real_artifact_scan = module.scan_retained_artifacts
+    real_terminal_verify = module._verify_complete_precommit_state
+
+    def observed_atomic_write(path, value, **kwargs):
+        result = real_atomic_write_json(path, value, **kwargs)
+        if path.name == "manifest.json" and value.get("status") == "COMPLETE":
+            terminal_events.append("COMPLETE")
+        return result
+
+    def observed_manifest_scan(*args, **kwargs):
+        if kwargs.get("role") == "manifest.json":
+            terminal_events.append("manifest-scan")
+        return real_manifest_scan(*args, **kwargs)
+
+    def observed_artifact_scan(*args, **kwargs):
+        terminal_events.append("artifact-scan")
+        return real_artifact_scan(*args, **kwargs)
+
+    def observed_terminal_verify(*args, **kwargs):
+        terminal_events.append("terminal-verify")
+        return real_terminal_verify(*args, **kwargs)
+
+    monkeypatch.setattr(module, "atomic_write_json", observed_atomic_write)
+    monkeypatch.setattr(module, "_assert_secret_free_payload", observed_manifest_scan)
+    monkeypatch.setattr(module, "scan_retained_artifacts", observed_artifact_scan)
+    monkeypatch.setattr(
+        module,
+        "_verify_complete_precommit_state",
+        observed_terminal_verify,
+    )
     repository = _repository(tmp_path)
     provider_secret = "sk-fake-provider-secret-1234567890"
     teacher_secret = "483921"
@@ -3256,7 +3896,8 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
                 "audio_bytes": cache.stat().st_size,
                 "cache_relative_path": evidence["cache_relative_path"],
                 "cache_sha256": evidence["audio_sha256"],
-                "correlation_id": "message-text:" + evidence["text_sha256"],
+                "correlation_id": "message-text:"
+                + evidence["effective_text_sha256"],
                 "error_class": None,
                 "latency_bucket": "1-5s",
                 "model": None,
@@ -3269,16 +3910,38 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
                 "voice": "zh-CN-XiaoxiaoNeural",
             }
 
+        def tts_request_event(evidence, order):
+            cache = plan.root / evidence["cache_relative_path"]
+            return {
+                "audio_bytes": cache.stat().st_size,
+                "cache_hit": False,
+                "cache_relative_path": evidence["cache_relative_path"],
+                "cache_sha256": evidence["audio_sha256"],
+                "effective_text_sha256": evidence["effective_text_sha256"],
+                "kind": "tts_request",
+                "method": "GET",
+                "order": order,
+                "path": "/api/tts",
+                "requested_text_sha256": evidence["text_sha256"],
+                "status": 200,
+                "truncated": evidence["truncated"],
+                "voice": "zh-CN-XiaoxiaoNeural",
+            }
+
         tts = live_entities["tts_evidence"]
         chat_requests = live_entities["chat_request_ids"]
         return (
             *live_entities["monthly_roster_attempts"],
             tts_event(tts[0]),
+            tts_request_event(tts[0], 1),
             ai_event("chat_reply", f"chat-request:{chat_requests[0]}"),
             tts_event(tts[1]),
+            tts_request_event(tts[1], 2),
             ai_event("chat_reply", f"chat-request:{chat_requests[1]}"),
             tts_event(tts[2]),
+            tts_request_event(tts[2], 3),
             tts_event(tts[3]),
+            tts_request_event(tts[3], 4),
             ai_event("extract_info", "analysis-job:501"),
             ai_event("assess_conversation", "analysis-job:501"),
         )
@@ -3329,6 +3992,19 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
     ]
     manifest = json.loads(plan.manifest.read_text(encoding="utf-8"))
     assert manifest["status"] == "COMPLETE"
+    assert manifest["secret_scan"] == {
+        "actual_values": "PASS",
+        "forbidden_patterns": "PASS",
+        "reviewed_source_forbidden_patterns": "GIT_PINNED_EXEMPT",
+        "status": "PASS",
+    }
+    assert terminal_events == [
+        "artifact-scan",
+        "manifest-scan",
+        "artifact-scan",
+        "terminal-verify",
+        "COMPLETE",
+    ]
     assert plan.checksums.is_file()
     checksum_check = subprocess.run(
         ("shasum", "-a", "256", "-c", plan.checksums.name),
