@@ -78,8 +78,10 @@ routine development or CI, and do not run it in parallel with any test suite.
    NDJSON with fields `kind`, `type`, and `value`, where `kind` is
    `teacher_credential` and `type` is `register_secret`. There is deliberately
    no acknowledgement. Confirm the input becomes empty and the credential is
-   absent from page text, URL, local storage, and session storage. Never capture
-   the credential-entry state.
+   absent from visible page text and the URL. Do not inspect browser storage or
+   cookies during the connected-browser pass; deterministic auth tests and the
+   retained-artifact secret scan cover those boundaries without exposing
+   private browser state. Never capture the credential-entry state.
 
 ## Browser journey
 
