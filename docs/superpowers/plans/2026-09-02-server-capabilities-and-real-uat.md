@@ -581,6 +581,9 @@ git commit -m "feat: add deterministic full demo seed"
 - Modify: `tests/test_database_safety.py`
 - Modify: `tests/test_frontend_foundation.py`
 - Modify: `tests/test_review_atomicity.py`
+- Modify: `app/frontend/teacher/views/reports.mjs`
+- Modify: `tests/frontend/teacher/reports.test.mjs`
+- Modify: `tests/browser/test_teacher_reports.py`
 
 **Interfaces:**
 - Produces: a non-default `run_live_provider_uat.py` command that retains one complete evidence directory and owns only its own process group.
@@ -615,7 +618,7 @@ Add the four new teacher capabilities, runtime/media public reads, two teacher v
 - [ ] **Step 6: Commit harness and gate changes**
 
 ```bash
-git add scripts/run_live_provider_uat.py scripts/live_provider_uat_server.py tests/test_live_provider_uat_harness.py docs/live-provider-uat-checklist.md tests/fixtures/live_provider/avatars .gitignore scripts/run_interaction_acceptance.py tests/test_interaction_acceptance_runner.py tests/browser/child_server.py tests/browser/conftest.py tests/browser/test_child_shell.py tests/browser/test_release_viewports.py tests/conftest.py tests/fixtures/interaction_acceptance/p5_selector_oracle.json tests/test_database_safety.py tests/test_frontend_foundation.py tests/test_review_atomicity.py
+git add scripts/run_live_provider_uat.py scripts/live_provider_uat_server.py tests/test_live_provider_uat_harness.py docs/live-provider-uat-checklist.md tests/fixtures/live_provider/avatars .gitignore scripts/run_interaction_acceptance.py tests/test_interaction_acceptance_runner.py tests/browser/child_server.py tests/browser/conftest.py tests/browser/test_child_shell.py tests/browser/test_release_viewports.py tests/conftest.py tests/fixtures/interaction_acceptance/p5_selector_oracle.json tests/test_database_safety.py tests/test_frontend_foundation.py tests/test_review_atomicity.py app/frontend/teacher/views/reports.mjs tests/frontend/teacher/reports.test.mjs tests/browser/test_teacher_reports.py
 git commit -m "test: add retained live provider UAT"
 ```
 
@@ -652,7 +655,7 @@ hashes, and open the retained DB read-only to confirm live conversation,
 analysis, confirmed review, weekly metric, and search result provenance.
 
 ```bash
-python -c 'import json; value=json.load(open("artifacts/real-uat/<run-id>/manifest.json", encoding="utf-8")); assert value["status"] == "COMPLETE"'
+python -c 'import json; value=json.load(open("artifacts/real-uat/<run-id>/manifest.json", encoding="utf-8")); assert value["status"] == "COMPLETE" and value["secret_scan"]["status"] == "PASS"'
 (cd artifacts/real-uat/<run-id> && shasum -a 256 -c SHA256SUMS)
 ```
 
