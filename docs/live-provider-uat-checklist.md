@@ -330,15 +330,24 @@ Wait for the harness to stop and exit successfully.
    retained artifact tree are scanned before the final COMPLETE commit. The
    provider key is checked byte-for-byte across the entire retained tree,
    including the Git-pinned `reviewed-source/`. The temporary teacher PIN is
-   checked in every credential-capable runtime artifact: logs and server
-   output, controller/journey/issue/provider free-text fields, retained
-   database logical and physical evidence, screenshot bytes and metadata, and
-   every unclassified generated file. Only Git-validated reviewed-source bytes
-   and strictly parsed machine metadata are exempt from the low-entropy PIN
-   match: the exact `reviewed-source.json`, the recomputed `SHA256SUMS`, and
-   already validated path/OID/hash/checksum fields in structured summaries.
-   Unknown shapes and all human/free-text fields fail closed and remain
-   scanned. Authorization, bearer, cookie, session, and token detector patterns
+   checked in every credential-capable runtime artifact. The closed artifact
+   classification is: exact Git-pinned `reviewed-source/` bytes; an exact
+   canonical `reviewed-source.json`; a recomputed, complete `SHA256SUMS`;
+   strictly shaped and equal `resources.before.json` / `resources.after.json`;
+   a complete, strictly shaped `seed-baseline.json`; strictly shaped
+   controller, journey, issue, provider-summary, and manifest objects whose
+   human/free-text projections are scanned; strictly parsed app/server log
+   records whose message fields are scanned; and a read-only SQLite shadow
+   whose exact schema, credential/session hash formats, and free-text columns
+   are validated and scanned. Dates, IDs, UUIDs, paths, numeric values,
+   digests, checksums, and the validated log timestamp/logger/level envelope
+   are machine metadata and are not raw-substring PIN-scanned. Screenshot PNGs,
+   TTS/media bytes, and every unknown file or unknown structured shape remain
+   conservatively byte-scanned and fail closed. Thus a PIN equal to a year or
+   commit fragment does not false-fail solely because it appears in validated
+   machine metadata, but the same value in a log message, controller visible
+   text, database free-text column, screenshot, audio, or unknown file fails.
+   Authorization, bearer, cookie, session, and token detector patterns
    apply to runtime evidence; reviewed Git source is marked
    `GIT_PINNED_EXEMPT` for those generic patterns because it contains the
    scanner literals themselves. Do not run a broad content-printing `rg` over

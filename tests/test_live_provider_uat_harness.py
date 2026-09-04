@@ -3099,6 +3099,7 @@ def test_teacher_pin_scan_exempts_only_validated_machine_metadata(tmp_path):
         controller,
         pinned_plan=reviewed,
     )
+    controller = module.validate_controller_evidence(reviewed)
     manifest = module._complete_manifest(
         reviewed,
         seed_result={"media_sha256": sha256, "record_sha256": sha256},
@@ -3130,7 +3131,11 @@ def test_teacher_pin_scan_still_rejects_log_and_controller_text(tmp_path):
     teacher_pin = "4839"
     plan = module.create_run_plan(_repository(tmp_path), HEAD)
     plan.app_log.parent.mkdir(mode=0o700)
-    plan.app_log.write_text(f"credential={teacher_pin}\n", encoding="utf-8")
+    plan.app_log.write_text(
+        "2026-09-04 01:02:03,456 duck_diary INFO "
+        f"credential={teacher_pin}\n",
+        encoding="utf-8",
+    )
     with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
         module.scan_retained_artifacts(
             plan.root,
@@ -3151,6 +3156,224 @@ def test_teacher_pin_scan_still_rejects_log_and_controller_text(tmp_path):
             provider_secrets=("sk-runtime-provider-secret",),
             runtime_secrets=(teacher_pin,),
         )
+
+
+def test_teacher_pin_scan_ignores_validated_log_timestamp_and_runtime_path(tmp_path):
+    module = _module()
+    source_head = "b831e39eae3b7120e08763622668bd19f3aedb68"
+    plan = module.create_run_plan(
+        _repository(tmp_path),
+        source_head,
+        now=lambda: datetime(2026, 9, 4, 1, 2, 3, 456789, tzinfo=timezone.utc),
+        nonce=lambda: "123456789abc",
+    )
+    plan.app_log.parent.mkdir(mode=0o700)
+    runtime_message = (
+        "runtime database: db_mode=app path=" + str(plan.database)
+    )
+    log_payload = (
+        "2026-09-04 01:02:03,456 duck_diary INFO "
+        + runtime_message
+        + "\n"
+        + '2026-09-04 01:02:04,456 httpx INFO HTTP Request: POST '
+        + 'https://api.deepseek.com/v1/chat/completions "HTTP/1.1 200 OK"\n'
+    )
+    plan.app_log.write_text(log_payload, encoding="utf-8")
+    plan.server_stderr.write_text(log_payload, encoding="utf-8")
+
+    module.scan_retained_artifacts(
+        plan.root,
+        provider_secrets=("sk-log-scope-provider-secret",),
+        runtime_secrets=("2026",),
+        pinned_plan=plan,
+    )
+
+
+def test_teacher_pin_scan_ignores_validated_seed_machine_metadata(tmp_path):
+    module = _module()
+    source_head = "b831e39eae3b7120e08763622668bd19f3aedb68"
+    plan = module.create_run_plan(
+        _repository(tmp_path),
+        source_head,
+        now=lambda: datetime(2026, 9, 4, 1, 2, 3, 456789, tzinfo=timezone.utc),
+        nonce=lambda: "123456789abc",
+    )
+    _create_seed_provenance_database(plan)
+    baseline = module.capture_post_seed_baseline(plan)
+    module.atomic_write_json(plan.seed_baseline, baseline, pinned_plan=plan)
+    plan.database.unlink()
+
+    module.scan_retained_artifacts(
+        plan.root,
+        provider_secrets=("sk-seed-scope-provider-secret",),
+        runtime_secrets=("2026", "7120"),
+        pinned_plan=plan,
+    )
+
+
+def test_teacher_pin_scan_rejects_nested_seed_baseline_tamper(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    _create_seed_provenance_database(plan)
+    baseline = module.capture_post_seed_baseline(plan)
+    baseline["reporting_source"]["conversations"][0].append("unexpected")
+    module.atomic_write_json(plan.seed_baseline, baseline, pinned_plan=plan)
+    plan.database.unlink()
+
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-seed-tamper-provider-secret",),
+            runtime_secrets=("2026",),
+            pinned_plan=plan,
+        )
+
+
+def test_teacher_pin_scan_rejects_nested_protected_resource_tamper(tmp_path):
+    module = _module()
+    repository, connection, git = _protected_repository(tmp_path)
+    plan = module.create_run_plan(repository, HEAD)
+    try:
+        snapshot = module.capture_protected_resources(repository, runner=git.run)
+    finally:
+        connection.close()
+    mutated = json.loads(json.dumps(snapshot))
+    mutated["database"]["database"]["unexpected"] = "tamper"
+    module.atomic_write_json(plan.resources_before, mutated, pinned_plan=plan)
+    module.atomic_write_json(plan.resources_after, snapshot, pinned_plan=plan)
+
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-resource-scope-provider-secret",),
+            runtime_secrets=("2026",),
+            pinned_plan=plan,
+        )
+
+
+def test_teacher_pin_scan_requires_identical_protected_resource_indexes(tmp_path):
+    module = _module()
+    repository, connection, git = _protected_repository(tmp_path)
+    plan = module.create_run_plan(repository, HEAD)
+    try:
+        snapshot = module.capture_protected_resources(repository, runner=git.run)
+    finally:
+        connection.close()
+    changed = json.loads(json.dumps(snapshot))
+    changed["git_porcelain"]["sha256"] = "b" * 64
+    module.atomic_write_json(plan.resources_before, changed, pinned_plan=plan)
+    module.atomic_write_json(plan.resources_after, snapshot, pinned_plan=plan)
+
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-resource-pair-provider-secret",),
+            runtime_secrets=("2026",),
+            pinned_plan=plan,
+        )
+
+
+def _create_runtime_secret_scan_database(path: Path) -> None:
+    schema_fixture = Path(__file__).with_name("fixtures") / "schema_2.sql"
+    schema_ddl = schema_fixture.read_text(encoding="utf-8").split(
+        "INSERT INTO teacher_credentials",
+        1,
+    )[0]
+    with sqlite3.connect(path) as connection:
+        connection.executescript(schema_ddl)
+        connection.executescript(
+            """
+            CREATE TABLE avatar_media (
+                id VARCHAR(36) NOT NULL PRIMARY KEY,
+                file_name VARCHAR(255) NOT NULL,
+                mime_type VARCHAR(32) NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 VARCHAR(64) NOT NULL,
+                created_at DATETIME NOT NULL
+            );
+            CREATE TABLE alembic_version (
+                version_num VARCHAR(32) NOT NULL PRIMARY KEY
+            );
+            INSERT INTO alembic_version VALUES ('20260902_0002');
+            INSERT INTO teacher_credentials
+                (id, pin_salt, pin_hash, created_at, updated_at)
+            VALUES
+                (1, '20267120aaaaaaaaaaaaaaaaaaaaaaaa',
+                 '20267120bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 '2026-09-04 01:02:03.000000', '2026-09-04 01:02:03.000000');
+            INSERT INTO teacher_sessions (id, token_hash, created_at)
+            VALUES
+                (1, '20267120cccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                 '2026-09-04 01:02:03.000000');
+            INSERT INTO children
+                (id, name, nickname, avatar, active, deactivated_at)
+            VALUES (1, 'safe child', NULL, NULL, 1, NULL);
+            """
+        )
+        connection.commit()
+
+
+def test_teacher_pin_sqlite_scan_exempts_machine_columns_but_rejects_free_text(
+    tmp_path,
+):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    _create_runtime_secret_scan_database(plan.database)
+
+    module.scan_retained_artifacts(
+        plan.root,
+        provider_secrets=("sk-database-scope-provider-secret",),
+        runtime_secrets=("2026", "7120"),
+        pinned_plan=plan,
+    )
+
+    with sqlite3.connect(plan.database) as connection:
+        connection.execute(
+            "UPDATE children SET name = 'teacher credential 2026' WHERE id = 1"
+        )
+        connection.commit()
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-database-scope-provider-secret",),
+            runtime_secrets=("2026", "7120"),
+            pinned_plan=plan,
+        )
+    with sqlite3.connect(plan.database) as connection:
+        connection.execute("UPDATE children SET name = 'safe child' WHERE id = 1")
+        connection.execute("UPDATE teacher_credentials SET pin_hash = '2026'")
+        connection.commit()
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-database-scope-provider-secret",),
+            runtime_secrets=("2026", "7120"),
+            pinned_plan=plan,
+        )
+
+
+def test_teacher_pin_hybrid_scan_rejects_unknown_nested_controller_field(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.screenshots.mkdir(mode=0o700)
+    controller = _controller_payload(module, plan)
+    controller["journey"][0]["unexpected"] = "safe machine-looking value"
+    module.atomic_write_json(
+        plan.controller_evidence,
+        controller,
+        pinned_plan=plan,
+    )
+
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-controller-shape-provider-secret",),
+            runtime_secrets=("2026",),
+            pinned_plan=plan,
+        )
+
 
 def _png(width: int, height: int) -> bytes:
     def chunk(kind: bytes, payload: bytes) -> bytes:
@@ -3525,27 +3748,44 @@ def _create_seed_provenance_database(plan):
     )
     seed_avatar = seed_avatar_path.read_bytes()
     with sqlite3.connect(plan.database) as connection:
+        schema_fixture = Path(__file__).with_name("fixtures") / "schema_2.sql"
+        schema_ddl = schema_fixture.read_text(encoding="utf-8").split(
+            "INSERT INTO teacher_credentials",
+            1,
+        )[0]
+        connection.executescript(schema_ddl)
         connection.executescript(
             """
-            CREATE TABLE children (id INTEGER PRIMARY KEY, name TEXT, nickname TEXT, avatar TEXT);
-            CREATE TABLE ducks (id INTEGER PRIMARY KEY, name TEXT, avatar TEXT);
-            CREATE TABLE avatar_media (id TEXT PRIMARY KEY, file_name TEXT, mime_type TEXT, width INTEGER, height INTEGER, size_bytes INTEGER, sha256 TEXT);
-            CREATE TABLE duty_rosters (id INTEGER PRIMARY KEY, cycle TEXT, date TEXT, child_id INTEGER);
-            CREATE TABLE roster_requests (request_id TEXT PRIMARY KEY, operation TEXT, payload_hash TEXT, status TEXT, response_json TEXT, last_error_code TEXT, last_error_message TEXT);
-            CREATE TABLE conversations (id INTEGER PRIMARY KEY, child_id INTEGER, date TEXT, ended_at TEXT, status TEXT, end_reason TEXT, frozen_last_message_id INTEGER);
-            CREATE TABLE messages (id INTEGER PRIMARY KEY, conversation_id INTEGER, role TEXT, text TEXT);
-            CREATE TABLE chat_requests (request_id TEXT PRIMARY KEY, child_id INTEGER, conversation_id INTEGER, base_last_message_id INTEGER, child_message_id INTEGER, diary_message_id INTEGER, payload_hash TEXT, status TEXT, attempt_count INTEGER, response_json TEXT);
-            CREATE TABLE analysis_jobs (id INTEGER PRIMARY KEY, conversation_id INTEGER, frozen_last_message_id INTEGER, status TEXT, attempt_count INTEGER);
-            CREATE TABLE feeding_logs (id INTEGER PRIMARY KEY, conversation_id INTEGER, child_id INTEGER, duck_id INTEGER, category TEXT, content TEXT);
-            CREATE TABLE emotion_logs (id INTEGER PRIMARY KEY, conversation_id INTEGER, child_id INTEGER, emotion TEXT, intensity INTEGER, note TEXT);
-            CREATE TABLE insight_notes (id INTEGER PRIMARY KEY, conversation_id INTEGER, child_id INTEGER, content TEXT);
-            CREATE TABLE assessment_dimensions (id INTEGER PRIMARY KEY, key TEXT, name TEXT, enabled INTEGER);
-            CREATE TABLE assessments (id INTEGER PRIMARY KEY, conversation_id INTEGER, child_id INTEGER, status TEXT, overall REAL);
-            CREATE TABLE assessment_scores (id INTEGER PRIMARY KEY, assessment_id INTEGER, dimension_id INTEGER, score INTEGER, reason TEXT);
+            CREATE TABLE avatar_media (
+                id VARCHAR(36) NOT NULL PRIMARY KEY,
+                file_name VARCHAR(255) NOT NULL,
+                mime_type VARCHAR(32) NOT NULL,
+                width INTEGER NOT NULL,
+                height INTEGER NOT NULL,
+                size_bytes INTEGER NOT NULL,
+                sha256 VARCHAR(64) NOT NULL,
+                created_at DATETIME NOT NULL
+            );
+            CREATE TABLE alembic_version (
+                version_num VARCHAR(32) NOT NULL PRIMARY KEY
+            );
+            INSERT INTO alembic_version VALUES ('20260902_0002');
+            INSERT INTO teacher_credentials
+                (id, pin_salt, pin_hash, created_at, updated_at)
+            VALUES
+                (1, 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+                 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+                 '2026-09-01 00:00:00.000000', '2026-09-01 00:00:00.000000');
+            INSERT INTO teacher_sessions (id, token_hash, created_at)
+            VALUES
+                (1, 'cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc',
+                 '2026-09-01 00:00:00.000000');
             """
         )
         connection.execute(
-            "INSERT INTO avatar_media VALUES (?, ?, 'image/webp', 8, 8, ?, ?)",
+            "INSERT INTO avatar_media "
+            "(id, file_name, mime_type, width, height, size_bytes, sha256, created_at) "
+            "VALUES (?, ?, 'image/webp', 8, 8, ?, ?, '2026-09-01 00:00:00.000000')",
             (
                 seed_avatar_id,
                 seed_avatar_path.name,
@@ -3554,15 +3794,23 @@ def _create_seed_provenance_database(plan):
             ),
         )
         connection.executemany(
-            "INSERT INTO children VALUES (?, ?, ?, ?)",
+            "INSERT INTO children "
+            "(id, name, nickname, avatar, active, deactivated_at) "
+            "VALUES (?, ?, ?, ?, 1, NULL)",
             (
                 (10, "Seed Child", None, f"/api/media/avatars/{seed_avatar_id}"),
                 (11, "Seed Partner", None, None),
             ),
         )
-        connection.execute("INSERT INTO ducks VALUES (20, 'Seed Duck', NULL)")
+        connection.execute(
+            "INSERT INTO ducks "
+            "(id, name, avatar, status, note, active, deactivated_at) "
+            "VALUES (20, 'Seed Duck', NULL, 'healthy', NULL, 1, NULL)"
+        )
         connection.executemany(
-            "INSERT INTO assessment_dimensions VALUES (?, ?, ?, ?)",
+            "INSERT INTO assessment_dimensions "
+            "(id, key, name, enabled, weight, description) "
+            "VALUES (?, ?, ?, ?, 1.0, NULL)",
             (
                 (1, "communication", "Communication", 1),
                 (2, "observation", "Observation", 1),
@@ -3585,17 +3833,23 @@ def _create_seed_provenance_database(plan):
             job_id = 100 + conversation_id
             assessment_id = 200 + conversation_id
             connection.execute(
-                "INSERT INTO conversations VALUES (?, 10, ?, ?, 'ended', ?, ?)",
+                "INSERT INTO conversations "
+                "(id, child_id, date, started_at, ended_at, status, end_reason, "
+                "revision, pending_end_reason, frozen_last_message_id) "
+                "VALUES (?, 10, ?, ?, ?, 'ended', ?, 3, NULL, ?)",
                 (
                     conversation_id,
                     conversation_date,
+                    ended_at,
                     ended_at,
                     end_reason,
                     diary_message_id,
                 ),
             )
             connection.executemany(
-                "INSERT INTO messages VALUES (?, ?, ?, ?)",
+                "INSERT INTO messages "
+                "(id, conversation_id, role, text, created_at) "
+                "VALUES (?, ?, ?, ?, '2026-09-01 00:00:00.000000')",
                 (
                     (
                         child_message_id,
@@ -3607,7 +3861,15 @@ def _create_seed_provenance_database(plan):
                 ),
             )
             connection.execute(
-                "INSERT INTO analysis_jobs VALUES (?, ?, ?, 'succeeded', 1)",
+                "INSERT INTO analysis_jobs "
+                "(id, conversation_id, frozen_last_message_id, status, attempt_count, "
+                "max_attempts, available_at, lease_owner, lease_expires_at, "
+                "last_error_code, last_error_message, started_at, finished_at, "
+                "created_at, updated_at) VALUES "
+                "(?, ?, ?, 'succeeded', 1, 3, '2026-09-01 00:00:00.000000', "
+                "NULL, NULL, NULL, NULL, '2026-09-01 00:00:00.000000', "
+                "'2026-09-01 00:00:00.000000', '2026-09-01 00:00:00.000000', "
+                "'2026-09-01 00:00:00.000000')",
                 (job_id, conversation_id, diary_message_id),
             )
             connection.execute(
@@ -3626,7 +3888,10 @@ def _create_seed_provenance_database(plan):
                 ),
             )
         connection.execute(
-            "INSERT INTO feeding_logs VALUES (80, 30, 10, 20, '观察', 'seed observation')"
+            "INSERT INTO feeding_logs "
+            "(id, conversation_id, child_id, duck_id, category, content, occurred_at) "
+            "VALUES (80, 30, 10, 20, '观察', 'seed observation', "
+            "'2026-09-01 00:00:00.000000')"
         )
         connection.commit()
 
@@ -3766,11 +4031,15 @@ def _apply_live_provenance(plan):
         )
     with sqlite3.connect(plan.database) as connection:
         connection.executemany(
-            "INSERT INTO avatar_media VALUES (?, ?, 'image/webp', ?, ?, ?, ?)",
+            "INSERT INTO avatar_media "
+            "(id, file_name, mime_type, width, height, size_bytes, sha256, created_at) "
+            "VALUES (?, ?, 'image/webp', ?, ?, ?, ?, '2026-09-03 00:00:00.000000')",
             avatar_metadata,
         )
         connection.executemany(
-            "INSERT INTO children VALUES (?, ?, ?, ?)",
+            "INSERT INTO children "
+            "(id, name, nickname, avatar, active, deactivated_at) "
+            "VALUES (?, ?, ?, ?, 1, NULL)",
             (
                 (
                     101,
@@ -3781,11 +4050,14 @@ def _apply_live_provenance(plan):
             ),
         )
         connection.execute(
-            "INSERT INTO ducks VALUES (?, ?, ?)",
+            "INSERT INTO ducks "
+            "(id, name, avatar, status, note, active, deactivated_at) "
+            "VALUES (?, ?, ?, 'healthy', NULL, 1, NULL)",
             (201, "Live Duck", "/api/media/avatars/22222222-2222-4222-8222-222222222222"),
         )
         connection.executemany(
-            "INSERT INTO duty_rosters VALUES (?, '2026-09', ?, ?)",
+            "INSERT INTO duty_rosters (id, cycle, date, child_id) "
+            "VALUES (?, '2026-09', ?, ?)",
             (
                 (101, "2026-09-03", 10),
                 (102, "2026-09-03", 101),
@@ -3807,17 +4079,35 @@ def _apply_live_provenance(plan):
             sort_keys=True,
         )
         connection.execute(
-            "INSERT INTO roster_requests VALUES (?, 'monthly_roster', ?, 'succeeded', ?, NULL, NULL)",
+            "INSERT INTO roster_requests "
+            "(request_id, operation, payload_hash, status, response_json, "
+            "last_error_code, last_error_message, created_at, updated_at) "
+            "VALUES (?, 'monthly_roster', ?, 'succeeded', ?, NULL, NULL, "
+            "'2026-09-03 00:00:00.000000', '2026-09-03 00:00:00.000000')",
             (retry_request, roster_retry_hash, roster_response),
         )
         connection.executemany(
-            "INSERT INTO conversations VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO conversations "
+            "(id, child_id, date, started_at, ended_at, status, end_reason, "
+            "revision, pending_end_reason, frozen_last_message_id) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, 3, NULL, ?)",
             (
-                (301, 101, "2026-09-03", "2026-09-03T02:00:00.000000", "ended", "max_rounds", 406),
+                (
+                    301,
+                    101,
+                    "2026-09-03",
+                    "2026-09-03 01:55:00.000000",
+                    "2026-09-03T02:00:00.000000",
+                    "ended",
+                    "max_rounds",
+                    406,
+                ),
             ),
         )
         connection.executemany(
-            "INSERT INTO messages VALUES (?, ?, ?, ?)",
+            "INSERT INTO messages "
+            "(id, conversation_id, role, text, created_at) "
+            "VALUES (?, ?, ?, ?, '2026-09-03 02:00:00.000000')",
             (
                 (401, 301, "child", "我今天在池塘边给小鸭喂食。"),
                 (402, 301, "diary", "你观察到小鸭有什么变化？"),
@@ -3831,7 +4121,16 @@ def _apply_live_provenance(plan):
             child_message_id = 401 + index * 2
             diary_message_id = child_message_id + 1
             connection.execute(
-                "INSERT INTO chat_requests VALUES (?, 101, 301, ?, ?, ?, ?, 'succeeded', 1, ?)",
+                "INSERT INTO chat_requests "
+                "(request_id, child_id, conversation_id, base_last_message_id, "
+                "child_message_id, diary_message_id, payload_hash, status, "
+                "attempt_count, available_at, lease_owner, lease_expires_at, "
+                "last_error_code, last_error_message, response_json, started_at, "
+                "finished_at, created_at, updated_at) VALUES "
+                "(?, 101, 301, ?, ?, ?, ?, 'succeeded', 1, "
+                "'2026-09-03 02:00:00.000000', NULL, NULL, NULL, NULL, ?, "
+                "'2026-09-03 02:00:00.000000', '2026-09-03 02:00:00.000000', "
+                "'2026-09-03 02:00:00.000000', '2026-09-03 02:00:00.000000')",
                 (
                     request_id,
                     None if index == 0 else child_message_id - 1,
@@ -3858,10 +4157,35 @@ def _apply_live_provenance(plan):
                     ),
                 ),
             )
-        connection.execute("INSERT INTO analysis_jobs VALUES (501, 301, 406, 'succeeded', 1)")
-        connection.execute("INSERT INTO feeding_logs VALUES (801, 301, 101, 201, '喂食', '在池塘边喂食')")
-        connection.execute("INSERT INTO emotion_logs VALUES (901, 301, 101, '开心', 5, '照顾小鸭很开心')")
-        connection.execute("INSERT INTO insight_notes VALUES (1001, 301, 101, '主动观察并持续照顾')")
+        connection.execute(
+            "INSERT INTO analysis_jobs "
+            "(id, conversation_id, frozen_last_message_id, status, attempt_count, "
+            "max_attempts, available_at, lease_owner, lease_expires_at, "
+            "last_error_code, last_error_message, started_at, finished_at, "
+            "created_at, updated_at) VALUES "
+            "(501, 301, 406, 'succeeded', 1, 3, "
+            "'2026-09-03 02:00:00.000000', NULL, NULL, NULL, NULL, "
+            "'2026-09-03 02:00:00.000000', '2026-09-03 02:00:00.000000', "
+            "'2026-09-03 02:00:00.000000', '2026-09-03 02:00:00.000000')"
+        )
+        connection.execute(
+            "INSERT INTO feeding_logs "
+            "(id, conversation_id, child_id, duck_id, category, content, occurred_at) "
+            "VALUES (801, 301, 101, 201, '喂食', '在池塘边喂食', "
+            "'2026-09-03 02:00:00.000000')"
+        )
+        connection.execute(
+            "INSERT INTO emotion_logs "
+            "(id, conversation_id, child_id, emotion, intensity, note, occurred_at) "
+            "VALUES (901, 301, 101, '开心', 5, '照顾小鸭很开心', "
+            "'2026-09-03 02:00:00.000000')"
+        )
+        connection.execute(
+            "INSERT INTO insight_notes "
+            "(id, conversation_id, child_id, content, created_at) "
+            "VALUES (1001, 301, 101, '主动观察并持续照顾', "
+            "'2026-09-03 02:00:00.000000')"
+        )
         connection.execute("INSERT INTO assessments VALUES (601, 301, 101, 'confirmed', 4.333333333333333)")
         connection.executemany(
             "INSERT INTO assessment_scores VALUES (?, 601, ?, ?, ?)",
@@ -4155,7 +4479,10 @@ def test_database_provenance_rejects_seed_entities_incomplete_projection_and_unf
 
     with sqlite3.connect(plan.database) as connection:
         connection.execute(
-            "INSERT INTO insight_notes VALUES (1001, 301, 101, '主动观察并持续照顾')"
+            "INSERT INTO insight_notes "
+            "(id, conversation_id, child_id, content, created_at) "
+            "VALUES (1001, 301, 101, '主动观察并持续照顾', "
+            "'2026-09-03 02:00:00.000000')"
         )
         connection.commit()
     bad_cursor = {**entity_ids, "search_cursor": entity_ids["search_cursor"][:-1] + "A"}
@@ -4232,14 +4559,25 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
     live_plan = []
 
     def capture_resources(_repository):
+        missing_file = {"kind": "missing"}
+        missing_directory = {
+            "digest": hashlib.sha256(b"[]").hexdigest(),
+            "entries": [],
+            "root": missing_file,
+        }
         snapshot = {
-            "database": {"logical_digest": "stable"},
+            "database": {
+                "database": missing_file,
+                "logical_digest": None,
+                "shm": missing_file,
+                "wal": missing_file,
+            },
             "dirty_paths": [],
             "git_head": HEAD,
             "git_porcelain": {"sha256": "0" * 64, "size": 0},
-            "log": {"kind": "regular"},
-            "media": {"digest": "stable"},
-            "tts": {"digest": "stable"},
+            "log": missing_file,
+            "media": missing_directory,
+            "tts": missing_directory,
         }
         captures.append(snapshot)
         return snapshot
@@ -4289,7 +4627,9 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
                 controller,
                 pinned_plan=plan,
             )
-        plan.server_stderr.write_bytes(b"safe server log\n")
+        plan.server_stderr.write_bytes(
+            b"2026-09-04 01:02:03,456 duck_diary INFO safe server log\n"
+        )
         process_events.append(("start", FakeSession.pid, FakeSession.pgid))
         return FakeSession()
 
@@ -4455,6 +4795,13 @@ def test_fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_f
         plan.root,
         provider_secrets=(provider_secret,),
         runtime_secrets=(teacher_secret,),
+        pinned_plan=plan,
+    )
+    module.scan_retained_artifacts(
+        plan.root,
+        provider_secrets=(provider_secret,),
+        runtime_secrets=("2026",),
+        pinned_plan=plan,
     )
     assert len(captures) == 3
 

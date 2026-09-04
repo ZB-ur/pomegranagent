@@ -224,6 +224,138 @@ _BASELINE_ID_COLUMNS = {
     "messages": "id",
     "roster_requests": "request_id",
 }
+_RUNTIME_DB_COLUMNS = {
+    "alembic_version": ("version_num",),
+    "analysis_jobs": (
+        "id",
+        "conversation_id",
+        "frozen_last_message_id",
+        "status",
+        "attempt_count",
+        "max_attempts",
+        "available_at",
+        "lease_owner",
+        "lease_expires_at",
+        "last_error_code",
+        "last_error_message",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+    ),
+    "assessment_dimensions": (
+        "id",
+        "key",
+        "name",
+        "enabled",
+        "weight",
+        "description",
+    ),
+    "assessment_scores": ("id", "assessment_id", "dimension_id", "score", "reason"),
+    "assessments": ("id", "conversation_id", "child_id", "status", "overall"),
+    "avatar_media": (
+        "id",
+        "file_name",
+        "mime_type",
+        "width",
+        "height",
+        "size_bytes",
+        "sha256",
+        "created_at",
+    ),
+    "chat_requests": (
+        "request_id",
+        "child_id",
+        "conversation_id",
+        "base_last_message_id",
+        "child_message_id",
+        "diary_message_id",
+        "payload_hash",
+        "status",
+        "attempt_count",
+        "available_at",
+        "lease_owner",
+        "lease_expires_at",
+        "last_error_code",
+        "last_error_message",
+        "response_json",
+        "started_at",
+        "finished_at",
+        "created_at",
+        "updated_at",
+    ),
+    "children": ("id", "name", "nickname", "avatar", "active", "deactivated_at"),
+    "conversations": (
+        "id",
+        "child_id",
+        "date",
+        "started_at",
+        "ended_at",
+        "status",
+        "end_reason",
+        "revision",
+        "pending_end_reason",
+        "frozen_last_message_id",
+    ),
+    "duck_archives": ("id", "duck_id", "summary", "updated_at"),
+    "ducks": ("id", "name", "avatar", "status", "note", "active", "deactivated_at"),
+    "duty_rosters": ("id", "cycle", "date", "child_id"),
+    "emotion_logs": (
+        "id",
+        "conversation_id",
+        "child_id",
+        "emotion",
+        "intensity",
+        "note",
+        "occurred_at",
+    ),
+    "feeding_logs": (
+        "id",
+        "conversation_id",
+        "child_id",
+        "duck_id",
+        "category",
+        "content",
+        "occurred_at",
+    ),
+    "insight_notes": ("id", "conversation_id", "child_id", "content", "created_at"),
+    "messages": ("id", "conversation_id", "role", "text", "created_at"),
+    "roster_requests": (
+        "request_id",
+        "operation",
+        "payload_hash",
+        "status",
+        "response_json",
+        "last_error_code",
+        "last_error_message",
+        "created_at",
+        "updated_at",
+    ),
+    "teacher_credentials": ("id", "pin_salt", "pin_hash", "created_at", "updated_at"),
+    "teacher_sessions": ("id", "token_hash", "created_at"),
+}
+_RUNTIME_DB_TEXT_COLUMNS = {
+    "analysis_jobs": ("status", "last_error_code", "last_error_message"),
+    "assessment_dimensions": ("key", "name", "description"),
+    "assessment_scores": ("reason",),
+    "assessments": ("status",),
+    "avatar_media": ("mime_type",),
+    "chat_requests": ("status", "last_error_code", "last_error_message"),
+    "children": ("name", "nickname"),
+    "conversations": ("status", "end_reason", "pending_end_reason"),
+    "duck_archives": ("summary",),
+    "ducks": ("name", "status", "note"),
+    "emotion_logs": ("emotion", "note"),
+    "feeding_logs": ("category", "content"),
+    "insight_notes": ("content",),
+    "messages": ("role", "text"),
+    "roster_requests": (
+        "operation",
+        "status",
+        "last_error_code",
+        "last_error_message",
+    ),
+}
 _RUNTIME_DIRTY_PREFIXES = (
     "app/",
     "scripts/",
@@ -3174,11 +3306,11 @@ def _runtime_summary_texts(
     value = _canonical_secret_scan_object(payload, role=role)
     texts: list[str] = []
 
-    def assertions(items: object) -> None:
+    def assertions(items: object, *, keys: set[str]) -> None:
         if not isinstance(items, list):
             raise HarnessSafetyError(f"secret scan failed: {role}")
         for item in items:
-            if not isinstance(item, Mapping):
+            if not isinstance(item, Mapping) or set(item) != keys:
                 raise HarnessSafetyError(f"secret scan failed: {role}")
             visible = item.get("visible_assertions")
             if not isinstance(visible, list) or any(
@@ -3187,12 +3319,14 @@ def _runtime_summary_texts(
                 raise HarnessSafetyError(f"secret scan failed: {role}")
             texts.extend(visible)
 
-    def summaries(items: object) -> None:
+    def summaries(items: object, *, keys: set[str]) -> None:
         if not isinstance(items, list):
             raise HarnessSafetyError(f"secret scan failed: {role}")
         for item in items:
-            if not isinstance(item, Mapping) or not isinstance(
-                item.get("safe_summary"), str
+            if (
+                not isinstance(item, Mapping)
+                or set(item) != keys
+                or not isinstance(item.get("safe_summary"), str)
             ):
                 raise HarnessSafetyError(f"secret scan failed: {role}")
             texts.append(str(item["safe_summary"]))
@@ -3200,18 +3334,44 @@ def _runtime_summary_texts(
     if role == "controller-evidence.json":
         if set(value) != _CONTROLLER_KEYS:
             raise HarnessSafetyError(f"secret scan failed: {role}")
-        assertions(value.get("journey"))
-        assertions(value.get("screenshots"))
-        summaries(value.get("issues"))
-        summaries(value.get("human_uat_required"))
+        assertions(
+            value.get("journey"),
+            keys={"entity_ids", "status", "step_id", "visible_assertions"},
+        )
+        assertions(
+            value.get("screenshots"),
+            keys={
+                "journey_step",
+                "relative_path",
+                "semantic_name",
+                "state_id",
+                "surface",
+                "viewport",
+                "visible_assertions",
+            },
+        )
+        summaries(
+            value.get("issues"),
+            keys={"safe_summary", "severity", "step_id"},
+        )
+        summaries(
+            value.get("human_uat_required"),
+            keys={"gate_id", "safe_summary", "status"},
+        )
     elif role == "journey.json":
         if set(value) != {"journey", "protocol", "run_id"}:
             raise HarnessSafetyError(f"secret scan failed: {role}")
-        assertions(value.get("journey"))
+        assertions(
+            value.get("journey"),
+            keys={"entity_ids", "status", "step_id", "visible_assertions"},
+        )
     elif role == "issues.json":
         if set(value) != {"issues", "protocol", "run_id"}:
             raise HarnessSafetyError(f"secret scan failed: {role}")
-        summaries(value.get("issues"))
+        summaries(
+            value.get("issues"),
+            keys={"safe_summary", "severity", "step_id"},
+        )
     elif role == "provider-summary.json":
         events = value.get("events")
         if not isinstance(events, list):
@@ -3244,10 +3404,586 @@ def _runtime_summary_texts(
             "status",
         }:
             raise HarnessSafetyError(f"secret scan failed: {role}")
-        assertions(value.get("screenshots"))
-        summaries(value.get("human_uat_required"))
+        assertions(
+            value.get("screenshots"),
+            keys={
+                "byte_size",
+                "journey_step",
+                "relative_path",
+                "semantic_name",
+                "sha256",
+                "source_run_id",
+                "state_id",
+                "surface",
+                "viewport",
+                "visible_assertions",
+            },
+        )
+        summaries(
+            value.get("human_uat_required"),
+            keys={"gate_id", "safe_summary", "status"},
+        )
     else:
         raise HarnessSafetyError(f"secret scan failed: {role}")
+    return tuple(texts)
+
+
+_RUNTIME_LOG_LINE = re.compile(
+    r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
+    r"(?P<logger>(?:duck_diary(?:\.[a-z_]+)*|uvicorn(?:\.[a-z_]+)*|"
+    r"py\.warnings|asyncio|httpx)) "
+    r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL) "
+    r"(?P<message>[^\r\n]*)\n"
+)
+
+
+def _runtime_log_messages(
+    payload: bytes,
+    *,
+    role: str,
+    plan: RunPlan | None,
+) -> tuple[str, ...]:
+    if plan is None:
+        raise HarnessSafetyError(f"secret scan failed: {role}")
+    try:
+        text = payload.decode("utf-8", errors="strict")
+    except UnicodeError as exc:
+        raise HarnessSafetyError(f"secret scan failed: {role}") from exc
+    messages: list[str] = []
+    runtime_database = (
+        "runtime database: db_mode=app path=" + str(plan.database)
+    )
+    offset = 0
+    while offset < len(text):
+        match = _RUNTIME_LOG_LINE.match(text, offset)
+        if match is None:
+            raise HarnessSafetyError(f"secret scan failed: {role}")
+        try:
+            datetime.strptime(match.group("timestamp"), "%Y-%m-%d %H:%M:%S,%f")
+        except ValueError as exc:
+            raise HarnessSafetyError(f"secret scan failed: {role}") from exc
+        message = match.group("message")
+        if message.startswith("runtime database:"):
+            if message != runtime_database:
+                raise HarnessSafetyError(f"secret scan failed: {role}")
+            message = "runtime database: db_mode=app path=[PINNED_RUNTIME_DB]"
+        messages.append(message)
+        offset = match.end()
+    return tuple(messages)
+
+
+_STAT_EVIDENCE_KEYS = {
+    "device",
+    "inode",
+    "kind",
+    "mode",
+    "mtime_ns",
+    "nlink",
+    "size",
+}
+
+
+def _valid_stat_evidence(value: object, *, hashed: bool | None = None) -> bool:
+    if not isinstance(value, Mapping):
+        return False
+    if value == {"kind": "missing"}:
+        return hashed is not True
+    kind = value.get("kind")
+    expected = _STAT_EVIDENCE_KEYS | ({"sha256"} if kind == "regular" else set())
+    if (
+        set(value) != expected
+        or kind not in {"regular", "directory", "symlink", "special"}
+        or any(
+            type(value.get(key)) is not int or int(value[key]) < 0
+            for key in ("device", "inode", "mode", "mtime_ns", "nlink", "size")
+        )
+        or value["nlink"] < 1
+        or value["mode"] > 0o7777
+        or (
+            kind == "regular"
+            and (
+                not isinstance(value.get("sha256"), str)
+                or SHA256_PATTERN.fullmatch(str(value["sha256"])) is None
+            )
+        )
+        or (hashed is True and kind != "regular")
+        or (hashed is False and kind == "regular")
+    ):
+        return False
+    return True
+
+
+def _valid_directory_evidence(value: object) -> bool:
+    if (
+        not isinstance(value, Mapping)
+        or set(value) != {"digest", "entries", "root"}
+        or not isinstance(value.get("digest"), str)
+        or SHA256_PATTERN.fullmatch(str(value["digest"])) is None
+        or not isinstance(value.get("entries"), list)
+    ):
+        return False
+    root = value.get("root")
+    entries = value["entries"]
+    if root == {"kind": "missing"}:
+        return entries == [] and value["digest"] == _hash_bytes(b"[]")
+    if not _valid_stat_evidence(root, hashed=False) or root.get("kind") != "directory":
+        return False
+    observed_paths: list[str] = []
+    for item in entries:
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != {"relative_path", "snapshot"}
+            or not isinstance(item.get("relative_path"), str)
+        ):
+            return False
+        try:
+            relative = _canonical_repository_relative_path(item["relative_path"])
+        except HarnessSafetyError:
+            return False
+        snapshot = item.get("snapshot")
+        if not _valid_stat_evidence(snapshot):
+            return False
+        if snapshot.get("kind") not in {"regular", "directory"}:
+            return False
+        observed_paths.append(relative)
+    if observed_paths != sorted(set(observed_paths)):
+        return False
+    digest_payload = json.dumps(
+        entries,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return value["digest"] == _hash_bytes(digest_payload)
+
+
+def _validate_resource_secret_index(
+    value: Mapping[str, object],
+    *,
+    plan: RunPlan | None,
+    role: str,
+) -> None:
+    failed = HarnessSafetyError(f"secret scan failed: {role}")
+    if plan is None or set(value) != {
+        "database",
+        "dirty_paths",
+        "git_head",
+        "git_porcelain",
+        "log",
+        "media",
+        "tts",
+    }:
+        raise failed
+    database = value.get("database")
+    porcelain = value.get("git_porcelain")
+    if (
+        not isinstance(database, Mapping)
+        or set(database) != {"database", "logical_digest", "shm", "wal"}
+        or not _valid_stat_evidence(database.get("database"))
+        or not _valid_stat_evidence(database.get("wal"))
+        or not _valid_stat_evidence(database.get("shm"))
+        or (
+            database.get("logical_digest") is not None
+            and (
+                not isinstance(database.get("logical_digest"), str)
+                or SHA256_PATTERN.fullmatch(str(database["logical_digest"])) is None
+            )
+        )
+        or not _valid_stat_evidence(value.get("log"))
+        or not _valid_directory_evidence(value.get("media"))
+        or not _valid_directory_evidence(value.get("tts"))
+        or value.get("git_head") != plan.source_head
+        or not isinstance(porcelain, Mapping)
+        or set(porcelain) != {"sha256", "size"}
+        or not isinstance(porcelain.get("sha256"), str)
+        or SHA256_PATTERN.fullmatch(str(porcelain["sha256"])) is None
+        or type(porcelain.get("size")) is not int
+        or porcelain["size"] < 0
+        or not isinstance(value.get("dirty_paths"), list)
+    ):
+        raise failed
+    database_kind = database["database"].get("kind")
+    if (
+        (database_kind == "missing" and database.get("logical_digest") is not None)
+        or (database_kind != "missing" and database.get("logical_digest") is None)
+    ):
+        raise failed
+    for item in value["dirty_paths"]:
+        if (
+            not isinstance(item, Mapping)
+            or set(item)
+            != {
+                "directory",
+                "file",
+                "porcelain_destination",
+                "porcelain_record",
+                "porcelain_role",
+                "porcelain_status",
+                "relative_path",
+            }
+            or not _valid_stat_evidence(item.get("file"))
+            or (
+                item["file"].get("kind") == "directory"
+                and not _valid_directory_evidence(item.get("directory"))
+            )
+            or (
+                item["file"].get("kind") != "directory"
+                and item.get("directory") is not None
+            )
+        ):
+            raise failed
+    dirty_names = tuple(
+        sorted(
+            {
+                item.get("relative_path")
+                for item in value["dirty_paths"]
+                if isinstance(item, Mapping)
+                and isinstance(item.get("relative_path"), str)
+            }
+        )
+    )
+    try:
+        validate_reviewed_checkout(
+            value,
+            expected_head=plan.source_head,
+            allowed_unrelated_dirty_paths=dirty_names,
+        )
+    except HarnessSafetyError as exc:
+        raise failed from exc
+
+
+def _valid_database_timestamp(value: object) -> bool:
+    if not isinstance(value, str) or re.fullmatch(
+        r"\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d{6})?",
+        value,
+    ) is None:
+        return False
+    try:
+        datetime.fromisoformat(value)
+    except ValueError:
+        return False
+    return True
+
+
+def _valid_database_date(value: object) -> bool:
+    if not isinstance(value, str):
+        return False
+    try:
+        return date.fromisoformat(value).isoformat() == value
+    except ValueError:
+        return False
+
+
+def _seed_baseline_texts(
+    value: Mapping[str, object],
+    *,
+    plan: RunPlan | None,
+    role: str,
+) -> tuple[str, ...]:
+    failed = HarnessSafetyError(f"secret scan failed: {role}")
+    if plan is None:
+        raise failed
+    try:
+        _validated_seed_baseline(plan, value)
+    except HarnessSafetyError as exc:
+        raise failed from exc
+    table_ids = value.get("table_ids")
+    dimensions = value.get("dimensions")
+    reporting = value.get("reporting_source")
+    if (
+        not isinstance(table_ids, Mapping)
+        or not isinstance(dimensions, list)
+        or not isinstance(reporting, Mapping)
+        or not _valid_directory_evidence(value.get("media_snapshot"))
+        or not _valid_directory_evidence(value.get("tts_snapshot"))
+    ):
+        raise failed
+    uuid_tables = {"avatar_media", "chat_requests", "roster_requests"}
+    for table, identifiers in table_ids.items():
+        if not isinstance(identifiers, list):
+            raise failed
+        if table in uuid_tables:
+            if any(
+                not isinstance(identifier, str)
+                or UUID4_PATTERN.fullmatch(identifier) is None
+                for identifier in identifiers
+            ):
+                raise failed
+        elif any(type(identifier) is not int or identifier <= 0 for identifier in identifiers):
+            raise failed
+    texts = [
+        str(item[key])
+        for item in dimensions
+        if isinstance(item, Mapping)
+        for key in ("key", "name")
+    ]
+    if len(texts) != len(dimensions) * 2:
+        raise failed
+
+    analysis_jobs = reporting.get("analysis_jobs")
+    assessments = reporting.get("assessments")
+    conversations = reporting.get("conversations")
+    if (
+        not isinstance(analysis_jobs, list)
+        or any(
+            not isinstance(row, list)
+            or len(row) != 4
+            or any(type(row[index]) is not int or row[index] <= 0 for index in range(3))
+            or row[3] not in {"pending", "processing", "succeeded", "failed"}
+            for row in analysis_jobs
+        )
+        or not isinstance(assessments, list)
+        or any(
+            not isinstance(row, list)
+            or len(row) != 5
+            or any(type(row[index]) is not int or row[index] <= 0 for index in range(3))
+            or row[3] not in {"pending", "draft", "confirmed"}
+            or (row[4] is not None and type(row[4]) not in {int, float})
+            for row in assessments
+        )
+        or not isinstance(conversations, list)
+        or any(
+            not isinstance(row, list)
+            or len(row) != 6
+            or type(row[0]) is not int
+            or row[0] <= 0
+            or type(row[1]) is not int
+            or row[1] <= 0
+            or not _valid_database_date(row[2])
+            or (
+                row[3] is not None
+                and (
+                    not isinstance(row[3], str)
+                    or re.fullmatch(
+                        r"\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}(?:\.\d{6})?",
+                        row[3],
+                    )
+                    is None
+                )
+            )
+            or row[4] not in {"active", "ended"}
+            or (row[5] is not None and (type(row[5]) is not int or row[5] <= 0))
+            for row in conversations
+        )
+    ):
+        raise failed
+    texts.extend(str(row[3]) for row in analysis_jobs)
+    texts.extend(str(row[3]) for row in assessments)
+    texts.extend(str(row[4]) for row in conversations)
+    return tuple(texts)
+
+
+def _database_response_texts(
+    *,
+    table: str,
+    payload: object,
+    failed: HarnessSafetyError,
+) -> tuple[str, ...]:
+    if payload is None:
+        return ()
+    if not isinstance(payload, str) or not payload:
+        raise failed
+    try:
+        value = json.loads(payload)
+    except (TypeError, ValueError) as exc:
+        raise failed from exc
+    if not isinstance(value, Mapping):
+        raise failed
+
+    def request_id(candidate: object) -> bool:
+        return isinstance(candidate, str) and UUID4_PATTERN.fullmatch(candidate) is not None
+
+    def child_ids(candidate: object) -> bool:
+        return (
+            isinstance(candidate, list)
+            and candidate
+            and all(type(item) is int and item > 0 for item in candidate)
+            and len(candidate) == len(set(candidate))
+        )
+
+    if table == "chat_requests":
+        if (
+            set(value)
+            != {
+                "child_message_id",
+                "conversation_id",
+                "diary_message_id",
+                "end_reason",
+                "ended",
+                "replayed",
+                "reply",
+                "request_id",
+                "round",
+            }
+            or not request_id(value.get("request_id"))
+            or any(
+                type(value.get(key)) is not int or value[key] <= 0
+                for key in (
+                    "child_message_id",
+                    "conversation_id",
+                    "diary_message_id",
+                    "round",
+                )
+            )
+            or type(value.get("ended")) is not bool
+            or type(value.get("replayed")) is not bool
+            or value.get("end_reason") not in {None, "complete", "manual", "max_rounds"}
+            or not isinstance(value.get("reply"), str)
+        ):
+            raise failed
+        return (str(value["reply"]),)
+    if table != "roster_requests":
+        raise failed
+    if (
+        not request_id(value.get("request_id"))
+        or type(value.get("replayed")) is not bool
+    ):
+        raise failed
+    keys = set(value)
+    if keys == {"child_ids", "cycle", "date", "replayed", "request_id"}:
+        if (
+            not child_ids(value.get("child_ids"))
+            or not isinstance(value.get("cycle"), str)
+            or not 1 <= len(value["cycle"]) <= 64
+            or not _valid_database_date(value.get("date"))
+        ):
+            raise failed
+        return ()
+    if keys not in (
+        {"replayed", "request_id", "schedule"},
+        {"month", "replayed", "request_id", "schedule"},
+    ):
+        raise failed
+    schedule = value.get("schedule")
+    if not isinstance(schedule, list):
+        raise failed
+    monthly = "month" in value
+    if monthly and (
+        not isinstance(value.get("month"), str)
+        or re.fullmatch(r"\d{4}-(?:0[1-9]|1[0-2])", value["month"]) is None
+    ):
+        raise failed
+    for item in schedule:
+        expected = {"child_ids", "cycle", "date"} if monthly else {"child_ids", "date"}
+        if (
+            not isinstance(item, Mapping)
+            or set(item) != expected
+            or not child_ids(item.get("child_ids"))
+            or not _valid_database_date(item.get("date"))
+            or (
+                monthly
+                and (
+                    not isinstance(item.get("cycle"), str)
+                    or not 1 <= len(item["cycle"]) <= 64
+                )
+            )
+        ):
+            raise failed
+    return ()
+
+
+def _runtime_database_texts(
+    *,
+    plan: RunPlan | None,
+    role: str,
+) -> tuple[str, ...]:
+    failed = HarnessSafetyError(f"secret scan failed: {role}")
+    if plan is None:
+        raise failed
+    try:
+        with _sqlite_shadow(plan.database) as shadow, sqlite3.connect(
+            f"{shadow.as_uri()}?mode=ro",
+            uri=True,
+        ) as connection:
+            connection.execute("PRAGMA query_only=ON")
+            if connection.execute("PRAGMA query_only").fetchone() != (1,):
+                raise failed
+            schema_objects = connection.execute(
+                "SELECT type, name FROM sqlite_schema "
+                "WHERE name NOT LIKE 'sqlite_%' AND type IN ('table', 'view', 'trigger') "
+                "ORDER BY type, name"
+            ).fetchall()
+            tables = {name for kind, name in schema_objects if kind == "table"}
+            if (
+                any(kind != "table" for kind, _name in schema_objects)
+                or tables != set(_RUNTIME_DB_COLUMNS)
+            ):
+                raise failed
+            for table, expected_columns in _RUNTIME_DB_COLUMNS.items():
+                columns = tuple(
+                    row[1]
+                    for row in connection.execute(
+                        f'PRAGMA table_info("{table}")'
+                    ).fetchall()
+                )
+                if columns != expected_columns:
+                    raise failed
+
+            credential_rows = connection.execute(
+                "SELECT id, pin_salt, pin_hash, created_at, updated_at "
+                "FROM teacher_credentials ORDER BY id"
+            ).fetchall()
+            if (
+                len(credential_rows) != 1
+                or credential_rows[0][0] != 1
+                or not isinstance(credential_rows[0][1], str)
+                or re.fullmatch(r"[0-9a-f]{32}", credential_rows[0][1]) is None
+                or not isinstance(credential_rows[0][2], str)
+                or re.fullmatch(r"[0-9a-f]{128}", credential_rows[0][2]) is None
+                or not _valid_database_timestamp(credential_rows[0][3])
+                or not _valid_database_timestamp(credential_rows[0][4])
+            ):
+                raise failed
+            session_rows = connection.execute(
+                "SELECT id, token_hash, created_at FROM teacher_sessions ORDER BY id"
+            ).fetchall()
+            if (
+                not session_rows
+                or len({row[1] for row in session_rows}) != len(session_rows)
+                or any(
+                    type(row[0]) is not int
+                    or row[0] <= 0
+                    or not isinstance(row[1], str)
+                    or re.fullmatch(r"[0-9a-f]{64}", row[1]) is None
+                    or not _valid_database_timestamp(row[2])
+                    for row in session_rows
+                )
+            ):
+                raise failed
+            if connection.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchall() != [("20260902_0002",)]:
+                raise failed
+
+            texts: list[str] = []
+            for table, columns in _RUNTIME_DB_TEXT_COLUMNS.items():
+                selection = ", ".join(f'"{column}"' for column in columns)
+                rows = connection.execute(
+                    f'SELECT {selection} FROM "{table}" ORDER BY rowid'
+                ).fetchall()
+                for row in rows:
+                    for value in row:
+                        if value is None:
+                            continue
+                        if not isinstance(value, str):
+                            raise failed
+                        texts.append(value)
+            for table in ("chat_requests", "roster_requests"):
+                rows = connection.execute(
+                    f'SELECT response_json FROM "{table}" ORDER BY rowid'
+                ).fetchall()
+                for (response_json,) in rows:
+                    texts.extend(
+                        _database_response_texts(
+                            table=table,
+                            payload=response_json,
+                            failed=failed,
+                        )
+                    )
+    except HarnessSafetyError:
+        raise
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
+        raise failed from exc
     return tuple(texts)
 
 
@@ -3301,6 +4037,20 @@ def _assert_runtime_secrets_free_payload(
     if role == "SHA256SUMS":
         _validate_checksum_secret_index(payload, plan=pinned_plan)
         return
+    if role == "seed-baseline.json":
+        baseline = _canonical_secret_scan_object(payload, role=role)
+        texts = _seed_baseline_texts(
+            baseline,
+            plan=pinned_plan,
+            role=role,
+        )
+        _assert_secret_free_payload(
+            canonical_json_line(list(texts)).encode("utf-8"),
+            actual_secrets=runtime_secrets,
+            role=role,
+            apply_patterns=False,
+        )
+        return
     if role in {
         "controller-evidence.json",
         "issues.json",
@@ -3316,18 +4066,35 @@ def _assert_runtime_secrets_free_payload(
             apply_patterns=False,
         )
         return
+    if role in {
+        "duck-diary-uat.db",
+        "duck-diary-uat.db-shm",
+        "duck-diary-uat.db-wal",
+    }:
+        texts = _runtime_database_texts(plan=pinned_plan, role=role)
+        _assert_secret_free_payload(
+            canonical_json_line(list(texts)).encode("utf-8"),
+            actual_secrets=runtime_secrets,
+            role=role,
+            apply_patterns=False,
+        )
+        return
+    if role in {"logs/app.log", "logs/server.stderr.log"}:
+        messages = _runtime_log_messages(
+            payload,
+            role=role,
+            plan=pinned_plan,
+        )
+        _assert_secret_free_payload(
+            canonical_json_line(list(messages)).encode("utf-8"),
+            actual_secrets=runtime_secrets,
+            role=role,
+            apply_patterns=False,
+        )
+        return
     if role in {"resources.before.json", "resources.after.json"}:
         value = _canonical_secret_scan_object(payload, role=role)
-        if set(value) != {
-            "database",
-            "dirty_paths",
-            "git_head",
-            "git_porcelain",
-            "log",
-            "media",
-            "tts",
-        }:
-            raise HarnessSafetyError(f"secret scan failed: {role}")
+        _validate_resource_secret_index(value, plan=pinned_plan, role=role)
         return
     _assert_secret_free_payload(
         payload,
@@ -3360,6 +4127,7 @@ def scan_retained_artifacts(
     except OSError as exc:
         raise HarnessSafetyError("secret scan failed: artifact tree") from exc
     total = 0
+    protected_indexes: dict[str, bytes] = {}
     for path in candidates:
         entry = path.lstat()
         if stat.S_ISDIR(entry.st_mode) and not stat.S_ISLNK(entry.st_mode):
@@ -3387,6 +4155,8 @@ def scan_retained_artifacts(
         if total > 2_000_000_000:
             raise HarnessSafetyError("secret scan failed: artifact bound")
         role = path.relative_to(base).as_posix()
+        if role in {"resources.before.json", "resources.after.json"}:
+            protected_indexes[role] = payload
         reviewed_source = role.startswith("reviewed-source/")
         _assert_secret_free_payload(
             payload,
@@ -3408,6 +4178,12 @@ def scan_retained_artifacts(
                 _validate_png_container(payload)
             except HarnessSafetyError as exc:
                 raise HarnessSafetyError("secret scan failed: PNG metadata") from exc
+    if protected_indexes and (
+        set(protected_indexes) != {"resources.before.json", "resources.after.json"}
+        or protected_indexes["resources.before.json"]
+        != protected_indexes["resources.after.json"]
+    ):
+        raise HarnessSafetyError("secret scan failed: protected resource indexes")
     if pinned_plan is not None:
         assert_run_plan_identity(pinned_plan)
 
