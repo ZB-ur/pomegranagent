@@ -12,6 +12,7 @@ import io
 import logging
 import os
 from pathlib import Path
+import re
 import signal
 import sqlite3
 import stat
@@ -1337,30 +1338,53 @@ def test_live_server_accepts_only_canonical_macos_text_encoding(tmp_path, monkey
         "TZ": "Asia/Shanghai",
     }
     canonical = f"0x{os.geteuid():X}:0x19:0x34"
+    injected_locale = "C.UTF-8"
 
     if sys.platform == "darwin":
         injected = subprocess.run(
             (
                 PYTHON,
                 "-c",
-                "import os,sys; sys.stdout.write(os.environ.get('__CF_USER_TEXT_ENCODING',''))",
+                "import json,os,sys; sys.stdout.write(json.dumps({"
+                "'locale':os.environ.get('LC_CTYPE'),"
+                "'text_encoding':os.environ.get('__CF_USER_TEXT_ENCODING')},"
+                "sort_keys=True))",
             ),
             check=True,
             capture_output=True,
             env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
             text=True,
         )
-        assert injected.stdout == canonical
+        observed = json.loads(injected.stdout)
+        assert set(observed) == {"locale", "text_encoding"}
+        canonical = observed["text_encoding"]
+        injected_locale = observed["locale"]
+        canonical_hex = r"(?:0|[1-9A-F][0-9A-F]{0,7})"
+        assert re.fullmatch(
+            rf"0x{os.geteuid():X}:0x{canonical_hex}:0x{canonical_hex}",
+            canonical,
+        )
+        assert injected_locale in {"C.UTF-8", "UTF-8"}
 
     monkeypatch.setattr(server.sys, "platform", "darwin")
     paths = server.validate_child_environment(
         {
             **environment,
-            "LC_CTYPE": "C.UTF-8",
+            "LC_CTYPE": injected_locale,
             "__CF_USER_TEXT_ENCODING": canonical,
         }
     )
     assert paths.root == run_root
+    assert (
+        server.validate_child_environment(
+            {
+                **environment,
+                "LC_CTYPE": "UTF-8",
+                "__CF_USER_TEXT_ENCODING": canonical,
+            }
+        ).root
+        == run_root
+    )
     for invalid in (
         f"0x{os.geteuid() + 1:X}:0x19:0x34",
         f"0x{os.geteuid():X}:0x1a:0x34",
