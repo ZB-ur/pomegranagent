@@ -185,7 +185,7 @@ test('uses the frozen paths and options for every child HTTP method', async () =
       responseType: 'json', sequenceKey: 'child-complete-4',
     } },
     { path: `/api/tts?text=${encodeURIComponent('你好 &?')}`, options: {
-      signal, responseType: 'blob', timeoutMs: 10000, sequenceKey: 'child-tts',
+      signal, responseType: 'blob', timeoutMs: 20000, sequenceKey: 'child-tts',
     } },
   ]);
 });

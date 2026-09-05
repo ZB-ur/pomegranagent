@@ -3081,7 +3081,7 @@ GATE_TITLES = {
     7: "saved child exit, tracked analysis",
     8: "complete review round-trip",
     9: "review identity/time/ID/status",
-    10: "8-second bounded TTS fallback",
+    10: "15-second bounded TTS fallback",
     11: "roster replay",
     12: "undoable deactivation",
     13: "keyboard core flows",
@@ -3154,7 +3154,7 @@ browser | ^test_teacher_today_analysis_retry_offline_is_single_flight_until_tran
 browser | ^test_teacher_review_editor_saves_the_complete_normalized_draft_and_refreshes_only_queue\[(1024x768|1440x900)\]$ | 2 | 8
 browser | ^test_teacher_review_complete_confirm_uses_confirm_action_and_removes_the_pending_row\[(1024x768|1440x900)\]$ | 2 | 8
 browser | ^test_teacher_review_queue_and_detail_show_identity_time_id_and_status\[(1024x768|1440x900)\]$ | 2 | 9
-browser | ^test_tts_cold_start_uses_reachable_eight_second_fallback\[(1024x576|1280x720)\]$ | 2 | 10,14
+browser | ^test_tts_cold_start_uses_reachable_fifteen_second_fallback\[(1024x576|1280x720)\]$ | 2 | 10,14
 browser | ^test_tts_faults_settle_and_do_not_block_completion\[(edge_http_500|edge_non_json|edge_offline|play_rejected|audio_error|browser_speech_error)-(1024x576|1280x720)\]$ | 12 | 10,14
 browser | ^test_child_deactivation_uses_named_dialog_and_real_undo\[(1024x768|1440x900)\]$ | 2 | 12
 browser | ^test_children_management_is_labeled_strict_and_never_sends_delete\[(1024x768|1440x900)\]$ | 2 | 12
@@ -3277,7 +3277,7 @@ backend | ^test_review_detail_(uses_one_sqlite_snapshot_across_a_concurrent_atom
 backend | ^test_schema_three_head_initializes_singleton_teacher_pin_throttle$ | 1 | 1,14
 backend | ^test_(five_failures_allow_no_sixth_attempt_even_with_the_correct_pin|pin_failures_use_a_rolling_fifteen_minute_window|success_atomically_clears_recent_failure_state|failure_state_survives_a_new_testclient_session|six_concurrent_wrong_pins_are_serialized_at_the_global_limit|duplicate_setup_repairs_a_missing_throttle_singleton)$ | 6 | 3,14
 backend | ^test_(owned_process_group_reaps_real_short_lived_wnowait_child|exact_exited_leader_can_signal_only_prevalidated_same_session_descendants|exact_exited_leader_rejects_foreign_session_member_without_signal|live_server_accepts_only_canonical_macos_text_encoding)$ | 4 | 14
-browser | ^test_tts_5810ms_cold_start_uses_same_request_audio_path\[(1024x576|1280x720)\]$ | 2 | 10,14
+browser | ^test_tts_11000ms_cold_start_uses_same_request_audio_path\[(1024x576|1280x720)\]$ | 2 | 10,14
 browser | ^test_chat_11000ms_response_uses_same_request_and_audio_path\[(1024x576|1280x720)\]$ | 2 | 3,4,10,14
 backend | ^test_(llm_retry_fence_can_stop_the_second_transport_attempt|chat_reply_forwards_retry_fence_to_llm|chat_lease_renewal_requires_exact_owner_and_attempt_fence|chat_lease_guard_publishes_expiry_loss_atomically_with_renewal|terminal_chat_cas_checks_fresh_lease_time_without_changing_business_timestamps|terminal_chat_lease_clock_is_sampled_after_sqlite_writer_slot\[(success|failure)\]|fixed_max_round_route_uses_fresh_lease_time_before_terminal_write|pre_provider_failure_uses_fresh_lease_time_before_terminal_write\[(api|internal)\]|chat_heartbeat_recovers_after_one_transient_database_error|chat_heartbeat_marks_lease_lost_when_database_errors_outlive_expiry|chat_heartbeat_fences_one_failed_renewal_that_returns_after_lease_expiry|chat_heartbeat_marks_lost_before_any_post_miss_clock_work|chat_heartbeat_publishes_durable_renewal_before_retry_fence_rechecks|slow_chat_success_stays_owned_and_duplicate_cannot_reclaim_after_original_expiry|lost_chat_lease_discards_result_and_fences_provider_retry|slow_chat_failure_is_recorded_by_original_owner_after_lease_extension|chat_failure_reclaimed_after_heartbeat_join_returns_in_progress|chat_joins_inflight_heartbeat_before_terminal_database_write\[(success|failure)\])$ | 21 | 3,4,14
 """

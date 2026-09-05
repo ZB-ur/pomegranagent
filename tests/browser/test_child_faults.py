@@ -1583,7 +1583,7 @@ def test_tts_faults_settle_and_do_not_block_completion(
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
-def test_tts_5810ms_cold_start_uses_same_request_audio_path(
+def test_tts_11000ms_cold_start_uses_same_request_audio_path(
     child_page, exact_fixture_url, viewport
 ):
     page = child_page.page
@@ -1619,7 +1619,7 @@ def test_tts_5810ms_cold_start_uses_same_request_audio_path(
     assert len(tts_requests) == 1
     assert len(held_tts_routes) == 1
 
-    page.clock.fast_forward(5_810)
+    page.clock.fast_forward(11_000)
     assert page.evaluate("window.__childTest.audio.instances.length") == 0
     assert page.evaluate("window.__childTest.tts.utterances.length") == 0
     held_tts_routes[0].fulfill(
@@ -1640,7 +1640,7 @@ def test_tts_5810ms_cold_start_uses_same_request_audio_path(
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
-def test_tts_cold_start_uses_reachable_eight_second_fallback(
+def test_tts_cold_start_uses_reachable_fifteen_second_fallback(
     child_page, exact_fixture_url, viewport
 ):
     page = child_page.page
@@ -1694,7 +1694,7 @@ def test_tts_cold_start_uses_reachable_eight_second_fallback(
 
     stored = json.loads(page.evaluate("sessionStorage.getItem('duck-diary.child-session.v1')"))
     assert stored["state"] == "speaking"
-    page.clock.fast_forward(7_999)
+    page.clock.fast_forward(14_999)
     assert page.evaluate("window.__childTest.tts.utterances.length") == 0
     assert page.evaluate("window.__childTest.audio.instances.length") == 0
     with page.expect_event(

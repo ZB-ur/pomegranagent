@@ -2456,7 +2456,7 @@ EXPECTED_GATE_TITLES = {
     7: "saved child exit, tracked analysis",
     8: "complete review round-trip",
     9: "review identity/time/ID/status",
-    10: "8-second bounded TTS fallback",
+    10: "15-second bounded TTS fallback",
     11: "roster replay",
     12: "undoable deactivation",
     13: "keyboard core flows",
@@ -2599,7 +2599,7 @@ backend | ^test_schema_three_head_initializes_singleton_teacher_pin_throttle$ | 
 backend | ^test_(five_failures_allow_no_sixth_attempt_even_with_the_correct_pin|pin_failures_use_a_rolling_fifteen_minute_window|success_atomically_clears_recent_failure_state|failure_state_survives_a_new_testclient_session|six_concurrent_wrong_pins_are_serialized_at_the_global_limit|duplicate_setup_repairs_a_missing_throttle_singleton)$ | 6 | 3,14
 backend | ^test_(owned_process_group_reaps_real_short_lived_wnowait_child|exact_exited_leader_can_signal_only_prevalidated_same_session_descendants|exact_exited_leader_rejects_foreign_session_member_without_signal|live_server_accepts_only_canonical_macos_text_encoding)$ | 4 | 14"""
 
-_P6_UAT_INCIDENT_SELECTOR_ADDITIONS_TEXT = r"""browser | ^test_tts_5810ms_cold_start_uses_same_request_audio_path\[(1024x576|1280x720)\]$ | 2 | 10,14
+_P6_UAT_INCIDENT_SELECTOR_ADDITIONS_TEXT = r"""browser | ^test_tts_11000ms_cold_start_uses_same_request_audio_path\[(1024x576|1280x720)\]$ | 2 | 10,14
 browser | ^test_chat_11000ms_response_uses_same_request_and_audio_path\[(1024x576|1280x720)\]$ | 2 | 3,4,10,14
 backend | ^test_(llm_retry_fence_can_stop_the_second_transport_attempt|chat_reply_forwards_retry_fence_to_llm|chat_lease_renewal_requires_exact_owner_and_attempt_fence|chat_lease_guard_publishes_expiry_loss_atomically_with_renewal|terminal_chat_cas_checks_fresh_lease_time_without_changing_business_timestamps|terminal_chat_lease_clock_is_sampled_after_sqlite_writer_slot\[(success|failure)\]|fixed_max_round_route_uses_fresh_lease_time_before_terminal_write|pre_provider_failure_uses_fresh_lease_time_before_terminal_write\[(api|internal)\]|chat_heartbeat_recovers_after_one_transient_database_error|chat_heartbeat_marks_lease_lost_when_database_errors_outlive_expiry|chat_heartbeat_fences_one_failed_renewal_that_returns_after_lease_expiry|chat_heartbeat_marks_lost_before_any_post_miss_clock_work|chat_heartbeat_publishes_durable_renewal_before_retry_fence_rechecks|slow_chat_success_stays_owned_and_duplicate_cannot_reclaim_after_original_expiry|lost_chat_lease_discards_result_and_fences_provider_retry|slow_chat_failure_is_recorded_by_original_owner_after_lease_extension|chat_failure_reclaimed_after_heartbeat_join_returns_in_progress|chat_joins_inflight_heartbeat_before_terminal_database_write\[(success|failure)\])$ | 21 | 3,4,14"""
 
@@ -2624,7 +2624,7 @@ _P5_TTS_SELECTOR_ROW = (
 )
 _P6_TTS_SELECTOR_ROW = (
     "browser",
-    r"^test_tts_cold_start_uses_reachable_eight_second_fallback\[(1024x576|1280x720)\]$",
+    r"^test_tts_cold_start_uses_reachable_fifteen_second_fallback\[(1024x576|1280x720)\]$",
     2,
     (10, 14),
 )
@@ -2647,7 +2647,7 @@ _P6_AUDIT_FIX_SELECTOR_ADDITIONS_SHA256 = (
     "1f5be2060f97659b11bb8b92d140538446f22bf737a6b40af407817654e2237b"
 )
 _P6_UAT_INCIDENT_SELECTOR_ADDITIONS_SHA256 = (
-    "0dfd792db1bb4fce7de5b1a632b0906f5a3091b1b133e1e7c52ac71cd7c2bbed"
+    "096f9af80d91445ca2d18f344690af57225d21631b6e742150cb47c049a39929"
 )
 
 
@@ -4275,8 +4275,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "63af7e367ed6d59f29f9e98fd3d1bab976b338a89ca173fa94133e41a983ea18"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "012ebcd783a337f5ac9d42b87d4e8858923b29e7409368a176cfd40cbb0fd385"
+    assert hashlib.sha256(json_bytes).hexdigest() == "40d5bb5bf2395afc3f823cd45cf51ccec7de21793769d9f237a374d61b1fd810"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "987eb3a7672478199c12eaa7541dbe2c26cb74023fd37eec04fb7c85f4ebb373"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4841,8 +4841,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "a7ddc57292e69c57a29259bbdf703ac0e14679705a720ca044ab95cd944f43b7"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "9c99ef10ec5f08102ff596a55f6e92e7b55921e3e850f9b6db0780b114e77cd3"
+    assert hashlib.sha256(json_bytes).hexdigest() == "a8a3d38199ca82e822b67cabab182d136227ebf4ef3b3a2e8c6adf6083a0370f"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "03603939fa9074bde6d260af06accea0375719f6017692dd311c2a5dbe49bd9f"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown

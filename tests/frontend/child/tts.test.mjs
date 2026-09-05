@@ -104,7 +104,7 @@ test('edge audio settles after playback ends', async () => {
   assert.equal(clock.pending(), 0);
 });
 
-test('a 5810 ms Edge cold start reaches native playing and ended without fallback', async () => {
+test('an 11000 ms Edge cold start reaches native playing and ended without fallback', async () => {
   const clock = fakeClock();
   const audio = fakeAudio();
   let edgeLoads = 0;
@@ -112,7 +112,7 @@ test('a 5810 ms Edge cold start reaches native playing and ended without fallbac
   const tts = createTTSController({
     loadEdgeBlob: (_text, signal) => new Promise((resolve, reject) => {
       edgeLoads += 1;
-      const timer = clock.setTimer(() => resolve({ bytes: 'mp3' }), 5810);
+      const timer = clock.setTimer(() => resolve({ bytes: 'mp3' }), 11000);
       signal.addEventListener('abort', () => {
         clock.clearTimer(timer);
         reject(Object.assign(new Error('aborted'), { name: 'AbortError' }));
@@ -131,7 +131,7 @@ test('a 5810 ms Edge cold start reaches native playing and ended without fallbac
 
   const resultPromise = tts.speak('首次个性化问候');
   await tickMicrotasks();
-  clock.advance(5809);
+  clock.advance(10999);
   await tickMicrotasks();
   assert.equal(edgeLoads, 1);
   assert.equal(browserStarts, 0);
@@ -148,7 +148,7 @@ test('a 5810 ms Edge cold start reaches native playing and ended without fallbac
   assert.equal(clock.pending(), 0);
 });
 
-test('audio not playing at 8000 ms is aborted and falls back', async () => {
+test('audio not playing at 15000 ms is aborted and falls back', async () => {
   const clock = fakeClock();
   let aborted = false;
   const tts = createTTSController({
@@ -165,7 +165,7 @@ test('audio not playing at 8000 ms is aborted and falls back', async () => {
 
   const resultPromise = tts.speak('冷启动');
   await tickMicrotasks();
-  clock.advance(7999);
+  clock.advance(14999);
   assert.equal(aborted, false);
   clock.advance(1);
   assert.equal(aborted, true);
@@ -250,7 +250,7 @@ test('cancelling browser synthesis settles immediately and calls its cancellatio
   assert.equal(clock.pending(), 0);
 });
 
-test('onplaying before the 8000 ms timer wins the deterministic boundary race', async () => {
+test('onplaying before the 15000 ms timer wins the deterministic boundary race', async () => {
   const clock = fakeClock();
   const audio = fakeAudio();
   let browserStarts = 0;
@@ -270,14 +270,14 @@ test('onplaying before the 8000 ms timer wins the deterministic boundary race', 
   const resultPromise = tts.speak('刚好开始');
   await tickMicrotasks();
   audio.onplaying();
-  clock.advance(8000);
+  clock.advance(15000);
   audio.onended();
 
   assert.deepEqual(await resultPromise, { mode: 'edge', reason: 'ended' });
   assert.equal(browserStarts, 0);
 });
 
-test('timer first at 8000 ms aborts, pauses, revokes, and ignores captured late edge callbacks', async () => {
+test('timer first at 15000 ms aborts, pauses, revokes, and ignores captured late edge callbacks', async () => {
   const clock = fakeClock();
   const audio = fakeAudio();
   const revoked = [];
@@ -303,7 +303,7 @@ test('timer first at 8000 ms aborts, pauses, revokes, and ignores captured late 
   await tickMicrotasks();
   const latePlaying = audio.onplaying;
   const lateEnded = audio.onended;
-  clock.advance(8000);
+  clock.advance(15000);
   await tickMicrotasks();
   latePlaying();
   lateEnded();
@@ -336,7 +336,7 @@ test('a timeout before deferred loader invocation falls back safely and ignores 
   });
 
   const resultPromise = tts.speak('不刷新微任务');
-  clock.advance(8000);
+  clock.advance(15000);
   await tickMicrotasks();
   assert.equal(deferredLoaderSignal.aborted, true);
   resolveLateBlob({ bytes: 'late' });
@@ -576,7 +576,7 @@ test('a non-timeout Edge failure clears its cold timer before browser fallback r
 
   const resultPromise = tts.speak('请求错误');
   await tickMicrotasks();
-  clock.advance(8000);
+  assert.equal(clock.pending(), 1);
   assert.equal(browserSignal.aborted, false);
   settleBrowser({ mode: 'browser', reason: 'edge-request-error' });
 
@@ -629,7 +629,7 @@ test('late injected browser rejection after cancellation is absorbed under stric
   assert.equal(clock.pending(), 0);
 });
 
-test('caller timing overrides cannot shorten the fixed 8000 ms cold start or 15000 ms browser maximum', async () => {
+test('caller timing overrides cannot shorten the fixed 15000 ms cold start or browser maximum', async () => {
   const coldClock = fakeClock();
   const audio = fakeAudio();
   const coldTTS = createTTSController({
@@ -770,7 +770,7 @@ test('audio pause reentrancy during timeout cannot resurrect an old browser fall
 
   const resultPromise = tts.speak('暂停重入');
   await tickMicrotasks();
-  clock.advance(8000);
+  clock.advance(15000);
   assert.deepEqual(await resultPromise, { mode: 'cancelled', reason: 'pause-reentrant' });
   assert.equal(browserStarts, 0);
   assert.equal(clock.pending(), 0);
@@ -854,10 +854,14 @@ test('a timer that fires synchronously cannot leave its returned handle on an al
   const handles = new Set();
   let next = 0;
   let loaderCalls = 0;
+  let firedColdTimer = false;
   const setTimer = (callback, delay) => {
     const id = ++next;
     handles.add(id);
-    if (delay === 8000) callback();
+    if (delay === 15000 && !firedColdTimer) {
+      firedColdTimer = true;
+      callback();
+    }
     return id;
   };
   const tts = createTTSController({
@@ -919,7 +923,7 @@ test('an invalid second speak supersedes active work before returning invalid-te
   const active = tts.speak('有效第一句');
   await tickMicrotasks();
   const invalid = tts.speak('');
-  clock.advance(8000);
+  clock.advance(15000);
 
   assert.deepEqual(await active, { mode: 'cancelled', reason: 'superseded' });
   assert.deepEqual(await invalid, { mode: 'text', reason: 'invalid-text' });

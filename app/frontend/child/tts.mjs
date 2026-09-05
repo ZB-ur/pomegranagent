@@ -1,4 +1,4 @@
-const COLD_START_MS = 8000;
+const COLD_START_MS = 15000;
 const BROWSER_TIMEOUT_MS = 15000;
 const SCHEDULING = Symbol('scheduling');
 const SKIPPED = Symbol('skipped');
