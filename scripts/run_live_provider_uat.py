@@ -2632,6 +2632,49 @@ def _verified_group_members(
     return members
 
 
+def _owned_group_snapshot(
+    owned: OwnedProcess,
+    *,
+    observe: Callable[[OwnedProcess], int | None],
+    getpgid: Callable[[int], int],
+    getsid: Callable[[int], int],
+    group_members: Callable[[int], tuple[tuple[int, int], ...]],
+) -> tuple[int | None, tuple[tuple[int, int], ...]]:
+    """Inspect one retained group without rediscovering an exact exited child."""
+
+    try:
+        exit_status = observe(owned)
+    except HarnessSafetyError:
+        # Preserve the stronger live identity rejection for malformed owners;
+        # otherwise keep the exact-child observation error unchanged.
+        _owned_identity(owned, getpgid=getpgid, getsid=getsid)
+        raise
+    if exit_status is None:
+        try:
+            _owned_identity(owned, getpgid=getpgid, getsid=getsid)
+        except HarnessSafetyError:
+            # Darwin can transition a child to a waitable zombie between the
+            # non-reaping observation and the identity read.  Only an exact
+            # WNOWAIT result permits us to continue without live PID lookup.
+            exit_status = observe(owned)
+            if exit_status is None:
+                raise
+    members = _verified_group_members(
+        owned,
+        tuple(group_members(owned.pgid)),
+    )
+    if exit_status is None and not any(
+        pid == owned.pid for pid, _sid in members
+    ):
+        # The leader may have exited between its identity proof and the ps
+        # inventory.  Fail closed unless the exact retained child is now
+        # observable without reaping.
+        exit_status = observe(owned)
+        if exit_status is None:
+            raise HarnessSafetyError("process-group ownership is invalid")
+    return exit_status, members
+
+
 def _wait_owned_group_quiescent(
     owned: OwnedProcess,
     *,
@@ -2669,14 +2712,15 @@ def stop_owned_process_group(
     observe = _peek_owned_exit if peek_exit is None else peek_exit
     if getattr(owned.process, "returncode", None) is not None:
         raise HarnessSafetyError("process-group leader was reaped before cleanup")
-    _owned_identity(owned, getpgid=getpgid, getsid=getsid)
-    exit_status = observe(owned)
-    members = _verified_group_members(owned, tuple(group_members(owned.pgid)))
-    if not any(pid == owned.pid for pid, _sid in members):
-        raise HarnessSafetyError("process-group ownership is invalid")
+    exit_status, members = _owned_group_snapshot(
+        owned,
+        observe=observe,
+        getpgid=getpgid,
+        getsid=getsid,
+        group_members=group_members,
+    )
     try:
         if exit_status is None or any(pid != owned.pid for pid, _sid in members):
-            _owned_identity(owned, getpgid=getpgid, getsid=getsid)
             killpg(owned.pgid, signal.SIGTERM)
         if not _wait_owned_group_quiescent(
             owned,
@@ -2686,9 +2730,17 @@ def stop_owned_process_group(
             monotonic=monotonic,
             sleep=sleep,
         ):
-            _owned_identity(owned, getpgid=getpgid, getsid=getsid)
-            _verified_group_members(owned, tuple(group_members(owned.pgid)))
-            killpg(owned.pgid, signal.SIGKILL)
+            exit_status, members = _owned_group_snapshot(
+                owned,
+                observe=observe,
+                getpgid=getpgid,
+                getsid=getsid,
+                group_members=group_members,
+            )
+            if exit_status is None or any(
+                pid != owned.pid for pid, _sid in members
+            ):
+                killpg(owned.pgid, signal.SIGKILL)
             if not _wait_owned_group_quiescent(
                 owned,
                 group_members=group_members,

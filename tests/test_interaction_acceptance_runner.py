@@ -2596,7 +2596,8 @@ backend | ^test_(launch_server_process_hands_validated_owner_to_outer_guardian|s
 backend | ^test_second_round_(unverified_launch_cleanup_retains_exact_process_and_errors|unverified_seed_cleanup_retains_exact_process_and_errors|start_attaches_pending_session_for_outer_takeover|execute_recovers_pending_session_from_failed_starter|entrypoint_guardian_retries_validated_owner_until_reaped|entrypoint_latches_sigterm_until_guardian_reaps_owner|early_sigterm_is_not_lost_before_main_execute|execute_rejects_preexisting_termination_before_resources|main_rejects_sigterm_latched_inside_execute|signal_aware_stream_does_not_yield_after_select_race|signal_after_terminal_linearization_is_not_latched|entrypoint_guardian_never_returns_with_pending_owner|entrypoint_guardian_reaps_exact_unverified_process_only|start_preserves_unverified_process_when_other_cleanup_fails|guardian_retries_pending_session_finalization_to_terminal|telemetry_invalid_payload_joins_once_and_rethrows_same_error|telemetry_unexpected_parser_error_fails_closed|session_converges_terminal_telemetry_error_without_redrain|execute_preserves_primary_cleanup_and_finalization_order|failed_manifest_does_not_replace_pending_validated_owner|write_fd_close_after_close_cannot_hit_reused_descriptor|read_fd_transfer_cannot_close_collector_reused_descriptor|collector_constructor_failure_closes_borrowed_read_fd|atomic_write_close_after_close_cannot_hit_reused_descriptor|terminal_commit_fsyncs_parent_after_replace|terminal_commit_rejects_signal_during_precommit|terminal_replace_failure_clears_completion_latch|terminal_replace_then_raise_is_verified_as_committed|terminal_replace_ambiguity_retries_transient_verification|directory_traversal_close_after_close_preserves_reused_fd\[(absolute|plan-root|plan-parent)\]|output_fd_is_closed_when_parent_descriptor_close_fails|seed_nonzero_primary_survives_cleanup_failure|reaped_status_mismatch_marks_process_resource_complete|entrypoint_finishes_generic_pending_session_resources|startup_complete_marker_resources_reach_entrypoint_guardian|startup_cleanup_success_retains_unfinished_telemetry|preowner_startup_failure_retains_collector_until_guardian|preoutput_startup_failure_retains_collector_until_guardian|fdopen_failure_closes_raw_output_before_retaining_collector)$ | 41 | 14
 backend | ^test_review_detail_(uses_one_sqlite_snapshot_across_a_concurrent_atomic_save|reuses_an_existing_sqlite_transaction|success_preserves_a_callers_pending_sqlite_transaction|error_preserves_a_callers_pending_sqlite_transaction|preserves_a_callers_unflushed_orm_transaction|releases_its_owned_snapshot_after_an_unexpected_error|begin_failure_releases_helper_created_session_transaction|begin_failure_preserves_caller_owned_orm_transaction)$ | 8 | 8,9,14
 backend | ^test_schema_three_head_initializes_singleton_teacher_pin_throttle$ | 1 | 1,14
-backend | ^test_(five_failures_allow_no_sixth_attempt_even_with_the_correct_pin|pin_failures_use_a_rolling_fifteen_minute_window|success_atomically_clears_recent_failure_state|failure_state_survives_a_new_testclient_session|six_concurrent_wrong_pins_are_serialized_at_the_global_limit|duplicate_setup_repairs_a_missing_throttle_singleton)$ | 6 | 3,14"""
+backend | ^test_(five_failures_allow_no_sixth_attempt_even_with_the_correct_pin|pin_failures_use_a_rolling_fifteen_minute_window|success_atomically_clears_recent_failure_state|failure_state_survives_a_new_testclient_session|six_concurrent_wrong_pins_are_serialized_at_the_global_limit|duplicate_setup_repairs_a_missing_throttle_singleton)$ | 6 | 3,14
+backend | ^test_(owned_process_group_reaps_real_short_lived_wnowait_child|exact_exited_leader_can_signal_only_prevalidated_same_session_descendants|exact_exited_leader_rejects_foreign_session_member_without_signal)$ | 3 | 14"""
 
 
 _P5_SELECTOR_ORACLE = (
@@ -2613,7 +2614,7 @@ _P6_POST_REVIEW_SELECTOR_ADDITIONS_SHA256 = (
     "ed7fe56d4422466c4f88b5e27a208fb89e0d57297bbbc2dccb724b2f7440f24b"
 )
 _P6_AUDIT_FIX_SELECTOR_ADDITIONS_SHA256 = (
-    "91d6d15b889431432faaacf5136ecbfd6508937c51808f5c24fa2c570b51df58"
+    "6d0723979dc293e76851a24b95f79e004d48247b241a3ffb1ed8d44df7b34531"
 )
 
 
@@ -2734,7 +2735,7 @@ def test_literal_p5_selector_oracle_is_exact_ordered_prefix_with_p6_suffix_separ
     assert len(p5_rows) == 97
     assert len(p6_rows) == 56
     assert len(post_review_rows) == 5
-    assert len(audit_fix_rows) == 30
+    assert len(audit_fix_rows) == 31
     p6_end = len(p5_rows) + len(p6_rows)
     post_review_end = p6_end + len(post_review_rows)
     assert actual_rows[: len(p5_rows)] == p5_rows
@@ -2832,7 +2833,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
 
     assert actual_today_retry_rows == EXPECTED_TODAY_RETRY_SELECTOR_ROWS
     assert actual_rows == expected_rows
-    assert len(actual_rows) == 188
+    assert len(actual_rows) == 189
     assert module.GATE_TITLES == EXPECTED_GATE_TITLES
     assert tuple(
         (item.source, item.evidence_id, item.expected_count, item.gates)
@@ -2857,7 +2858,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
             ]
             assert len(matches) == 1
         materialized_count += len(node_ids)
-    assert materialized_count == 497
+    assert materialized_count == 500
 
     assert module.SELECTOR_TO_GATES == {
         (row.command_id, row.node_pattern): row.gates for row in module.SELECTOR_MANIFEST
@@ -4200,8 +4201,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "5917bd5e5dc18484134a562de19850656cbed4ff8dc73fa8abda2325f67fc2cf"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "9b86960b77ea1b3618281dcb36d90072c04409cd6257d70a1fcc96ae991ff0c7"
+    assert hashlib.sha256(json_bytes).hexdigest() == "f45d9481d966139f3f6d801929782d0d50a00361ca78512262aeaab320eb3b8b"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "10b7605952c0fbc2d0eaa785fad38e45075207e0e5dfc81564b3c164fc508388"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4766,8 +4767,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "02267453bd7f0fffe056ca4ea3a9163206dd7c57bc335e226fd1e1263444f04c"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "4aa02cfde380e83ca2364df6ee70b093e7a44fc40425cf6dcaa4a64df0f1fd38"
+    assert hashlib.sha256(json_bytes).hexdigest() == "d28fd35457a13860ac1ec326df9ab1aa18ce624b934838922d6796a91c37122d"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "7f8de97bc7899ffba7fa4c9584ca0e3242f6707dcb7ffcba2632d90d1b0d86ed"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown

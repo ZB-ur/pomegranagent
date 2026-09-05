@@ -3583,6 +3583,104 @@ def test_waitid_exit_peek_uses_wnowait_and_never_reaps():
     assert calls[0][2] & os.WNOHANG
     assert process.returncode is None
 
+
+@pytest.mark.skipif(
+    any(not hasattr(os, name) for name in ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT")),
+    reason="exact unreaped-child observation is unavailable",
+)
+def test_owned_process_group_reaps_real_short_lived_wnowait_child():
+    module = _module()
+    process = subprocess.Popen(
+        (PYTHON, "-c", "pass"),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
+        close_fds=True,
+    )
+    owned = module.OwnedProcess(
+        process=process,
+        pid=process.pid,
+        pgid=process.pid,
+        sid=process.pid,
+    )
+
+    try:
+        observed = module._wait_owned_exit_unreaped(
+            owned,
+            timeout=5,
+            peek_exit=module._peek_owned_exit,
+        )
+
+        assert observed == 0
+        assert process.returncode is None
+        assert module.stop_owned_process_group(owned) == 0
+        assert process.returncode == 0
+    finally:
+        if process.returncode is None:
+            process.wait(timeout=5)
+
+
+def test_exact_exited_leader_can_signal_only_prevalidated_same_session_descendants():
+    module = _module()
+    process = _FakeProcess(pid=43210)
+    owned = module.OwnedProcess(process, process.pid, process.pid, process.pid)
+    signalled = False
+    signals = []
+
+    def members(_pgid):
+        return () if signalled else ((43211, process.pid),)
+
+    def killpg(pgid, signum):
+        nonlocal signalled
+        signals.append((pgid, signum))
+        signalled = True
+
+    assert (
+        module.stop_owned_process_group(
+            owned,
+            getpgid=lambda _pid: pytest.fail(
+                "an exact exited leader must not be rediscovered"
+            ),
+            getsid=lambda _pid: pytest.fail(
+                "an exact exited leader must not be rediscovered"
+            ),
+            group_members=members,
+            killpg=killpg,
+            peek_exit=lambda _owned: 0,
+            monotonic=lambda: 0.0,
+            sleep=lambda _seconds: pytest.fail("the group should converge immediately"),
+        )
+        == 0
+    )
+    assert signals == [(process.pid, signal.SIGTERM)]
+    assert process.wait_timeouts == [5]
+
+
+def test_exact_exited_leader_rejects_foreign_session_member_without_signal():
+    module = _module()
+    process = _FakeProcess(pid=43210)
+    owned = module.OwnedProcess(process, process.pid, process.pid, process.pid)
+    signals = []
+
+    with pytest.raises(module.HarnessSafetyError, match="process-group ownership"):
+        module.stop_owned_process_group(
+            owned,
+            getpgid=lambda _pid: pytest.fail(
+                "an exact exited leader must not be rediscovered"
+            ),
+            getsid=lambda _pid: pytest.fail(
+                "an exact exited leader must not be rediscovered"
+            ),
+            group_members=lambda _pgid: ((43211, 99999),),
+            killpg=lambda pgid, signum: signals.append((pgid, signum)),
+            peek_exit=lambda _owned: 0,
+        )
+
+    assert signals == []
+    assert process.returncode is None
+
+
 def test_owned_process_group_rejects_already_reaped_leader_before_any_group_signal():
     module = _module()
     leader = _FakeProcess(pid=43210)
