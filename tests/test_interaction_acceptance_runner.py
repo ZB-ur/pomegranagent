@@ -2232,6 +2232,39 @@ def test_authenticated_browser_junit_accepts_p6_geometry_properties():
     )
 
 
+def test_focus_evidence_label_oracle_covers_current_teacher_modal_journey():
+    module = importlib.import_module("scripts.run_interaction_acceptance")
+
+    assert module._FOCUS_EVIDENCE_LABELS == (
+        "input",
+        "confirmation-input",
+        "native-button",
+        "route-h1",
+        "nav-button",
+        "link",
+        "route-h2",
+        "primary-blue-button",
+        "white-panel-control",
+        "create-dialog-target",
+        "create-dialog-return",
+        "gray-button",
+        "dialog-target",
+        "dialog-return",
+        "duck-primary-button",
+        "textarea",
+        "duck-dialog-return",
+        "select",
+    )
+
+    viewport = {"height": 768, "width": 1024}
+    assert (
+        module._validate_focus_property(
+            _structured_property_payload("focus", viewport), "1024x768"
+        )
+        is True
+    )
+
+
 def test_junit_parser_counts_failure_error_skip_xfail_and_xpass(tmp_path):
     module = importlib.import_module("scripts.run_interaction_acceptance")
     path = _write_junit(
@@ -3256,17 +3289,22 @@ def _timeout_report_result(module, command_id, child_exit, stdout):
 
 _FOCUS_LABELS = (
     "input",
+    "confirmation-input",
     "native-button",
     "route-h1",
     "nav-button",
     "link",
     "route-h2",
-    "white-panel-control",
     "primary-blue-button",
+    "white-panel-control",
+    "create-dialog-target",
+    "create-dialog-return",
     "gray-button",
     "dialog-target",
     "dialog-return",
+    "duck-primary-button",
     "textarea",
+    "duck-dialog-return",
     "select",
 )
 
@@ -4162,8 +4200,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "7cb8a4c0825f55d97f8a3d3d9b9eb9d15c68dcb21d2f46952fe70d16738a830b"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "1b19c3c444eb0493c56447b706164775c3aed5c43104bdf515500f88a3bf3ef8"
+    assert hashlib.sha256(json_bytes).hexdigest() == "5917bd5e5dc18484134a562de19850656cbed4ff8dc73fa8abda2325f67fc2cf"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "9b86960b77ea1b3618281dcb36d90072c04409cd6257d70a1fcc96ae991ff0c7"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):

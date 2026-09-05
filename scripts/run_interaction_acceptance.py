@@ -1323,17 +1323,22 @@ _TRIPWIRE_EVENT_REPORT_KEYS = frozenset(TripwireEventEvidence.__dataclass_fields
 _INTERNAL_REPORT_KEYS = frozenset(InternalEvidence.__dataclass_fields__)
 _FOCUS_EVIDENCE_LABELS = (
     "input",
+    "confirmation-input",
     "native-button",
     "route-h1",
     "nav-button",
     "link",
     "route-h2",
-    "white-panel-control",
     "primary-blue-button",
+    "white-panel-control",
+    "create-dialog-target",
+    "create-dialog-return",
     "gray-button",
     "dialog-target",
     "dialog-return",
+    "duck-primary-button",
     "textarea",
+    "duck-dialog-return",
     "select",
 )
 
