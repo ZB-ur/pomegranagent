@@ -4553,6 +4553,64 @@ def test_teacher_pin_scan_ignores_validated_log_timestamp_and_runtime_path(tmp_p
     )
 
 
+def test_teacher_pin_scan_accepts_alembic_plugin_startup_log(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.app_log.parent.mkdir(mode=0o700)
+    log_payload = (
+        "2026-09-06 04:50:36,109 alembic.runtime.plugins INFO "
+        "setup plugin alembic.autogenerate.schemas\n"
+    )
+    plan.app_log.write_text(log_payload, encoding="utf-8")
+    plan.server_stderr.write_text(log_payload, encoding="utf-8")
+
+    module.scan_retained_artifacts(
+        plan.root,
+        provider_secrets=("sk-alembic-log-provider-secret",),
+        runtime_secrets=("483921",),
+        pinned_plan=plan,
+    )
+
+
+def test_teacher_pin_scan_rejects_unregistered_alembic_child_logger(tmp_path):
+    module = _module()
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.app_log.parent.mkdir(mode=0o700)
+    plan.app_log.write_text(
+        "2026-09-06 04:50:36,109 alembic.runtime.plugins.child INFO "
+        "setup plugin alembic.autogenerate.schemas\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-alembic-child-provider-secret",),
+            runtime_secrets=("483921",),
+            pinned_plan=plan,
+        )
+
+
+def test_teacher_pin_scan_rejects_pin_in_alembic_plugin_log(tmp_path):
+    module = _module()
+    teacher_pin = "483921"
+    plan = module.create_run_plan(_repository(tmp_path), HEAD)
+    plan.app_log.parent.mkdir(mode=0o700)
+    plan.app_log.write_text(
+        "2026-09-06 04:50:36,109 alembic.runtime.plugins INFO "
+        f"setup plugin {teacher_pin}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(module.HarnessSafetyError, match="secret scan failed"):
+        module.scan_retained_artifacts(
+            plan.root,
+            provider_secrets=("sk-alembic-pin-provider-secret",),
+            runtime_secrets=(teacher_pin,),
+            pinned_plan=plan,
+        )
+
+
 def test_teacher_pin_scan_ignores_validated_seed_machine_metadata(tmp_path):
     module = _module()
     source_head = "b831e39eae3b7120e08763622668bd19f3aedb68"

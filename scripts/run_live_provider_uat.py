@@ -4206,7 +4206,7 @@ def _runtime_summary_texts(
 
 _RUNTIME_LOG_LINE = re.compile(
     r"(?P<timestamp>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2},\d{3}) "
-    r"(?P<logger>(?:duck_diary(?:\.[a-z_]+)*|uvicorn(?:\.[a-z_]+)*|"
+    r"(?P<logger>(?:alembic\.runtime\.plugins|duck_diary(?:\.[a-z_]+)*|uvicorn(?:\.[a-z_]+)*|"
     r"py\.warnings|asyncio|httpx)) "
     r"(?P<level>DEBUG|INFO|WARNING|ERROR|CRITICAL) "
     r"(?P<message>[^\r\n]*)\n"
