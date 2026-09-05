@@ -1308,6 +1308,59 @@ def test_live_server_validates_exact_runtime_paths_and_redacts_log_records(tmp_p
     assert "duck_teacher_session" not in rendered
 
 
+def test_live_server_accepts_only_canonical_macos_text_encoding(tmp_path, monkeypatch):
+    server = importlib.import_module("scripts.live_provider_uat_server")
+    run_root = (tmp_path / "retained-run").resolve()
+    run_root.mkdir(mode=0o700)
+    database = run_root / "duck-diary-uat.db"
+    database.write_bytes(b"sqlite-placeholder")
+    (run_root / "media").mkdir(mode=0o700)
+    (run_root / "tts-cache").mkdir(mode=0o700)
+    (run_root / "logs").mkdir(mode=0o700)
+    (run_root / "logs/app.log").write_bytes(b"")
+    environment = {
+        "APP_BUSINESS_TIMEZONE": "Asia/Shanghai",
+        "APP_DB_MODE": "app",
+        "APP_DB_PATH": str(database),
+        "APP_LOG_PATH": str(run_root / "logs/app.log"),
+        "APP_MEDIA_ROOT": str(run_root / "media"),
+        **_install_server_source_boundary(run_root),
+        "APP_TTS_CACHE_PATH": str(run_root / "tts-cache"),
+        "DEEPSEEK_API_KEY": "sk-server-secret-1234567890",
+        "DEEPSEEK_BASE_URL": "https://api.deepseek.com/v1",
+        "DEEPSEEK_MAX_TOKENS": "8192",
+        "DEEPSEEK_MODEL": "deepseek-safe-model",
+        "DEEPSEEK_TIMEOUT": "120",
+        "PATH": "/synthetic/bin",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHON_DOTENV_DISABLED": "1",
+        "TZ": "Asia/Shanghai",
+    }
+    canonical = f"0x{os.geteuid():X}:0x19:0x34"
+
+    monkeypatch.setattr(server.sys, "platform", "darwin")
+    paths = server.validate_child_environment(
+        {**environment, "__CF_USER_TEXT_ENCODING": canonical}
+    )
+    assert paths.root == run_root
+    for invalid in (
+        f"0x{os.geteuid() + 1:X}:0x19:0x34",
+        f"0x{os.geteuid():x}:0x19:0x34",
+        f"0x{os.geteuid():X}:0x019:0x34",
+        f"0x{os.geteuid():X}:0x19:0x34:extra",
+    ):
+        with pytest.raises(server.ServerSafetyError, match="environment"):
+            server.validate_child_environment(
+                {**environment, "__CF_USER_TEXT_ENCODING": invalid}
+            )
+
+    monkeypatch.setattr(server.sys, "platform", "linux")
+    with pytest.raises(server.ServerSafetyError, match="environment"):
+        server.validate_child_environment(
+            {**environment, "__CF_USER_TEXT_ENCODING": canonical}
+        )
+
+
 def test_live_server_ai_telemetry_is_bounded_metadata_without_exception_text():
     server = importlib.import_module("scripts.live_provider_uat_server")
     harness = _module()

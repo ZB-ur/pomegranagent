@@ -47,6 +47,7 @@ APP_KEYS = {
     "APP_TTS_CACHE_PATH",
 }
 NEUTRAL_KEYS = {
+    "__CF_USER_TEXT_ENCODING",
     "LANG",
     "LC_ALL",
     "PATH",
@@ -412,6 +413,21 @@ def assert_runtime_paths_pinned(paths: RuntimePaths) -> None:
     _assert_source_inventory(paths)
 
 
+def _valid_macos_text_encoding(source: Mapping[str, str]) -> bool:
+    value = source.get("__CF_USER_TEXT_ENCODING")
+    if value is None:
+        return True
+    canonical_hex = r"(?:0|[1-9A-F][0-9A-F]{0,7})"
+    return (
+        sys.platform == "darwin"
+        and re.fullmatch(
+            rf"0x{os.geteuid():X}:0x{canonical_hex}:0x{canonical_hex}",
+            value,
+        )
+        is not None
+    )
+
+
 def validate_child_environment(
     environment: Mapping[str, str] | None = None,
 ) -> RuntimePaths:
@@ -430,6 +446,7 @@ def validate_child_environment(
         or source.get("PYTHONNOUSERSITE") != "1"
         or source.get("TZ") != "Asia/Shanghai"
         or not source.get("DEEPSEEK_API_KEY")
+        or not _valid_macos_text_encoding(source)
     ):
         raise ServerSafetyError("live server environment is invalid")
 
