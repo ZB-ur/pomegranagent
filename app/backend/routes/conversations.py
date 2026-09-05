@@ -3,13 +3,13 @@ from __future__ import annotations
 
 import logging
 from datetime import timezone
-from typing import Literal
+from typing import Callable, Literal
 
 import httpx
 from fastapi import APIRouter, Depends, Request
 from pydantic import ValidationError
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, sessionmaker
 from starlette.concurrency import run_in_threadpool
 
 from .. import ai_engine, models, schemas
@@ -21,6 +21,7 @@ from ..services.analysis import retry_analysis
 from ..services.chat import (
     FIXED_MAX_ROUNDS_REPLY,
     build_chat_context,
+    chat_lease_heartbeat,
     claim_chat_request,
     commit_chat_success,
     record_chat_failure,
@@ -290,18 +291,23 @@ def _validated_ai_reply(result: object) -> tuple[str, bool, str | None]:
     return reply.strip(), ended, end_reason
 
 
-@router.post("/api/chat", response_model=schemas.ChatResponse)
-def chat(
+def _chat_request(
     payload: schemas.ChatRequest,
-    db: Session = Depends(get_db),
+    db: Session,
+    *,
+    session_factory: Callable[[], Session],
+    clock: BusinessClock,
+    lease_seconds: float = 45,
+    heartbeat_interval_seconds: float | None = None,
 ) -> schemas.ChatResponse:
-    business_now = BUSINESS_CLOCK.business_now()
+    business_now = clock.business_now()
     now = business_now.astimezone(timezone.utc).replace(tzinfo=None)
     claim = claim_chat_request(
         db,
         payload,
         now=now,
         business_date=business_now.date(),
+        lease_seconds=lease_seconds,
     )
     if claim.replay is not None:
         return claim.replay.model_copy(update={"replayed": True})
@@ -310,7 +316,20 @@ def chat(
         try:
             context = build_chat_context(db, claim, payload)
         except APIError as exc:
-            record_chat_failure(db, claim=claim, code=exc.code, now=now)
+            db.rollback()
+            if not record_chat_failure(
+                db,
+                claim=claim,
+                code=exc.code,
+                now=now,
+                lease_clock=clock.utc_now,
+            ):
+                raise APIError(
+                    409,
+                    "REQUEST_IN_PROGRESS",
+                    "请求正在处理中",
+                    retryable=True,
+                ) from None
             raise
 
         # No transaction stays open while the external provider runs.
@@ -324,36 +343,70 @@ def chat(
                 ended=True,
                 end_reason="max_rounds",
                 now=now,
+                lease_clock=clock.utc_now,
             )
 
-        try:
-            result = ai_engine.chat_reply(
-                child=context.child,
-                recent_summary=context.recent_summary,
-                ducks_info=context.ducks_info,
-                history=list(context.history),
-                round_num=context.round,
-                max_rounds=payload.max_rounds,
+        provider_error: Exception | None = None
+        result: object | None = None
+        with chat_lease_heartbeat(
+            session_factory,
+            claim=claim,
+            clock=clock.utc_now,
+            lease_seconds=lease_seconds,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+        ) as lease_guard:
+            try:
+                result = ai_engine.chat_reply(
+                    child=context.child,
+                    recent_summary=context.recent_summary,
+                    ducks_info=context.ducks_info,
+                    history=list(context.history),
+                    round_num=context.round,
+                    max_rounds=payload.max_rounds,
+                    should_retry=lambda: lease_guard.retry_allowed(clock.utc_now),
+                )
+            except Exception as exc:
+                provider_error = exc
+
+        # Preserve the single business timestamp sample for transcript fields,
+        # but fence terminal ownership against the actual post-provider time.
+        if lease_guard.is_set():
+            db.rollback()
+            raise APIError(
+                409,
+                "REQUEST_IN_PROGRESS",
+                "请求正在处理中",
+                retryable=True,
             )
-            reply, ended, end_reason = _validated_ai_reply(result)
-        except (httpx.HTTPError, TimeoutError, ConnectionError) as exc:
+        if isinstance(provider_error, (httpx.HTTPError, TimeoutError, ConnectionError)):
+            exc = provider_error
             logger.warning(
                 "chat upstream failure request_id=%s error_type=%s",
                 claim.request_id,
                 type(exc).__name__,
             )
-            record_chat_failure(
+            if not record_chat_failure(
                 db,
                 claim=claim,
                 code="CHAT_UPSTREAM_FAILED",
                 now=now,
-            )
+                lease_clock=clock.utc_now,
+            ):
+                raise APIError(
+                    409,
+                    "REQUEST_IN_PROGRESS",
+                    "请求正在处理中",
+                    retryable=True,
+                ) from None
             raise APIError(
                 503,
                 "CHAT_UPSTREAM_FAILED",
                 "对话服务暂时不可用，请稍后重试",
                 retryable=True,
             )
+        if provider_error is not None:
+            raise provider_error
+        reply, ended, end_reason = _validated_ai_reply(result)
 
         return commit_chat_success(
             db,
@@ -363,6 +416,7 @@ def chat(
             ended=ended,
             end_reason=end_reason,
             now=now,
+            lease_clock=clock.utc_now,
         )
     except APIError:
         raise
@@ -373,15 +427,44 @@ def chat(
             claim.request_id,
             type(exc).__name__,
         )
-        record_chat_failure(
+        if not record_chat_failure(
             db,
             claim=claim,
             code="CHAT_INTERNAL_FAILED",
             now=now,
-        )
+            lease_clock=clock.utc_now,
+        ):
+            raise APIError(
+                409,
+                "REQUEST_IN_PROGRESS",
+                "请求正在处理中",
+                retryable=True,
+            ) from None
         raise APIError(
             500,
             "INTERNAL_ERROR",
             "服务暂时不可用，请稍后重试",
             retryable=True,
         )
+
+
+def _session_factory_for(db: Session) -> Callable[[], Session]:
+    """Create heartbeat sessions on the same engine as the request dependency."""
+    return sessionmaker(
+        autocommit=False,
+        autoflush=False,
+        bind=db.get_bind(),
+    )
+
+
+@router.post("/api/chat", response_model=schemas.ChatResponse)
+def chat(
+    payload: schemas.ChatRequest,
+    db: Session = Depends(get_db),
+) -> schemas.ChatResponse:
+    return _chat_request(
+        payload,
+        db,
+        session_factory=_session_factory_for(db),
+        clock=BUSINESS_CLOCK,
+    )

@@ -242,10 +242,6 @@ export function createChildView(root, actions, dom) {
     return panel;
   }
 
-  function submissionRetryAvailable(snapshot, controls) {
-    return snapshot.draft !== null && snapshot.child !== null && !controls.retryDisabled;
-  }
-
   function petOrb(snapshot, controls) {
     const orb = element('section', {
       class: 'child-pet-orb',
@@ -353,7 +349,7 @@ export function createChildView(root, actions, dom) {
       'aria-atomic': 'true',
       tabindex: '-1',
     });
-    appendText(status, statusFor(snapshot));
+    appendText(status, statusFor(snapshot, controls));
     nextFocusTargets.set('#child-status', status);
     append(state, stateHeader, stage, status);
     append(shellContent, state);
@@ -458,7 +454,7 @@ export function createChildView(root, actions, dom) {
 
   function submissionFailureCopy(snapshot, controls) {
     return submissionRetryAvailable(snapshot, controls)
-      ? '这句话还没有送达，原话已经保留'
+      ? '暂时没有收到日记本的确认，原话已经保留'
       : '不存在可重发的草稿，请老师帮忙';
   }
 
@@ -1208,7 +1204,11 @@ function isInvisibleEdgeGrapheme(grapheme) {
   return /^(?:\s|\p{Default_Ignorable_Code_Point})+$/u.test(grapheme);
 }
 
-function statusFor(snapshot) {
+function submissionRetryAvailable(snapshot, controls) {
+  return snapshot.draft !== null && snapshot.child !== null && !controls.retryDisabled;
+}
+
+function statusFor(snapshot, controls) {
   switch (snapshot.value) {
     case 'welcome': return '准备好后，请按开始';
     case 'loading_roster': return '正在加载今天的值日小朋友';
@@ -1218,9 +1218,9 @@ function statusFor(snapshot) {
     case 'listening': return '正在听，停顿后会自动发送';
     case 'submitting': return '这句话正在发给鸭鸭日记本';
     case 'speaking': return '鸭鸭日记本正在回答';
-    case 'submission_failed': return snapshot.draft === null || snapshot.child === null
-      ? '这句话没有可重发的草稿，请老师帮忙'
-      : '这句话还没有送达，原话已经保留';
+    case 'submission_failed': return submissionRetryAvailable(snapshot, controls)
+      ? '暂时没有收到日记本的确认，原话已经保留'
+      : '不存在可重发的草稿，请老师帮忙';
     case 'saving_conversation': return '正在安全保存今天的话';
     case 'completed': return '今天的话已经安全记下来啦';
     case 'recovery': return snapshot.error?.code === 'MIC_PERMISSION_DENIED'
@@ -1246,7 +1246,7 @@ function focusTargetFor(snapshot, controls) {
     case 'speaking':
     case 'saving_conversation': return '#child-status';
     case 'submission_failed':
-      return snapshot.draft !== null && snapshot.child !== null && !controls.retryDisabled
+      return submissionRetryAvailable(snapshot, controls)
         ? '#retry-button'
         : '#teacher-help-button';
     case 'completed': return '#reset-button';

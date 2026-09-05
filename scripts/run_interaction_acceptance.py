@@ -1347,7 +1347,7 @@ def _structured_node_id(kind: str, viewport_id: str) -> str:
     test_names = {
         "focus": "test_release_focus_indicator_meets_three_to_one",
         "db": "test_release_teacher_action_persists_to_disposable_sqlite",
-        "timeout": "test_first_chat_timeout_retains_draft_and_reuses_request_id_once",
+        "timeout": "test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_once",
         "search": "test_release_search_filters_results_and_focus_stay_in_bounds",
         "today": "test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds",
     }
@@ -1882,21 +1882,21 @@ _TIMEOUT_PROPERTY_KEYS = {
     "activation_sequence",
     "body_reused_exactly",
     "chat_attempts",
-    "completion_requests_at_9999",
+    "completion_requests_at_29999",
     "completion_requests_during_failure_boundary",
-    "durable_bytes_unchanged_at_9999",
-    "failure_transitions_at_10000",
+    "durable_bytes_unchanged_at_29999",
+    "failure_transitions_at_30000",
     "header_matches_body_request_id",
-    "outstanding_chat_requests_at_9999",
+    "outstanding_chat_requests_at_29999",
     "request_id_sha256",
-    "retry_controls_at_10000",
-    "retry_controls_at_9999",
+    "retry_controls_at_30000",
+    "retry_controls_at_29999",
     "retry_requests",
-    "state_at_10000",
-    "state_at_9999",
-    "success_copy_at_9999",
+    "state_at_30000",
+    "state_at_29999",
+    "success_copy_at_29999",
     "timeout_ms",
-    "tts_requests_at_9999",
+    "tts_requests_at_29999",
     "tts_requests_during_failure_boundary",
     "viewport",
     "viewport_id",
@@ -1910,21 +1910,21 @@ def _validate_timeout_property(value: object, viewport_id: str) -> bool:
         and value.get("activation_sequence") == ["Enter", "Space", "Enter"]
         and value.get("body_reused_exactly") is True
         and value.get("chat_attempts") == 2
-        and value.get("completion_requests_at_9999") == 0
+        and value.get("completion_requests_at_29999") == 0
         and value.get("completion_requests_during_failure_boundary") == 0
-        and value.get("durable_bytes_unchanged_at_9999") is True
-        and value.get("failure_transitions_at_10000") == 1
+        and value.get("durable_bytes_unchanged_at_29999") is True
+        and value.get("failure_transitions_at_30000") == 1
         and value.get("header_matches_body_request_id") is True
-        and value.get("outstanding_chat_requests_at_9999") == 1
+        and value.get("outstanding_chat_requests_at_29999") == 1
         and _valid_sha256(value.get("request_id_sha256"))
-        and value.get("retry_controls_at_10000") == 1
-        and value.get("retry_controls_at_9999") == 0
+        and value.get("retry_controls_at_30000") == 1
+        and value.get("retry_controls_at_29999") == 0
         and value.get("retry_requests") == 1
-        and value.get("state_at_10000") == "submission_failed"
-        and value.get("state_at_9999") == "submitting"
-        and value.get("success_copy_at_9999") is False
-        and value.get("timeout_ms") == 10_000
-        and value.get("tts_requests_at_9999") == 0
+        and value.get("state_at_30000") == "submission_failed"
+        and value.get("state_at_29999") == "submitting"
+        and value.get("success_copy_at_29999") is False
+        and value.get("timeout_ms") == 30_000
+        and value.get("tts_requests_at_29999") == 0
         and value.get("tts_requests_during_failure_boundary") == 0
         and value.get("viewport_id") == viewport_id
         and _exact_viewport(value.get("viewport"), viewport_id)
@@ -3133,7 +3133,7 @@ browser | ^test_teacher_locked_bootstrap_makes_only_runtime_and_auth_requests\[(
 browser | ^test_teacher_runtime_failure_keeps_maintenance_and_makes_zero_auth_or_business_requests\[(1024x768|1440x900)\]$ | 2 | 2
 browser | ^test_teacher_auth_status_failure_is_safe_and_makes_zero_business_requests\[(1024x768|1440x900)\]$ | 2 | 2
 browser | ^test_chat_retryable_fault_reuses_persisted_request_id_once\[(1024x576|1280x720)\]$ | 2 | 3
-browser | ^test_first_chat_timeout_retains_draft_and_reuses_request_id_once\[(1024x576|1280x720)\]$ | 2 | 3,4,14
+browser | ^test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_once\[(1024x576|1280x720)\]$ | 2 | 3,4,14
 browser | ^test_chat_fault_matrix_retains_draft_without_success_copy\[(http_500|non_json|offline)-(1024x576|1280x720)\]$ | 6 | 3,4,14
 browser | ^test_completion_delay_is_single_flight_and_saves_once\[(1024x576|1280x720)\]$ | 2 | 3,7,14
 browser | ^test_teacher_review_put_timeout_preserves_dirty_values_and_restores_focus\[(seed_review_timeout_1024|review_timeout_1440)\]$ | 2 | 3,14
@@ -3278,6 +3278,8 @@ backend | ^test_schema_three_head_initializes_singleton_teacher_pin_throttle$ | 
 backend | ^test_(five_failures_allow_no_sixth_attempt_even_with_the_correct_pin|pin_failures_use_a_rolling_fifteen_minute_window|success_atomically_clears_recent_failure_state|failure_state_survives_a_new_testclient_session|six_concurrent_wrong_pins_are_serialized_at_the_global_limit|duplicate_setup_repairs_a_missing_throttle_singleton)$ | 6 | 3,14
 backend | ^test_(owned_process_group_reaps_real_short_lived_wnowait_child|exact_exited_leader_can_signal_only_prevalidated_same_session_descendants|exact_exited_leader_rejects_foreign_session_member_without_signal|live_server_accepts_only_canonical_macos_text_encoding)$ | 4 | 14
 browser | ^test_tts_5810ms_cold_start_uses_same_request_audio_path\[(1024x576|1280x720)\]$ | 2 | 10,14
+browser | ^test_chat_11000ms_response_uses_same_request_and_audio_path\[(1024x576|1280x720)\]$ | 2 | 3,4,10,14
+backend | ^test_(llm_retry_fence_can_stop_the_second_transport_attempt|chat_reply_forwards_retry_fence_to_llm|chat_lease_renewal_requires_exact_owner_and_attempt_fence|chat_lease_guard_publishes_expiry_loss_atomically_with_renewal|terminal_chat_cas_checks_fresh_lease_time_without_changing_business_timestamps|terminal_chat_lease_clock_is_sampled_after_sqlite_writer_slot\[(success|failure)\]|fixed_max_round_route_uses_fresh_lease_time_before_terminal_write|pre_provider_failure_uses_fresh_lease_time_before_terminal_write\[(api|internal)\]|chat_heartbeat_recovers_after_one_transient_database_error|chat_heartbeat_marks_lease_lost_when_database_errors_outlive_expiry|chat_heartbeat_fences_one_failed_renewal_that_returns_after_lease_expiry|chat_heartbeat_marks_lost_before_any_post_miss_clock_work|chat_heartbeat_publishes_durable_renewal_before_retry_fence_rechecks|slow_chat_success_stays_owned_and_duplicate_cannot_reclaim_after_original_expiry|lost_chat_lease_discards_result_and_fences_provider_retry|slow_chat_failure_is_recorded_by_original_owner_after_lease_extension|chat_failure_reclaimed_after_heartbeat_join_returns_in_progress|chat_joins_inflight_heartbeat_before_terminal_database_write\[(success|failure)\])$ | 21 | 3,4,14
 """
 
 
@@ -4556,14 +4558,14 @@ def build_command_specs(repo_root: Path, artifact_root: Path) -> tuple[CommandSp
             "child_chat_timeout_1024",
             artifact_root,
             (
-                "tests/browser/test_child_faults.py::test_first_chat_timeout_retains_draft_and_reuses_request_id_once[1024x576]",
+                "tests/browser/test_child_faults.py::test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_once[1024x576]",
             ),
         ),
         _pytest_spec(
             "child_chat_timeout_all",
             artifact_root,
             (
-                "tests/browser/test_child_faults.py::test_first_chat_timeout_retains_draft_and_reuses_request_id_once",
+                "tests/browser/test_child_faults.py::test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_once",
             ),
         ),
         _pytest_spec(

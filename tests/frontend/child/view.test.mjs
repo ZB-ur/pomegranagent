@@ -482,7 +482,7 @@ test('renders all twelve states with unique semantic frame, exact status, and fo
     ['listening', '正在听，停顿后会自动发送', 'record-button'],
     ['submitting', '这句话正在发给鸭鸭日记本', 'child-status'],
     ['speaking', '鸭鸭日记本正在回答', 'child-status'],
-    ['submission_failed', '这句话还没有送达，原话已经保留', 'retry-button'],
+    ['submission_failed', '暂时没有收到日记本的确认，原话已经保留', 'retry-button'],
     ['saving_conversation', '正在安全保存今天的话', 'child-status'],
     ['completed', '今天的话已经安全记下来啦', 'reset-button'],
     ['recovery', '需要老师帮忙恢复这次对话', 'teacher-help-button'],
@@ -766,6 +766,21 @@ test('uses panel log semantics, aligned visible speakers, and an in-panel unconf
   assert.equal(fake.root.textContent.includes('分析完成'), false);
 });
 
+test('uses one defensive no-retry conclusion across the failure row and live status', () => {
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions(), fake.dom);
+  view.render(snapshotFor('submission_failed', {
+    error: { code: 'NETWORK_ERROR', retryable: false, message: 'untrusted server detail' },
+  }));
+
+  const expected = '不存在可重发的草稿，请老师帮忙';
+  const failure = find(fake.root, node => node.getAttribute?.('class') === 'child-message child-message--failure');
+  assert.ok(failure);
+  assert.equal(failure.textContent.includes(expected), true);
+  assert.equal(byId(fake.root, 'child-status').textContent, expected);
+  assert.equal(byId(fake.root, 'retry-button'), null);
+});
+
 for (const [label, overrides] of [
   ['empty transcript', {
     child: null,
@@ -822,7 +837,7 @@ test('uses machine retry authorization and routes incomplete retry state to enab
   teacherHelp.render(snapshotFor('submission_failed', { child: null, draft: null }));
   defensive.flush();
   assert.equal(byId(defensive.root, 'retry-button'), null);
-  assert.equal(byId(defensive.root, 'child-status').textContent, '这句话没有可重发的草稿，请老师帮忙');
+  assert.equal(byId(defensive.root, 'child-status').textContent, '不存在可重发的草稿，请老师帮忙');
   assert.equal(defensive.focused(), byId(defensive.root, 'teacher-help-button'));
   assert.equal(teacherHelp.focus('#teacher-help-button'), true);
 });

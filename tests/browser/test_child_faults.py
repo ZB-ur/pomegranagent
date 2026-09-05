@@ -663,7 +663,119 @@ def test_near_limit_preserved_draft_scrolls_inside_its_fixed_row_without_overlap
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
-def test_first_chat_timeout_retains_draft_and_reuses_request_id_once(
+def test_chat_11000ms_response_uses_same_request_and_audio_path(
+    child_page, exact_fixture_url, viewport
+):
+    page = child_page.page
+    page.clock.install(time=1_700_000_000)
+    page.set_viewport_size(viewport)
+    port = child_page.server.port
+    held = []
+    chat_bodies = []
+    chat_header_ids = []
+    tts_requests = []
+
+    child_page.fulfill_json("**/api/roster/today", [SYNTHETIC_CHILD])
+    child_page.fulfill_json(
+        "**/api/children/1/active-conversation", SYNTHETIC_ACTIVE
+    )
+
+    def chat(route):
+        assert exact_fixture_url(route.request.url, port)
+        chat_bodies.append(route.request.post_data_json)
+        chat_header_ids.append(route.request.headers.get("x-request-id"))
+        held.append(route)
+
+    def tts(route):
+        assert exact_fixture_url(route.request.url, port)
+        tts_requests.append(route.request.url)
+        route.fulfill(status=200, content_type="audio/mpeg", body=b"synthetic-audio")
+
+    page.route("**/api/chat", chat)
+    page.route("**/api/tts?*", tts)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="开始", exact=True).click()
+    page.get_by_role("button", name="开始说话", exact=True).click()
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+    page.evaluate(
+        """() => {
+          window.__p6ChatStates = [];
+          window.__p6ChatState = document.querySelector('.child-view').dataset.state;
+          window.__p6ChatObserver = new MutationObserver(() => {
+            const state = document.querySelector('.child-view')?.dataset.state;
+            if (state && state !== window.__p6ChatState) {
+              window.__p6ChatStates.push(state);
+              window.__p6ChatState = state;
+            }
+          });
+          window.__p6ChatObserver.observe(document.body, {
+            attributes: true,
+            childList: true,
+            subtree: true,
+          });
+        }"""
+    )
+    page.evaluate(
+        "window.__childTest.recognition.emitResult(0, '我看见小鸭排队喝水。', true)"
+    )
+    with page.expect_request(lambda request: request.url.endswith("/api/chat")):
+        page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.evaluate("() => Promise.resolve()")
+
+    assert len(held) == 1
+    assert len(chat_bodies) == 1
+    request_id = chat_bodies[0]["request_id"]
+    assert chat_header_ids == [request_id]
+    assert page.locator(".child-view").get_attribute("data-state") == "submitting"
+
+    page.clock.fast_forward(11_000)
+    page.evaluate("() => Promise.resolve()")
+    states_before_response = page.evaluate("window.__p6ChatStates")
+    assert page.locator(".child-view").get_attribute("data-state") == "submitting"
+    assert "submission_failed" not in states_before_response
+    assert len(chat_bodies) == 1
+    assert tts_requests == []
+
+    held[0].fulfill(
+        status=200,
+        content_type="application/json",
+        body=json.dumps(_chat_success_for(chat_bodies[0])),
+    )
+    page.wait_for_function(
+        """() => document.querySelector('.child-view')?.dataset.state === 'speaking'
+          && window.__childTest.audio.instances.length === 1"""
+    )
+    states_after_response = page.evaluate("window.__p6ChatStates")
+    assert "submission_failed" not in states_after_response
+    assert states_after_response[-1] == "speaking"
+    assert len(chat_bodies) == 1
+    assert chat_header_ids == [request_id]
+    assert chat_bodies[0]["request_id"] == request_id
+    assert len(tts_requests) == 1
+    assert parse_qs(urlsplit(tts_requests[0]).query) == {
+        "text": ["今天的小鸭很开心。"]
+    }
+    assert page.evaluate("window.__childTest.audio.instances[0].playCalls") == 1
+
+    regular_message_texts = page.locator(
+        ".child-conversation-panel .child-message:not(.child-message--pending):not(.child-message--failure) "
+        ".child-message__text"
+    ).all_inner_texts()
+    assert regular_message_texts == [
+        "我给小鸭准备了清水。",
+        "谢谢你认真照顾小鸭。",
+        "我看见小鸭排队喝水。",
+        "今天的小鸭很开心。",
+    ]
+    assert page.locator("#pending-draft").count() == 0
+
+    page.evaluate("window.__childTest.audio.emitPlaying(0)")
+    page.evaluate("window.__childTest.audio.emitEnded(0)")
+    page.get_by_role("button", name="开始说话", exact=True).wait_for()
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
+def test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_once(
     child_page, exact_fixture_url, viewport, record_property
 ):
     page = child_page.page
@@ -741,39 +853,39 @@ def test_first_chat_timeout_retains_draft_and_reuses_request_id_once(
         }"""
     )
 
-    page.clock.fast_forward(9_999)
+    page.clock.fast_forward(29_999)
     page.evaluate("() => Promise.resolve()")
-    state_at_9999 = page.locator(".child-view").get_attribute("data-state")
-    durable_at_9999 = page.evaluate(
+    state_at_29999 = page.locator(".child-view").get_attribute("data-state")
+    durable_at_29999 = page.evaluate(
         "sessionStorage.getItem('duck-diary.child-session.v1')"
     )
-    retry_controls_at_9999 = page.get_by_role(
+    retry_controls_at_29999 = page.get_by_role(
         "button", name="重新发送", exact=True
     ).count()
-    page_text_at_9999 = page.locator("body").inner_text()
-    success_copy_at_9999 = any(
-        copy in page_text_at_9999
+    page_text_at_29999 = page.locator("body").inner_text()
+    success_copy_at_29999 = any(
+        copy in page_text_at_29999
         for copy in ("今天的小鸭很开心。", "今天的话已经安全记下来啦")
     )
-    assert state_at_9999 == "submitting"
-    assert durable_at_9999 == serialized_before
+    assert state_at_29999 == "submitting"
+    assert durable_at_29999 == serialized_before
     assert len(held) == 1
-    assert retry_controls_at_9999 == 0
+    assert retry_controls_at_29999 == 0
     assert len(chat_bodies) == 1
     assert tts_requests == []
     assert completion_requests == []
-    assert success_copy_at_9999 is False
+    assert success_copy_at_29999 is False
 
     page.clock.fast_forward(1)
     retry = page.get_by_role("button", name="重新发送", exact=True)
     retry.wait_for()
-    state_at_10000 = page.locator(".child-view").get_attribute("data-state")
-    retry_controls_at_10000 = retry.count()
+    state_at_30000 = page.locator(".child-view").get_attribute("data-state")
+    retry_controls_at_30000 = retry.count()
     timeout_transitions = page.evaluate("window.__task9TimeoutTransitions")
-    failure_transitions_at_10000 = timeout_transitions.count("submission_failed")
-    assert state_at_10000 == "submission_failed"
-    assert retry_controls_at_10000 == 1
-    assert failure_transitions_at_10000 == 1
+    failure_transitions_at_30000 = timeout_transitions.count("submission_failed")
+    assert state_at_30000 == "submission_failed"
+    assert retry_controls_at_30000 == 1
+    assert failure_transitions_at_30000 == 1
     assert len(held) == 1
     assert len(chat_bodies) == 1
     assert tts_requests == []
@@ -790,7 +902,7 @@ def test_first_chat_timeout_retains_draft_and_reuses_request_id_once(
     assert "今天的话已经安全记下来啦" not in page_text
     assert tts_requests == []
     assert completion_requests == []
-    page.clock.fast_forward(10_000)
+    page.clock.fast_forward(30_000)
     page.evaluate("() => Promise.resolve()")
     timeout_transitions = page.evaluate("window.__task9TimeoutTransitions")
     assert timeout_transitions.count("submission_failed") == 1
@@ -823,25 +935,25 @@ def test_first_chat_timeout_retains_draft_and_reuses_request_id_once(
                 "activation_sequence": ["Enter", "Space", "Enter"],
                 "body_reused_exactly": chat_bodies[1] == chat_bodies[0],
                 "chat_attempts": len(chat_bodies),
-                "completion_requests_at_9999": 0,
+                "completion_requests_at_29999": 0,
                 "completion_requests_during_failure_boundary": len(completion_requests),
-                "durable_bytes_unchanged_at_9999": durable_at_9999
+                "durable_bytes_unchanged_at_29999": durable_at_29999
                 == serialized_before,
-                "failure_transitions_at_10000": failure_transitions_at_10000,
+                "failure_transitions_at_30000": failure_transitions_at_30000,
                 "header_matches_body_request_id": chat_header_ids
                 == [request_id, request_id],
-                "outstanding_chat_requests_at_9999": 1,
+                "outstanding_chat_requests_at_29999": 1,
                 "request_id_sha256": hashlib.sha256(
                     request_id.encode("utf-8")
                 ).hexdigest(),
-                "retry_controls_at_10000": retry_controls_at_10000,
-                "retry_controls_at_9999": retry_controls_at_9999,
+                "retry_controls_at_30000": retry_controls_at_30000,
+                "retry_controls_at_29999": retry_controls_at_29999,
                 "retry_requests": len(chat_bodies) - 1,
-                "state_at_10000": state_at_10000,
-                "state_at_9999": state_at_9999,
-                "success_copy_at_9999": success_copy_at_9999,
-                "timeout_ms": 10_000,
-                "tts_requests_at_9999": 0,
+                "state_at_30000": state_at_30000,
+                "state_at_29999": state_at_29999,
+                "success_copy_at_29999": success_copy_at_29999,
+                "timeout_ms": 30_000,
+                "tts_requests_at_29999": 0,
                 "tts_requests_during_failure_boundary": len(tts_requests),
                 "viewport": viewport,
                 "viewport_id": f'{viewport["width"]}x{viewport["height"]}',
@@ -1898,7 +2010,7 @@ def test_fault_recovery_preserves_accessibility_and_projection_constraints(
         _assert_fault_projection_accessibility(
             page,
             expected_focus="#retry-button",
-            expected_alert="这句话还没有送达，原话已经保留",
+            expected_alert="暂时没有收到日记本的确认，原话已经保留",
         )
         assert "raw-chat-a11y-secret" not in page.locator("body").inner_text()
         return

@@ -6,6 +6,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 
 import httpx
 from dotenv import load_dotenv
@@ -20,7 +21,12 @@ MODEL = os.getenv("DEEPSEEK_MODEL", "deepseek-v4-pro")
 TIMEOUT = float(os.getenv("DEEPSEEK_TIMEOUT", "120"))
 
 
-def _llm(messages: list[dict], json_mode: bool = False, retries: int = 1) -> str:
+def _llm(
+    messages: list[dict],
+    json_mode: bool = False,
+    retries: int = 1,
+    should_retry: Callable[[], bool] | None = None,
+) -> str:
     """调用 DeepSeek chat completions，返回文本内容（失败自动重试 1 次）。"""
     payload = {
         "model": MODEL,
@@ -43,8 +49,8 @@ def _llm(messages: list[dict], json_mode: bool = False, retries: int = 1) -> str
         except Exception as e:  # noqa: BLE001
             last_err = e
             logger.warning("LLM 调用失败（第 %d 次）：%s", attempt + 1, e)
-            if attempt < retries:
-                continue
+            if attempt >= retries or (should_retry is not None and not should_retry()):
+                break
     logger.error("LLM 调用最终失败：%s", last_err)
     raise last_err
 
@@ -92,6 +98,7 @@ def chat_reply(
     history: list[dict],
     round_num: int,
     max_rounds: int,
+    should_retry: Callable[[], bool] | None = None,
 ) -> dict:
     """生成「鸭鸭日记本」的下一句回复，并判断是否可提前结束。"""
     context = (
@@ -104,7 +111,7 @@ def chat_reply(
     for h in history:
         messages.append({"role": h["role"], "content": h["text"]})
 
-    raw = _llm(messages, json_mode=True)
+    raw = _llm(messages, json_mode=True, should_retry=should_retry)
     try:
         return _parse_json(raw)
     except Exception:

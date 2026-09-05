@@ -1,7 +1,10 @@
 """Contract tests for idempotent, recoverable child chat submissions."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+import importlib.util
+from datetime import datetime, timedelta, timezone
+from threading import Event, Thread
+from time import monotonic, sleep
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
@@ -28,6 +31,7 @@ class FakeChatAI:
     def __init__(self) -> None:
         self.call_count = 0
         self.calls: list[dict] = []
+        self.on_call = None
         self.result: object = {
             "reply": "真棒！还有呢？",
             "ended": False,
@@ -37,6 +41,8 @@ class FakeChatAI:
     def __call__(self, **kwargs):
         self.call_count += 1
         self.calls.append(kwargs)
+        if self.on_call is not None:
+            self.on_call()
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
@@ -127,6 +133,10 @@ def test_new_chat_uses_one_business_clock_sample_for_date_and_utc_timestamps(
                 raise AssertionError("chat request read the business clock twice")
             return business_now
 
+        @staticmethod
+        def utc_now() -> datetime:
+            return business_now.astimezone(timezone.utc)
+
     monkeypatch.setattr(conversation_routes, "BUSINESS_CLOCK", Clock)
 
     response = client.post("/api/chat", json=_chat_payload(child_id=child.id))
@@ -187,11 +197,100 @@ def _active_conversation(db_session, child_id: int) -> models.Conversation:
     return conversation
 
 
+def test_llm_retry_fence_can_stop_the_second_transport_attempt(monkeypatch):
+    """Catches a lost chat lease still spending the automatic provider retry."""
+    shared_llm_guard = ai_engine._llm
+    spec = importlib.util.spec_from_file_location(
+        "isolated_chat_retry_ai_engine",
+        ai_engine.__file__,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    isolated_ai_engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(isolated_ai_engine)
+    transport_calls = 0
+
+    def unavailable_provider(*_args, **_kwargs):
+        nonlocal transport_calls
+        transport_calls += 1
+        raise httpx.ConnectError("synthetic provider unavailable")
+
+    monkeypatch.setattr(isolated_ai_engine.httpx, "post", unavailable_provider)
+
+    with pytest.raises(httpx.ConnectError):
+        isolated_ai_engine._llm(
+            [{"role": "user", "content": "synthetic"}],
+            retries=1,
+            should_retry=lambda: False,
+        )
+
+    assert transport_calls == 1
+    transport_calls = 0
+    with pytest.raises(httpx.ConnectError):
+        isolated_ai_engine._llm(
+            [{"role": "user", "content": "synthetic"}],
+            retries=1,
+        )
+    assert transport_calls == 2
+    assert ai_engine._llm is shared_llm_guard
+
+
+def test_chat_reply_forwards_retry_fence_to_llm(monkeypatch):
+    """Catches chat_reply dropping the ownership fence before its internal retry loop."""
+    spec = importlib.util.spec_from_file_location(
+        "isolated_chat_reply_ai_engine",
+        ai_engine.__file__,
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    isolated_ai_engine = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(isolated_ai_engine)
+    observed_fences = []
+
+    def llm(_messages, *, json_mode, should_retry):
+        assert json_mode is True
+        observed_fences.append(should_retry)
+        return '{"reply":"继续说吧","ended":false,"end_reason":null}'
+
+    monkeypatch.setattr(isolated_ai_engine, "_llm", llm)
+
+    def retry_fence() -> bool:
+        return False
+
+    response = isolated_ai_engine.chat_reply(
+        child={"name": "小雨", "nickname": "雨雨"},
+        recent_summary="今天喂了小鸭",
+        ducks_info="小黄：活泼",
+        history=[{"role": "user", "text": "今天喂了小鸭"}],
+        round_num=1,
+        max_rounds=3,
+        should_retry=retry_fence,
+    )
+
+    assert response == {"reply": "继续说吧", "ended": False, "end_reason": None}
+    assert observed_fences == [retry_fence]
+
+
 def _message(db_session, conversation_id: int, role: str, text: str) -> models.Message:
     message = models.Message(conversation_id=conversation_id, role=role, text=text)
     db_session.add(message)
     db_session.commit()
     return message
+
+
+def _wait_for_chat_lease_extension(request_id: str, *, beyond: datetime) -> datetime:
+    deadline = monotonic() + 1
+    while monotonic() < deadline:
+        with SessionLocal() as session:
+            lease_expires_at = session.scalar(
+                select(models.ChatRequestRecord.lease_expires_at).where(
+                    models.ChatRequestRecord.request_id == request_id
+                )
+            )
+        if lease_expires_at is not None and lease_expires_at > beyond.replace(tzinfo=None):
+            return lease_expires_at
+        sleep(0.005)
+    pytest.fail("chat lease heartbeat did not extend the durable lease")
 
 
 def test_duplicate_request_replays_stored_pair_without_a_second_ai_call(
@@ -271,6 +370,1100 @@ def test_live_lease_returns_retryable_request_in_progress(
 
     _error(response, status=409, code="REQUEST_IN_PROGRESS", retryable=True)
     assert fake_chat_ai.call_count == 0
+
+
+def test_chat_lease_renewal_requires_exact_owner_and_attempt_fence(
+    db_session,
+    child_factory,
+):
+    """Catches a stale chat attempt extending the current owner's lease."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    clock = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    claim = claim_chat_request(
+        db_session,
+        payload,
+        now=clock.replace(tzinfo=None),
+        business_date=clock.date(),
+        lease_seconds=6,
+    )
+    db_session.rollback()
+
+    wrong_owner = chat_service.ChatClaim(
+        request_id=claim.request_id,
+        conversation_id=claim.conversation_id,
+        replay=None,
+        lease_owner="wrong-owner",
+        attempt_count=claim.attempt_count,
+        lease_expires_at=claim.lease_expires_at,
+    )
+    wrong_attempt = chat_service.ChatClaim(
+        request_id=claim.request_id,
+        conversation_id=claim.conversation_id,
+        replay=None,
+        lease_owner=claim.lease_owner,
+        attempt_count=claim.attempt_count + 1,
+        lease_expires_at=claim.lease_expires_at,
+    )
+    assert chat_service.renew_chat_request_lease(
+        SessionLocal,
+        claim=wrong_owner,
+        clock=lambda: clock + timedelta(seconds=2),
+        lease_seconds=6,
+    ) is None
+    assert chat_service.renew_chat_request_lease(
+        SessionLocal,
+        claim=wrong_attempt,
+        clock=lambda: clock + timedelta(seconds=2),
+        lease_seconds=6,
+    ) is None
+    assert chat_service.renew_chat_request_lease(
+        SessionLocal,
+        claim=claim,
+        clock=lambda: clock + timedelta(seconds=2),
+        lease_seconds=6,
+    ) == datetime(2026, 9, 5, 12, 0, 8)
+    assert chat_service.renew_chat_request_lease(
+        SessionLocal,
+        claim=claim,
+        clock=lambda: clock + timedelta(seconds=9),
+        lease_seconds=6,
+    ) is None
+
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, claim.request_id)
+    assert saved is not None
+    assert saved.lease_expires_at == datetime(2026, 9, 5, 12, 0, 8)
+
+
+def test_chat_lease_guard_publishes_expiry_loss_atomically_with_renewal():
+    """Catches an expired retry fence racing a concurrent deadline publication."""
+    expiry = datetime(2026, 9, 5, 12, 0, 6)
+    guard = chat_service.ChatLeaseGuard(expiry)
+    loss_started = Event()
+    release_loss = Event()
+    renewal_finished = Event()
+    retry_results: list[bool] = []
+    renewal_results: list[bool] = []
+
+    class BlockingEvent:
+        def __init__(self) -> None:
+            self.inner = Event()
+
+        def is_set(self) -> bool:
+            return self.inner.is_set()
+
+        def set(self) -> None:
+            loss_started.set()
+            assert release_loss.wait(2)
+            self.inner.set()
+
+    guard._lost = BlockingEvent()  # type: ignore[assignment]
+
+    retry_thread = Thread(
+        target=lambda: retry_results.append(guard.retry_allowed(lambda: expiry))
+    )
+    retry_thread.start()
+    assert loss_started.wait(1)
+
+    def publish_renewal() -> None:
+        renewal_results.append(
+            guard.record_renewal(
+                now=expiry - timedelta(seconds=1),
+                lease_seconds=6,
+            )
+        )
+        renewal_finished.set()
+
+    renewal_thread = Thread(target=publish_renewal)
+    renewal_thread.start()
+    try:
+        assert not renewal_finished.wait(0.1)
+    finally:
+        release_loss.set()
+        retry_thread.join(2)
+        renewal_thread.join(2)
+
+    assert not retry_thread.is_alive()
+    assert not renewal_thread.is_alive()
+    assert retry_results == [False]
+    assert renewal_results == [False]
+
+
+def test_terminal_chat_cas_checks_fresh_lease_time_without_changing_business_timestamps(
+    db_session,
+    child_factory,
+):
+    """Catches an expired owner committing because terminal CAS reused request-start time."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    business_now = datetime(2026, 9, 5, 12, 0)
+    claim = claim_chat_request(
+        db_session,
+        payload,
+        now=business_now,
+        business_date=business_now.date(),
+        lease_seconds=6,
+    )
+
+    with pytest.raises(APIError) as stale_success:
+        commit_chat_success(
+            db_session,
+            claim=claim,
+            payload=payload,
+            reply="迟到的回复",
+            ended=False,
+            end_reason=None,
+            now=business_now,
+            lease_now=datetime(2026, 9, 5, 12, 0, 7, tzinfo=timezone.utc),
+        )
+
+    assert stale_success.value.code == "REQUEST_IN_PROGRESS"
+    assert record_chat_failure(
+        db_session,
+        claim=claim,
+        code="CHAT_UPSTREAM_FAILED",
+        now=business_now,
+        lease_now=datetime(2026, 9, 5, 12, 0, 7, tzinfo=timezone.utc),
+    ) is False
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, claim.request_id)
+    assert saved is not None
+    assert saved.status == "processing"
+    assert saved.updated_at == business_now
+    assert db_session.scalar(select(func.count(models.Message.id))) == 0
+
+
+@pytest.mark.parametrize("terminal_kind", ("success", "failure"))
+def test_terminal_chat_lease_clock_is_sampled_after_sqlite_writer_slot(
+    db_session,
+    child_factory,
+    terminal_kind,
+):
+    """Catches a writer wait turning a pre-lock lease timestamp stale."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    business_now = datetime(2026, 9, 5, 12, 0)
+    claim = claim_chat_request(
+        db_session,
+        payload,
+        now=business_now,
+        business_date=business_now.date(),
+        lease_seconds=6,
+    )
+    db_session.rollback()
+
+    worker_started = Event()
+    clock_called = Event()
+    results: list[object] = []
+    failures: list[BaseException] = []
+
+    def lease_clock() -> datetime:
+        clock_called.set()
+        return business_now.replace(tzinfo=timezone.utc) + timedelta(seconds=7)
+
+    def persist_terminal_state() -> None:
+        with SessionLocal() as worker_session:
+            worker_started.set()
+            try:
+                if terminal_kind == "success":
+                    results.append(
+                        commit_chat_success(
+                            worker_session,
+                            claim=claim,
+                            payload=payload,
+                            reply="迟到的回复",
+                            ended=False,
+                            end_reason=None,
+                            now=business_now,
+                            lease_clock=lease_clock,
+                        )
+                    )
+                else:
+                    results.append(
+                        record_chat_failure(
+                            worker_session,
+                            claim=claim,
+                            code="CHAT_UPSTREAM_FAILED",
+                            now=business_now,
+                            lease_clock=lease_clock,
+                        )
+                    )
+            except BaseException as exc:
+                failures.append(exc)
+
+    with SessionLocal() as writer:
+        writer.connection().exec_driver_sql("BEGIN IMMEDIATE")
+        thread = Thread(target=persist_terminal_state)
+        thread.start()
+        try:
+            assert worker_started.wait(1)
+            assert not clock_called.wait(0.1)
+        finally:
+            writer.rollback()
+            thread.join(2)
+
+    assert not thread.is_alive()
+    assert clock_called.is_set()
+    if terminal_kind == "success":
+        assert len(failures) == 1
+        assert isinstance(failures[0], APIError)
+        assert failures[0].code == "REQUEST_IN_PROGRESS"
+        assert results == []
+    else:
+        assert failures == []
+        assert results == [False]
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, claim.request_id)
+    assert saved is not None
+    assert saved.status == "processing"
+    assert db_session.scalar(select(func.count(models.Message.id))) == 0
+
+
+def test_fixed_max_round_route_uses_fresh_lease_time_before_terminal_write(
+    db_session,
+    child_factory,
+    fake_chat_ai,
+):
+    """Catches the provider-free final turn committing with request-start time."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    _message(db_session, conversation.id, "child", "我喂了小黄")
+    _message(db_session, conversation.id, "diary", "真棒！")
+    _message(db_session, conversation.id, "child", "我还换了水")
+    _message(db_session, conversation.id, "diary", "你真细心！")
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(
+            child_id=child.id,
+            conversation_id=conversation.id,
+            max_rounds=3,
+        )
+    )
+    clock_start = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+
+    class ExpiredClock:
+        @staticmethod
+        def business_now() -> datetime:
+            return clock_start.astimezone(ZoneInfo("Asia/Shanghai"))
+
+        @staticmethod
+        def utc_now() -> datetime:
+            return clock_start + timedelta(seconds=7)
+
+    with SessionLocal() as route_session:
+        with pytest.raises(APIError) as failed:
+            conversation_routes._chat_request(
+                payload,
+                route_session,
+                session_factory=SessionLocal,
+                clock=ExpiredClock,
+                lease_seconds=6,
+                heartbeat_interval_seconds=0.01,
+            )
+
+    assert failed.value.code == "REQUEST_IN_PROGRESS"
+    assert failed.value.retryable is True
+    assert fake_chat_ai.call_count == 0
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, str(payload.request_id))
+    assert saved is not None
+    assert saved.status == "processing"
+    assert db_session.scalar(select(func.count(models.Message.id))) == 4
+
+
+@pytest.mark.parametrize("failure_kind", ("api", "internal"))
+def test_pre_provider_failure_uses_fresh_lease_time_before_terminal_write(
+    db_session,
+    child_factory,
+    fake_chat_ai,
+    monkeypatch,
+    failure_kind,
+):
+    """Catches context failures persisting after their original lease expired."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    clock_start = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+
+    class ExpiredClock:
+        @staticmethod
+        def business_now() -> datetime:
+            return clock_start.astimezone(ZoneInfo("Asia/Shanghai"))
+
+        @staticmethod
+        def utc_now() -> datetime:
+            return clock_start + timedelta(seconds=7)
+
+    def fail_context(*_args, **_kwargs):
+        if failure_kind == "api":
+            raise APIError(409, "CONVERSATION_CHANGED", "会话状态已变化")
+        raise RuntimeError("synthetic context failure")
+
+    monkeypatch.setattr(conversation_routes, "build_chat_context", fail_context)
+
+    with SessionLocal() as route_session:
+        with pytest.raises(APIError) as failed:
+            conversation_routes._chat_request(
+                payload,
+                route_session,
+                session_factory=SessionLocal,
+                clock=ExpiredClock,
+                lease_seconds=6,
+                heartbeat_interval_seconds=0.01,
+            )
+
+    assert failed.value.code == "REQUEST_IN_PROGRESS"
+    assert failed.value.retryable is True
+    assert fake_chat_ai.call_count == 0
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, str(payload.request_id))
+    assert saved is not None
+    assert saved.status == "processing"
+    assert db_session.scalar(select(func.count(models.Message.id))) == 0
+
+
+def test_chat_heartbeat_recovers_after_one_transient_database_error(
+    db_session,
+    child_factory,
+    monkeypatch,
+):
+    """Catches one short SQLite conflict disabling renewal for the whole call."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    clock = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    claim = claim_chat_request(
+        db_session,
+        payload,
+        now=clock.replace(tzinfo=None),
+        business_date=clock.date(),
+        lease_seconds=6,
+    )
+    db_session.rollback()
+    first_failed = Event()
+    later_succeeded = Event()
+    calls = 0
+    original_renew = chat_service.renew_chat_request_lease
+
+    def fail_once_then_renew(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            first_failed.set()
+            raise RuntimeError("transient sqlite writer conflict")
+        renewed = original_renew(*args, **kwargs)
+        if renewed:
+            later_succeeded.set()
+        return renewed
+
+    monkeypatch.setattr(chat_service, "renew_chat_request_lease", fail_once_then_renew)
+
+    with chat_service.chat_lease_heartbeat(
+        SessionLocal,
+        claim=claim,
+        clock=lambda: clock + timedelta(seconds=2),
+        lease_seconds=6,
+        heartbeat_interval_seconds=0.01,
+    ) as lease_lost:
+        assert first_failed.wait(1)
+        assert later_succeeded.wait(1)
+        assert not lease_lost.is_set()
+
+    assert calls >= 2
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, claim.request_id)
+    assert saved is not None
+    assert saved.lease_expires_at == datetime(2026, 9, 5, 12, 0, 8)
+
+
+def test_chat_heartbeat_marks_lease_lost_when_database_errors_outlive_expiry(
+    db_session,
+    child_factory,
+    monkeypatch,
+):
+    """Catches repeated renewal errors leaving provider retries live past expiry."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    clock = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    claim = claim_chat_request(
+        db_session,
+        payload,
+        now=clock.replace(tzinfo=None),
+        business_date=clock.date(),
+        lease_seconds=6,
+    )
+    db_session.rollback()
+    attempts = 0
+    observed_expiry = Event()
+    clock_samples = iter((2, 2, 7))
+
+    def unavailable_database(*_args, **_kwargs):
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("persistent sqlite writer failure")
+
+    def heartbeat_clock():
+        offset = next(clock_samples)
+        if offset >= 6:
+            observed_expiry.set()
+        return clock + timedelta(seconds=offset)
+
+    monkeypatch.setattr(
+        chat_service,
+        "renew_chat_request_lease",
+        unavailable_database,
+    )
+
+    with chat_service.chat_lease_heartbeat(
+        SessionLocal,
+        claim=claim,
+        clock=heartbeat_clock,
+        lease_seconds=6,
+        heartbeat_interval_seconds=0.01,
+    ) as lease_lost:
+        assert observed_expiry.wait(1)
+        deadline = monotonic() + 1
+        while not lease_lost.is_set() and monotonic() < deadline:
+            sleep(0.005)
+        assert lease_lost.is_set()
+
+    assert attempts == 1
+
+
+def test_chat_heartbeat_fences_one_failed_renewal_that_returns_after_lease_expiry(
+    db_session,
+    child_factory,
+    monkeypatch,
+):
+    """Catches a blocked renewal trusting only its pre-I/O clock sample."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    clock_start = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    clock_now = [clock_start + timedelta(seconds=2)]
+    claim = claim_chat_request(
+        db_session,
+        payload,
+        now=clock_start.replace(tzinfo=None),
+        business_date=clock_start.date(),
+        lease_seconds=6,
+    )
+    db_session.rollback()
+    renewal_finished = Event()
+    calls = 0
+
+    def delayed_renewal(*_args, **_kwargs):
+        nonlocal calls
+        calls += 1
+        clock_now[0] = clock_start + timedelta(seconds=7)
+        renewal_finished.set()
+        raise RuntimeError("sqlite wait crossed the lease boundary")
+
+    monkeypatch.setattr(chat_service, "renew_chat_request_lease", delayed_renewal)
+
+    with chat_service.chat_lease_heartbeat(
+        SessionLocal,
+        claim=claim,
+        clock=lambda: clock_now[0],
+        lease_seconds=6,
+        heartbeat_interval_seconds=0.01,
+    ) as lease_lost:
+        assert renewal_finished.wait(1)
+        deadline = monotonic() + 1
+        while not lease_lost.is_set() and monotonic() < deadline:
+            sleep(0.005)
+        assert lease_lost.is_set()
+
+    assert calls == 1
+
+
+def test_chat_heartbeat_marks_lost_before_any_post_miss_clock_work(
+    db_session,
+    child_factory,
+    monkeypatch,
+):
+    """Catches a CAS miss leaving the real one-shot provider retry fence open."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    clock_start = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    claim = claim_chat_request(
+        db_session,
+        payload,
+        now=clock_start.replace(tzinfo=None),
+        business_date=clock_start.date(),
+        lease_seconds=6,
+    )
+    db_session.rollback()
+    renewal_rejected = Event()
+    post_miss_clock_entered = Event()
+    release_post_miss_clock = Event()
+    clock_calls = 0
+
+    def reject_renewal(*_args, **_kwargs):
+        renewal_rejected.set()
+        return None
+
+    def heartbeat_clock() -> datetime:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls > 1:
+            post_miss_clock_entered.set()
+            assert release_post_miss_clock.wait(2)
+        return clock_start + timedelta(seconds=2)
+
+    monkeypatch.setattr(chat_service, "renew_chat_request_lease", reject_renewal)
+    stop_event = Event()
+    guard = chat_service.ChatLeaseGuard(claim.lease_expires_at)
+    thread = Thread(
+        target=chat_service._run_chat_lease_heartbeat,
+        kwargs={
+            "session_factory": SessionLocal,
+            "claim": claim,
+            "clock": heartbeat_clock,
+            "lease_seconds": 6,
+            "interval_seconds": 0.01,
+            "stop_event": stop_event,
+            "lease_guard": guard,
+        },
+    )
+    thread.start()
+    try:
+        assert renewal_rejected.wait(1)
+        deadline = monotonic() + 1
+        while (
+            not guard.is_set()
+            and not post_miss_clock_entered.is_set()
+            and monotonic() < deadline
+        ):
+            sleep(0.005)
+        assert guard.is_set()
+    finally:
+        release_post_miss_clock.set()
+        stop_event.set()
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert clock_calls == 1
+
+
+def test_chat_heartbeat_publishes_durable_renewal_before_retry_fence_rechecks(
+    db_session,
+    child_factory,
+    monkeypatch,
+):
+    """Catches a valid durable renewal being lost before its guard publication."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    clock_start = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    claim = claim_chat_request(
+        db_session,
+        payload,
+        now=clock_start.replace(tzinfo=None),
+        business_date=clock_start.date(),
+        lease_seconds=6,
+    )
+    db_session.rollback()
+    renewed_until = clock_start.replace(tzinfo=None) + timedelta(seconds=8)
+    post_renewal_clock_entered = Event()
+    release_post_renewal_clock = Event()
+    retry_finished = Event()
+    retry_results: list[bool] = []
+    clock_calls = 0
+
+    def durable_renewal(*_args, **_kwargs):
+        return renewed_until
+
+    def heartbeat_clock() -> datetime:
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls > 1:
+            post_renewal_clock_entered.set()
+            assert release_post_renewal_clock.wait(2)
+        return clock_start + timedelta(seconds=2)
+
+    monkeypatch.setattr(chat_service, "renew_chat_request_lease", durable_renewal)
+    stop_event = Event()
+    guard = chat_service.ChatLeaseGuard(claim.lease_expires_at)
+    heartbeat = Thread(
+        target=chat_service._run_chat_lease_heartbeat,
+        kwargs={
+            "session_factory": SessionLocal,
+            "claim": claim,
+            "clock": heartbeat_clock,
+            "lease_seconds": 6,
+            "interval_seconds": 0.01,
+            "stop_event": stop_event,
+            "lease_guard": guard,
+        },
+    )
+    heartbeat.start()
+    assert post_renewal_clock_entered.wait(1)
+
+    def check_retry_fence() -> None:
+        retry_results.append(
+            guard.retry_allowed(
+                lambda: clock_start + timedelta(seconds=7)
+            )
+        )
+        retry_finished.set()
+
+    retry = Thread(target=check_retry_fence)
+    retry.start()
+    try:
+        assert not retry_finished.wait(0.1)
+    finally:
+        release_post_renewal_clock.set()
+        retry.join(2)
+        stop_event.set()
+        heartbeat.join(2)
+
+    assert not retry.is_alive()
+    assert not heartbeat.is_alive()
+    assert retry_results == [True]
+    assert not guard.is_set()
+    assert guard.expires_at() == renewed_until
+
+
+def test_slow_chat_success_stays_owned_and_duplicate_cannot_reclaim_after_original_expiry(
+    db_session,
+    child_factory,
+    fake_chat_ai,
+):
+    """Catches a slow valid provider call being reclaimed and executed twice."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    db_session.rollback()
+    clock_now = [datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)]
+    provider_entered = Event()
+    release_provider = Event()
+    failures: list[BaseException] = []
+    responses: list[schemas.ChatResponse] = []
+
+    class Clock:
+        @staticmethod
+        def business_now() -> datetime:
+            return clock_now[0].astimezone(ZoneInfo("Asia/Shanghai"))
+
+        @staticmethod
+        def utc_now() -> datetime:
+            return clock_now[0]
+
+    route_session = SessionLocal()
+
+    def hold_provider() -> None:
+        assert not route_session.in_transaction()
+        clock_now[0] += timedelta(seconds=4)
+        provider_entered.set()
+        assert release_provider.wait(2)
+
+    fake_chat_ai.on_call = hold_provider
+
+    def run_request() -> None:
+        try:
+            responses.append(
+                conversation_routes._chat_request(
+                    payload,
+                    route_session,
+                    session_factory=SessionLocal,
+                    clock=Clock,
+                    lease_seconds=6,
+                    heartbeat_interval_seconds=0.01,
+                )
+            )
+        except BaseException as exc:
+            failures.append(exc)
+        finally:
+            route_session.close()
+
+    thread = Thread(target=run_request)
+    thread.start()
+    try:
+        assert provider_entered.wait(1)
+        extended_to = _wait_for_chat_lease_extension(
+            str(payload.request_id),
+            beyond=clock_now[0] + timedelta(seconds=2),
+        )
+        clock_now[0] += timedelta(seconds=3)
+        with SessionLocal() as duplicate_session:
+            with pytest.raises(APIError) as duplicate:
+                conversation_routes._chat_request(
+                    payload,
+                    duplicate_session,
+                    session_factory=SessionLocal,
+                    clock=Clock,
+                    lease_seconds=6,
+                    heartbeat_interval_seconds=0.01,
+                )
+        assert duplicate.value.code == "REQUEST_IN_PROGRESS"
+        assert fake_chat_ai.call_count == 1
+    finally:
+        release_provider.set()
+        thread.join(2)
+
+    assert extended_to == datetime(2026, 9, 5, 12, 0, 10)
+    assert not thread.is_alive()
+    assert failures == []
+    assert len(responses) == 1
+    assert responses[0].reply == "真棒！还有呢？"
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, str(payload.request_id))
+    assert saved is not None
+    assert saved.status == "succeeded"
+    assert saved.attempt_count == 1
+    assert db_session.scalar(select(func.count(models.Message.id))) == 2
+
+
+def test_lost_chat_lease_discards_result_and_fences_provider_retry(
+    db_session,
+    child_factory,
+    monkeypatch,
+):
+    """Catches a fenced-out attempt retrying upstream or writing its late result."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    db_session.rollback()
+    clock_now = [datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)]
+    renewal_rejected = Event()
+    retry_fences = []
+    transport_calls = 0
+
+    class Clock:
+        @staticmethod
+        def business_now() -> datetime:
+            return clock_now[0].astimezone(ZoneInfo("Asia/Shanghai"))
+
+        @staticmethod
+        def utc_now() -> datetime:
+            return clock_now[0]
+
+    def steal_lease(_session_factory, *, claim, **_kwargs):
+        with SessionLocal() as thief:
+            stolen = thief.execute(
+                update(models.ChatRequestRecord)
+                .where(
+                    models.ChatRequestRecord.request_id == claim.request_id,
+                    models.ChatRequestRecord.lease_owner == claim.lease_owner,
+                    models.ChatRequestRecord.attempt_count == claim.attempt_count,
+                )
+                .values(
+                    lease_owner="replacement-owner",
+                    attempt_count=claim.attempt_count + 1,
+                    lease_expires_at=clock_now[0].replace(tzinfo=None)
+                    + timedelta(seconds=30),
+                )
+            )
+            assert stolen.rowcount == 1
+            thief.commit()
+        renewal_rejected.set()
+        return None
+
+    def failing_transport_with_optional_retry(**kwargs):
+        nonlocal transport_calls
+        transport_calls += 1
+        retry_fence = kwargs.get("should_retry")
+        retry_fences.append(retry_fence)
+        assert renewal_rejected.wait(1)
+        if callable(retry_fence):
+            deadline = monotonic() + 1
+            while retry_fence() and monotonic() < deadline:
+                sleep(0.005)
+            if retry_fence():
+                transport_calls += 1
+        raise httpx.ConnectError("synthetic provider unavailable")
+
+    monkeypatch.setattr(chat_service, "renew_chat_request_lease", steal_lease)
+    monkeypatch.setattr(ai_engine, "chat_reply", failing_transport_with_optional_retry)
+
+    with SessionLocal() as route_session:
+        with pytest.raises(APIError) as failed:
+            conversation_routes._chat_request(
+                payload,
+                route_session,
+                session_factory=SessionLocal,
+                clock=Clock,
+                lease_seconds=6,
+                heartbeat_interval_seconds=0.01,
+            )
+
+    assert failed.value.code == "REQUEST_IN_PROGRESS"
+    assert failed.value.retryable is True
+    assert len(retry_fences) == 1
+    assert callable(retry_fences[0])
+    assert transport_calls == 1
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, str(payload.request_id))
+    assert saved is not None
+    assert saved.status == "processing"
+    assert saved.lease_owner == "replacement-owner"
+    assert saved.attempt_count == 2
+    assert db_session.scalar(select(func.count(models.Message.id))) == 0
+
+
+def test_slow_chat_failure_is_recorded_by_original_owner_after_lease_extension(
+    db_session,
+    child_factory,
+    fake_chat_ai,
+):
+    """Catches a slow provider failure leaving its original request processing forever."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    db_session.rollback()
+    clock_now = [datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)]
+    provider_entered = Event()
+    release_provider = Event()
+    failures: list[BaseException] = []
+
+    class Clock:
+        @staticmethod
+        def business_now() -> datetime:
+            return clock_now[0].astimezone(ZoneInfo("Asia/Shanghai"))
+
+        @staticmethod
+        def utc_now() -> datetime:
+            return clock_now[0]
+
+    def hold_provider() -> None:
+        clock_now[0] += timedelta(seconds=4)
+        provider_entered.set()
+        assert release_provider.wait(2)
+
+    fake_chat_ai.on_call = hold_provider
+    fake_chat_ai.result = httpx.ConnectError("synthetic provider unavailable")
+
+    def run_request() -> None:
+        with SessionLocal() as route_session:
+            try:
+                conversation_routes._chat_request(
+                    payload,
+                    route_session,
+                    session_factory=SessionLocal,
+                    clock=Clock,
+                    lease_seconds=6,
+                    heartbeat_interval_seconds=0.01,
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+    thread = Thread(target=run_request)
+    thread.start()
+    try:
+        assert provider_entered.wait(1)
+        _wait_for_chat_lease_extension(
+            str(payload.request_id),
+            beyond=clock_now[0] + timedelta(seconds=2),
+        )
+        clock_now[0] += timedelta(seconds=3)
+    finally:
+        release_provider.set()
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert len(failures) == 1
+    assert isinstance(failures[0], APIError)
+    assert failures[0].code == "CHAT_UPSTREAM_FAILED"
+    assert fake_chat_ai.call_count == 1
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, str(payload.request_id))
+    assert saved is not None
+    assert saved.status == "failed"
+    assert saved.attempt_count == 1
+    assert saved.lease_owner is None
+    assert saved.last_error_code == "CHAT_UPSTREAM_FAILED"
+    assert db_session.scalar(select(func.count(models.Message.id))) == 0
+
+
+def test_chat_failure_reclaimed_after_heartbeat_join_returns_in_progress(
+    db_session,
+    child_factory,
+    fake_chat_ai,
+    monkeypatch,
+):
+    """Catches a failure response misreporting ownership after its final CAS loses."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    fake_chat_ai.result = httpx.ConnectError("synthetic provider unavailable")
+    original_record_failure = chat_service.record_chat_failure
+
+    def reclaim_then_record(db, *, claim, code, now, lease_clock):
+        with SessionLocal() as thief:
+            stolen = thief.execute(
+                update(models.ChatRequestRecord)
+                .where(
+                    models.ChatRequestRecord.request_id == claim.request_id,
+                    models.ChatRequestRecord.lease_owner == claim.lease_owner,
+                    models.ChatRequestRecord.attempt_count == claim.attempt_count,
+                )
+                .values(
+                    lease_owner="replacement-owner",
+                    attempt_count=claim.attempt_count + 1,
+                    lease_expires_at=now + timedelta(seconds=30),
+                )
+            )
+            assert stolen.rowcount == 1
+            thief.commit()
+        return original_record_failure(
+            db,
+            claim=claim,
+            code=code,
+            now=now,
+            lease_clock=lease_clock,
+        )
+
+    monkeypatch.setattr(conversation_routes, "record_chat_failure", reclaim_then_record)
+
+    with SessionLocal() as route_session:
+        with pytest.raises(APIError) as failed:
+            conversation_routes._chat_request(
+                payload,
+                route_session,
+                session_factory=SessionLocal,
+                clock=conversation_routes.BUSINESS_CLOCK,
+                heartbeat_interval_seconds=0.01,
+            )
+
+    assert failed.value.code == "REQUEST_IN_PROGRESS"
+    assert failed.value.retryable is True
+    assert fake_chat_ai.call_count == 1
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, str(payload.request_id))
+    assert saved is not None
+    assert saved.status == "processing"
+    assert saved.lease_owner == "replacement-owner"
+    assert saved.attempt_count == 2
+    assert db_session.scalar(select(func.count(models.Message.id))) == 0
+
+
+@pytest.mark.parametrize("provider_fails", [False, True], ids=["success", "failure"])
+def test_chat_joins_inflight_heartbeat_before_terminal_database_write(
+    db_session,
+    child_factory,
+    fake_chat_ai,
+    monkeypatch,
+    provider_fails,
+):
+    """Catches success or failure persistence racing the heartbeat SQLite writer."""
+    child = child_factory()
+    conversation = _active_conversation(db_session, child.id)
+    payload = schemas.ChatRequest.model_validate(
+        _chat_payload(child_id=child.id, conversation_id=conversation.id)
+    )
+    db_session.rollback()
+    clock = datetime(2026, 9, 5, 12, 0, tzinfo=timezone.utc)
+    heartbeat_committed = Event()
+    release_heartbeat = Event()
+    provider_returned = Event()
+    terminal_started = Event()
+    failures: list[BaseException] = []
+    original_renew = chat_service.renew_chat_request_lease
+    original_commit = conversation_routes.commit_chat_success
+    original_failure = conversation_routes.record_chat_failure
+
+    class Clock:
+        @staticmethod
+        def business_now() -> datetime:
+            return clock.astimezone(ZoneInfo("Asia/Shanghai"))
+
+        @staticmethod
+        def utc_now() -> datetime:
+            return clock
+
+    def hold_heartbeat(*args, **kwargs):
+        renewed = original_renew(*args, **kwargs)
+        heartbeat_committed.set()
+        assert release_heartbeat.wait(2)
+        return renewed
+
+    def observe_commit(*args, **kwargs):
+        terminal_started.set()
+        return original_commit(*args, **kwargs)
+
+    def observe_failure(*args, **kwargs):
+        terminal_started.set()
+        return original_failure(*args, **kwargs)
+
+    def provider_call() -> None:
+        assert heartbeat_committed.wait(1)
+        provider_returned.set()
+
+    monkeypatch.setattr(chat_service, "renew_chat_request_lease", hold_heartbeat)
+    monkeypatch.setattr(conversation_routes, "commit_chat_success", observe_commit)
+    monkeypatch.setattr(conversation_routes, "record_chat_failure", observe_failure)
+    fake_chat_ai.on_call = provider_call
+    if provider_fails:
+        fake_chat_ai.result = httpx.ConnectError("synthetic provider unavailable")
+
+    def run_request() -> None:
+        with SessionLocal() as route_session:
+            try:
+                conversation_routes._chat_request(
+                    payload,
+                    route_session,
+                    session_factory=SessionLocal,
+                    clock=Clock,
+                    lease_seconds=6,
+                    heartbeat_interval_seconds=0.01,
+                )
+            except BaseException as exc:
+                failures.append(exc)
+
+    thread = Thread(target=run_request)
+    thread.start()
+    try:
+        assert heartbeat_committed.wait(1)
+        assert provider_returned.wait(1)
+        assert not terminal_started.wait(0.1)
+    finally:
+        release_heartbeat.set()
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert terminal_started.is_set()
+    if provider_fails:
+        assert len(failures) == 1
+        assert isinstance(failures[0], APIError)
+        assert failures[0].code == "CHAT_UPSTREAM_FAILED"
+    else:
+        assert failures == []
+    db_session.expire_all()
+    saved = db_session.get(models.ChatRequestRecord, str(payload.request_id))
+    assert saved is not None
+    assert saved.status == ("failed" if provider_fails else "succeeded")
 
 
 def test_failed_request_id_retries_without_messages_from_the_failed_attempt(

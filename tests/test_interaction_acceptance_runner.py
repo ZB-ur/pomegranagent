@@ -273,10 +273,10 @@ def test_focused_browser_argv_selects_exact_function_and_parameter(tmp_path):
             "tests/browser/test_teacher_review_loading.py::test_teacher_review_queue_and_detail_show_identity_time_id_and_status",
         ),
         "child_chat_timeout_1024": (
-            "tests/browser/test_child_faults.py::test_first_chat_timeout_retains_draft_and_reuses_request_id_once[1024x576]",
+            "tests/browser/test_child_faults.py::test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_once[1024x576]",
         ),
         "child_chat_timeout_all": (
-            "tests/browser/test_child_faults.py::test_first_chat_timeout_retains_draft_and_reuses_request_id_once",
+            "tests/browser/test_child_faults.py::test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_once",
         ),
         "child_completion_delay_1024": (
             "tests/browser/test_child_faults.py::test_completion_delay_is_single_flight_and_saves_once[1024x576]",
@@ -2599,7 +2599,22 @@ backend | ^test_schema_three_head_initializes_singleton_teacher_pin_throttle$ | 
 backend | ^test_(five_failures_allow_no_sixth_attempt_even_with_the_correct_pin|pin_failures_use_a_rolling_fifteen_minute_window|success_atomically_clears_recent_failure_state|failure_state_survives_a_new_testclient_session|six_concurrent_wrong_pins_are_serialized_at_the_global_limit|duplicate_setup_repairs_a_missing_throttle_singleton)$ | 6 | 3,14
 backend | ^test_(owned_process_group_reaps_real_short_lived_wnowait_child|exact_exited_leader_can_signal_only_prevalidated_same_session_descendants|exact_exited_leader_rejects_foreign_session_member_without_signal|live_server_accepts_only_canonical_macos_text_encoding)$ | 4 | 14"""
 
-_P6_UAT_INCIDENT_SELECTOR_ADDITIONS_TEXT = r"""browser | ^test_tts_5810ms_cold_start_uses_same_request_audio_path\[(1024x576|1280x720)\]$ | 2 | 10,14"""
+_P6_UAT_INCIDENT_SELECTOR_ADDITIONS_TEXT = r"""browser | ^test_tts_5810ms_cold_start_uses_same_request_audio_path\[(1024x576|1280x720)\]$ | 2 | 10,14
+browser | ^test_chat_11000ms_response_uses_same_request_and_audio_path\[(1024x576|1280x720)\]$ | 2 | 3,4,10,14
+backend | ^test_(llm_retry_fence_can_stop_the_second_transport_attempt|chat_reply_forwards_retry_fence_to_llm|chat_lease_renewal_requires_exact_owner_and_attempt_fence|chat_lease_guard_publishes_expiry_loss_atomically_with_renewal|terminal_chat_cas_checks_fresh_lease_time_without_changing_business_timestamps|terminal_chat_lease_clock_is_sampled_after_sqlite_writer_slot\[(success|failure)\]|fixed_max_round_route_uses_fresh_lease_time_before_terminal_write|pre_provider_failure_uses_fresh_lease_time_before_terminal_write\[(api|internal)\]|chat_heartbeat_recovers_after_one_transient_database_error|chat_heartbeat_marks_lease_lost_when_database_errors_outlive_expiry|chat_heartbeat_fences_one_failed_renewal_that_returns_after_lease_expiry|chat_heartbeat_marks_lost_before_any_post_miss_clock_work|chat_heartbeat_publishes_durable_renewal_before_retry_fence_rechecks|slow_chat_success_stays_owned_and_duplicate_cannot_reclaim_after_original_expiry|lost_chat_lease_discards_result_and_fences_provider_retry|slow_chat_failure_is_recorded_by_original_owner_after_lease_extension|chat_failure_reclaimed_after_heartbeat_join_returns_in_progress|chat_joins_inflight_heartbeat_before_terminal_database_write\[(success|failure)\])$ | 21 | 3,4,14"""
+
+_P5_CHAT_TIMEOUT_SELECTOR_ROW = (
+    "browser",
+    r"^test_first_chat_timeout_retains_draft_and_reuses_request_id_once\[(1024x576|1280x720)\]$",
+    2,
+    (3, 4, 14),
+)
+_P6_CHAT_TIMEOUT_SELECTOR_ROW = (
+    "browser",
+    r"^test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_once\[(1024x576|1280x720)\]$",
+    2,
+    (3, 4, 14),
+)
 
 _P5_TTS_SELECTOR_ROW = (
     "browser",
@@ -2632,7 +2647,7 @@ _P6_AUDIT_FIX_SELECTOR_ADDITIONS_SHA256 = (
     "1f5be2060f97659b11bb8b92d140538446f22bf737a6b40af407817654e2237b"
 )
 _P6_UAT_INCIDENT_SELECTOR_ADDITIONS_SHA256 = (
-    "8881057b0625ba1cc50bf6496d694ed4e4ff1dbee2349f03a6ce0148dcc6e8f9"
+    "0dfd792db1bb4fce7de5b1a632b0906f5a3091b1b133e1e7c52ac71cd7c2bbed"
 )
 
 
@@ -2741,11 +2756,17 @@ def _p6_uat_incident_manifest_rows():
 
 
 def _current_p5_manifest_rows():
-    """Keep the immutable P5 fixture while explicitly versioning its P6 TTS contract."""
+    """Keep immutable P5 evidence while versioning changed P6 timeout contracts."""
     rows = _p5_frozen_manifest_rows()
     assert rows.count(_P5_TTS_SELECTOR_ROW) == 1
+    assert rows.count(_P5_CHAT_TIMEOUT_SELECTOR_ROW) == 1
     return tuple(
-        _P6_TTS_SELECTOR_ROW if row == _P5_TTS_SELECTOR_ROW else row for row in rows
+        _P6_TTS_SELECTOR_ROW
+        if row == _P5_TTS_SELECTOR_ROW
+        else _P6_CHAT_TIMEOUT_SELECTOR_ROW
+        if row == _P5_CHAT_TIMEOUT_SELECTOR_ROW
+        else row
+        for row in rows
     )
 
 
@@ -2759,7 +2780,7 @@ def _frozen_manifest_rows():
     )
 
 
-def test_literal_p5_selector_oracle_has_one_explicit_p6_tts_replacement():
+def test_literal_p5_selector_oracle_has_explicit_p6_timeout_replacements():
     module = importlib.import_module("scripts.run_interaction_acceptance")
     p5_rows = _p5_frozen_manifest_rows()
     current_p5_rows = _current_p5_manifest_rows()
@@ -2776,11 +2797,15 @@ def test_literal_p5_selector_oracle_has_one_explicit_p6_tts_replacement():
     assert len(p6_rows) == 56
     assert len(post_review_rows) == 5
     assert len(audit_fix_rows) == 31
+    assert len(uat_incident_rows) == 3
     p6_end = len(p5_rows) + len(p6_rows)
     post_review_end = p6_end + len(post_review_rows)
     assert _P5_TTS_SELECTOR_ROW in p5_rows
     assert _P5_TTS_SELECTOR_ROW not in actual_rows
     assert _P6_TTS_SELECTOR_ROW in actual_rows
+    assert _P5_CHAT_TIMEOUT_SELECTOR_ROW in p5_rows
+    assert _P5_CHAT_TIMEOUT_SELECTOR_ROW not in actual_rows
+    assert _P6_CHAT_TIMEOUT_SELECTOR_ROW in actual_rows
     assert actual_rows[: len(p5_rows)] == current_p5_rows
     assert actual_rows[len(p5_rows) : p6_end] == p6_rows
     assert actual_rows[p6_end:post_review_end] == post_review_rows
@@ -2882,7 +2907,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
 
     assert actual_today_retry_rows == EXPECTED_TODAY_RETRY_SELECTOR_ROWS
     assert actual_rows == expected_rows
-    assert len(actual_rows) == 190
+    assert len(actual_rows) == 192
     assert module.GATE_TITLES == EXPECTED_GATE_TITLES
     assert tuple(
         (item.source, item.evidence_id, item.expected_count, item.gates)
@@ -2907,7 +2932,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
             ]
             assert len(matches) == 1
         materialized_count += len(node_ids)
-    assert materialized_count == 503
+    assert materialized_count == 526
 
     assert module.SELECTOR_TO_GATES == {
         (row.command_id, row.node_pattern): row.gates for row in module.SELECTOR_MANIFEST
@@ -3400,21 +3425,21 @@ def _structured_property_payload(kind, viewport):
             "activation_sequence": ["Enter", "Space", "Enter"],
             "body_reused_exactly": True,
             "chat_attempts": 2,
-            "completion_requests_at_9999": 0,
+            "completion_requests_at_29999": 0,
             "completion_requests_during_failure_boundary": 0,
-            "durable_bytes_unchanged_at_9999": True,
-            "failure_transitions_at_10000": 1,
+            "durable_bytes_unchanged_at_29999": True,
+            "failure_transitions_at_30000": 1,
             "header_matches_body_request_id": True,
-            "outstanding_chat_requests_at_9999": 1,
+            "outstanding_chat_requests_at_29999": 1,
             "request_id_sha256": "b" * 64,
-            "retry_controls_at_10000": 1,
-            "retry_controls_at_9999": 0,
+            "retry_controls_at_30000": 1,
+            "retry_controls_at_29999": 0,
             "retry_requests": 1,
-            "state_at_10000": "submission_failed",
-            "state_at_9999": "submitting",
-            "success_copy_at_9999": False,
-            "timeout_ms": 10_000,
-            "tts_requests_at_9999": 0,
+            "state_at_30000": "submission_failed",
+            "state_at_29999": "submitting",
+            "success_copy_at_29999": False,
+            "timeout_ms": 30_000,
+            "tts_requests_at_29999": 0,
             "tts_requests_during_failure_boundary": 0,
             "viewport": viewport,
             "viewport_id": viewport_id,
@@ -3440,7 +3465,7 @@ def _structured_node(kind, viewport_id):
     names = {
         "focus": "test_release_focus_indicator_meets_three_to_one",
         "db": "test_release_teacher_action_persists_to_disposable_sqlite",
-        "timeout": "test_first_chat_timeout_retains_draft_and_reuses_request_id_once",
+        "timeout": "test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_once",
         "search": "test_release_search_filters_results_and_focus_stay_in_bounds",
         "today": "test_release_today_weekly_metrics_retry_and_grid_stay_in_bounds",
     }
@@ -4250,8 +4275,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "dbaf21c80f9bea546c57ad1ea086565e71de12f0ff8308981e4ade56571523e5"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "5d67848f075b014f6f1cf8c1fe71295a8055f33799008d67dd58c3e4474f1717"
+    assert hashlib.sha256(json_bytes).hexdigest() == "63af7e367ed6d59f29f9e98fd3d1bab976b338a89ca173fa94133e41a983ea18"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "012ebcd783a337f5ac9d42b87d4e8858923b29e7409368a176cfd40cbb0fd385"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4816,8 +4841,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "91cacbc82fccb8fd26ae0b160ec14428a21accfdf5f363b5ae14c0c499cd6e27"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "efa0d06f927a414dede089b9dd3ec3272b790010ae8bfcc6a9542520fff6a186"
+    assert hashlib.sha256(json_bytes).hexdigest() == "a7ddc57292e69c57a29259bbdf703ac0e14679705a720ca044ab95cd944f43b7"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "9c99ef10ec5f08102ff596a55f6e92e7b55921e3e850f9b6db0780b114e77cd3"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown

@@ -178,7 +178,7 @@ test('uses the frozen paths and options for every child HTTP method', async () =
     { path: '/api/children/7/active-conversation', options: { responseType: 'json', sequenceKey: 'child-active-7' } },
     { path: '/api/chat', options: {
       method: 'POST', body: input, signal, requestId: REQUEST_ID,
-      responseType: 'json', sequenceKey: 'child-chat',
+      responseType: 'json', timeoutMs: 30000, sequenceKey: 'child-chat',
     } },
     { path: '/api/conversations/4/complete', options: {
       method: 'POST', body: { expected_last_message_id: 11 }, signal,
