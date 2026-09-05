@@ -5808,7 +5808,7 @@ def _apply_live_provenance(plan):
             "VALUES (1001, 301, 101, '主动观察并持续照顾', "
             "'2026-09-03 02:00:00.000000')"
         )
-        connection.execute("INSERT INTO assessments VALUES (601, 301, 101, 'confirmed', 4.333333333333333)")
+        connection.execute("INSERT INTO assessments VALUES (601, 301, 101, 'confirmed', 4.33)")
         connection.executemany(
             "INSERT INTO assessment_scores VALUES (?, 601, ?, ?, ?)",
             ((701, 1, 4, "safe"), (702, 2, 4, "safe"), (703, 3, 5, "safe")),
@@ -5975,6 +5975,17 @@ def test_retained_database_provenance_is_read_only_and_fails_one_broken_chain(tm
     ):
         with pytest.raises(module.HarnessSafetyError, match="database provenance search"):
             module.validate_database_provenance(plan, bad_pages, baseline)
+    with sqlite3.connect(plan.database) as connection:
+        connection.execute("UPDATE assessments SET overall=4.34 WHERE id=601")
+        connection.commit()
+    with pytest.raises(
+        module.HarnessSafetyError,
+        match="database provenance score mismatch",
+    ):
+        module.validate_database_provenance(plan, entity_ids, baseline)
+    with sqlite3.connect(plan.database) as connection:
+        connection.execute("UPDATE assessments SET overall=4.33 WHERE id=601")
+        connection.commit()
     with sqlite3.connect(plan.database) as connection:
         connection.execute("UPDATE messages SET text='it cared for the duck' WHERE id=403")
         connection.commit()

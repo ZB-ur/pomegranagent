@@ -6157,7 +6157,10 @@ def validate_database_provenance(
                 )
                 or not math.isclose(
                     float(assessment[3]),
-                    sum(row[2] for row in scores) / len(scores),
+                    round(
+                        sum(row[2] for row in scores) / len(scores),
+                        2,
+                    ),
                     rel_tol=1e-9,
                     abs_tol=1e-9,
                 )
