@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import logging
+import math
 import threading
 import uuid
 from datetime import datetime, timezone
@@ -35,12 +36,29 @@ class AnalysisWorker:
         clock: Callable[[], datetime] = _utc_now,
         lease_seconds: int = 45,
         poll_interval_seconds: float = 0.25,
+        heartbeat_interval_seconds: float | None = None,
     ) -> None:
+        effective_heartbeat_interval = (
+            lease_seconds / 3
+            if heartbeat_interval_seconds is None
+            else heartbeat_interval_seconds
+        )
+        if (
+            not math.isfinite(lease_seconds)
+            or not math.isfinite(effective_heartbeat_interval)
+            or lease_seconds <= 0
+            or effective_heartbeat_interval <= 0
+            or effective_heartbeat_interval > lease_seconds / 3
+        ):
+            raise ValueError(
+                "analysis heartbeat interval must be finite, positive, and no more than lease/3"
+            )
         self._session_factory = session_factory
         self._analyzer = analyzer
         self._clock = clock
         self._lease_seconds = lease_seconds
         self._poll_interval_seconds = poll_interval_seconds
+        self._heartbeat_interval_seconds = heartbeat_interval_seconds
         self.worker_id = str(uuid.uuid4())
         self._stop_event = threading.Event()
         self._lock = threading.Lock()
@@ -90,10 +108,12 @@ class AnalysisWorker:
         try:
             db = self._session_factory()
             try:
+                now = self._clock()
+                recover_expired_jobs(db, now=now)
                 job_id = claim_next_analysis_job(
                     db,
                     worker_id=self.worker_id,
-                    now=self._clock(),
+                    now=now,
                     lease_seconds=self._lease_seconds,
                 )
             finally:
@@ -109,6 +129,8 @@ class AnalysisWorker:
                 worker_id=self.worker_id,
                 analyzer=self._analyzer,
                 clock=self._clock,
+                lease_seconds=self._lease_seconds,
+                heartbeat_interval_seconds=self._heartbeat_interval_seconds,
             )
             if not self._stop_event.is_set():
                 self._set_state("idle")

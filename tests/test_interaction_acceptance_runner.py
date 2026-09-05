@@ -2456,7 +2456,7 @@ EXPECTED_GATE_TITLES = {
     7: "saved child exit, tracked analysis",
     8: "complete review round-trip",
     9: "review identity/time/ID/status",
-    10: "5-second TTS fallback",
+    10: "8-second bounded TTS fallback",
     11: "roster replay",
     12: "undoable deactivation",
     13: "keyboard core flows",
@@ -2599,6 +2599,21 @@ backend | ^test_schema_three_head_initializes_singleton_teacher_pin_throttle$ | 
 backend | ^test_(five_failures_allow_no_sixth_attempt_even_with_the_correct_pin|pin_failures_use_a_rolling_fifteen_minute_window|success_atomically_clears_recent_failure_state|failure_state_survives_a_new_testclient_session|six_concurrent_wrong_pins_are_serialized_at_the_global_limit|duplicate_setup_repairs_a_missing_throttle_singleton)$ | 6 | 3,14
 backend | ^test_(owned_process_group_reaps_real_short_lived_wnowait_child|exact_exited_leader_can_signal_only_prevalidated_same_session_descendants|exact_exited_leader_rejects_foreign_session_member_without_signal|live_server_accepts_only_canonical_macos_text_encoding)$ | 4 | 14"""
 
+_P6_UAT_INCIDENT_SELECTOR_ADDITIONS_TEXT = r"""browser | ^test_tts_5810ms_cold_start_uses_same_request_audio_path\[(1024x576|1280x720)\]$ | 2 | 10,14"""
+
+_P5_TTS_SELECTOR_ROW = (
+    "browser",
+    r"^test_tts_cold_start_uses_reachable_five_second_fallback\[(1024x576|1280x720)\]$",
+    2,
+    (10, 14),
+)
+_P6_TTS_SELECTOR_ROW = (
+    "browser",
+    r"^test_tts_cold_start_uses_reachable_eight_second_fallback\[(1024x576|1280x720)\]$",
+    2,
+    (10, 14),
+)
+
 
 _P5_SELECTOR_ORACLE = (
     Path(__file__).resolve().parent
@@ -2615,6 +2630,9 @@ _P6_POST_REVIEW_SELECTOR_ADDITIONS_SHA256 = (
 )
 _P6_AUDIT_FIX_SELECTOR_ADDITIONS_SHA256 = (
     "1f5be2060f97659b11bb8b92d140538446f22bf737a6b40af407817654e2237b"
+)
+_P6_UAT_INCIDENT_SELECTOR_ADDITIONS_SHA256 = (
+    "8881057b0625ba1cc50bf6496d694ed4e4ff1dbee2349f03a6ce0148dcc6e8f9"
 )
 
 
@@ -2712,21 +2730,43 @@ def _p6_audit_fix_manifest_rows():
     return _selector_rows(_P6_AUDIT_FIX_SELECTOR_ADDITIONS_TEXT)
 
 
-def _frozen_manifest_rows():
-    return (
-        _p5_frozen_manifest_rows()
-        + _p6_frozen_manifest_rows()
-        + _p6_post_review_manifest_rows()
-        + _p6_audit_fix_manifest_rows()
+def _p6_uat_incident_manifest_rows():
+    assert (
+        hashlib.sha256(
+            _P6_UAT_INCIDENT_SELECTOR_ADDITIONS_TEXT.encode("utf-8")
+        ).hexdigest()
+        == _P6_UAT_INCIDENT_SELECTOR_ADDITIONS_SHA256
+    )
+    return _selector_rows(_P6_UAT_INCIDENT_SELECTOR_ADDITIONS_TEXT)
+
+
+def _current_p5_manifest_rows():
+    """Keep the immutable P5 fixture while explicitly versioning its P6 TTS contract."""
+    rows = _p5_frozen_manifest_rows()
+    assert rows.count(_P5_TTS_SELECTOR_ROW) == 1
+    return tuple(
+        _P6_TTS_SELECTOR_ROW if row == _P5_TTS_SELECTOR_ROW else row for row in rows
     )
 
 
-def test_literal_p5_selector_oracle_is_exact_ordered_prefix_with_p6_suffix_separate():
+def _frozen_manifest_rows():
+    return (
+        _current_p5_manifest_rows()
+        + _p6_frozen_manifest_rows()
+        + _p6_post_review_manifest_rows()
+        + _p6_audit_fix_manifest_rows()
+        + _p6_uat_incident_manifest_rows()
+    )
+
+
+def test_literal_p5_selector_oracle_has_one_explicit_p6_tts_replacement():
     module = importlib.import_module("scripts.run_interaction_acceptance")
     p5_rows = _p5_frozen_manifest_rows()
+    current_p5_rows = _current_p5_manifest_rows()
     p6_rows = _p6_frozen_manifest_rows()
     post_review_rows = _p6_post_review_manifest_rows()
     audit_fix_rows = _p6_audit_fix_manifest_rows()
+    uat_incident_rows = _p6_uat_incident_manifest_rows()
     actual_rows = tuple(
         (row.command_id, row.node_pattern, row.expected_count, row.gates)
         for row in module.SELECTOR_MANIFEST
@@ -2738,12 +2778,21 @@ def test_literal_p5_selector_oracle_is_exact_ordered_prefix_with_p6_suffix_separ
     assert len(audit_fix_rows) == 31
     p6_end = len(p5_rows) + len(p6_rows)
     post_review_end = p6_end + len(post_review_rows)
-    assert actual_rows[: len(p5_rows)] == p5_rows
+    assert _P5_TTS_SELECTOR_ROW in p5_rows
+    assert _P5_TTS_SELECTOR_ROW not in actual_rows
+    assert _P6_TTS_SELECTOR_ROW in actual_rows
+    assert actual_rows[: len(p5_rows)] == current_p5_rows
     assert actual_rows[len(p5_rows) : p6_end] == p6_rows
     assert actual_rows[p6_end:post_review_end] == post_review_rows
-    assert actual_rows[post_review_end:] == audit_fix_rows
+    audit_fix_end = post_review_end + len(audit_fix_rows)
+    assert actual_rows[post_review_end:audit_fix_end] == audit_fix_rows
+    assert actual_rows[audit_fix_end:] == uat_incident_rows
     assert _frozen_manifest_rows() == (
-        p5_rows + p6_rows + post_review_rows + audit_fix_rows
+        current_p5_rows
+        + p6_rows
+        + post_review_rows
+        + audit_fix_rows
+        + uat_incident_rows
     )
 
 
@@ -2833,7 +2882,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
 
     assert actual_today_retry_rows == EXPECTED_TODAY_RETRY_SELECTOR_ROWS
     assert actual_rows == expected_rows
-    assert len(actual_rows) == 189
+    assert len(actual_rows) == 190
     assert module.GATE_TITLES == EXPECTED_GATE_TITLES
     assert tuple(
         (item.source, item.evidence_id, item.expected_count, item.gates)
@@ -2858,7 +2907,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
             ]
             assert len(matches) == 1
         materialized_count += len(node_ids)
-    assert materialized_count == 501
+    assert materialized_count == 503
 
     assert module.SELECTOR_TO_GATES == {
         (row.command_id, row.node_pattern): row.gates for row in module.SELECTOR_MANIFEST
@@ -4201,8 +4250,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "2382fa7b9005a389bbda84b0e97ff70085d21b1fa809208d13f5986bed30eae8"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "0fb2dd69e88b9fb797df6664870bde60d0811409f778e1e26389e890361d036b"
+    assert hashlib.sha256(json_bytes).hexdigest() == "dbaf21c80f9bea546c57ad1ea086565e71de12f0ff8308981e4ade56571523e5"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "5d67848f075b014f6f1cf8c1fe71295a8055f33799008d67dd58c3e4474f1717"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4767,8 +4816,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "83b2304bedb4af3fd1af8368c23876777dac3efa4d45d1f790bd07226bf1a90d"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "f89bb023dcc1da83d36a42b6c557aaa597bbb5623ee0551d5c7081c1e01c9a6e"
+    assert hashlib.sha256(json_bytes).hexdigest() == "91cacbc82fccb8fd26ae0b160ec14428a21accfdf5f363b5ae14c0c499cd6e27"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "efa0d06f927a414dede089b9dd3ec3272b790010ae8bfcc6a9542520fff6a186"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown

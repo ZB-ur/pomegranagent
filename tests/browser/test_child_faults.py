@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -1470,7 +1471,64 @@ def test_tts_faults_settle_and_do_not_block_completion(
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
-def test_tts_cold_start_uses_reachable_five_second_fallback(
+def test_tts_5810ms_cold_start_uses_same_request_audio_path(
+    child_page, exact_fixture_url, viewport
+):
+    page = child_page.page
+    page.clock.install(time=1_700_000_000)
+    page.set_viewport_size(viewport)
+    tts_requests = []
+    held_tts_routes = []
+    port = child_page.server.port
+
+    child_page.fulfill_json("**/api/roster/today", [SYNTHETIC_CHILD])
+    child_page.fulfill_json(
+        "**/api/children/1/active-conversation", {"conversation": None}
+    )
+
+    def hold_tts(route):
+        assert exact_fixture_url(route.request.url, port)
+        tts_requests.append(route.request.url)
+        held_tts_routes.append(route)
+
+    page.route("**/api/tts?*", hold_tts)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="开始", exact=True).click()
+    child = page.get_by_role("button", name="小芽", exact=True)
+    child.wait_for()
+    page.clock.pause_at(page.evaluate("Date.now()") / 1000 + 1)
+    with page.expect_request(lambda request: "/api/tts?" in request.url) as requested:
+        child.click()
+    assert exact_fixture_url(requested.value.url, port)
+    assert parse_qs(urlsplit(requested.value.url).query) == {
+        "text": ["你好呀，小芽！我是鸭鸭日记本，今天想听你讲讲照顾小鸭的事～"]
+    }
+    page.evaluate("() => Promise.resolve()")
+    assert len(tts_requests) == 1
+    assert len(held_tts_routes) == 1
+
+    page.clock.fast_forward(5_810)
+    assert page.evaluate("window.__childTest.audio.instances.length") == 0
+    assert page.evaluate("window.__childTest.tts.utterances.length") == 0
+    held_tts_routes[0].fulfill(
+        status=200,
+        content_type="audio/mpeg",
+        body=b"synthetic-cold-start-audio",
+    )
+    page.wait_for_function("window.__childTest.audio.instances.length === 1")
+    assert page.evaluate("window.__childTest.audio.instances[0].playCalls") == 1
+    assert page.evaluate("window.__childTest.tts.utterances.length") == 0
+
+    page.evaluate("window.__childTest.audio.emitPlaying(0)")
+    page.evaluate("window.__childTest.audio.emitEnded(0)")
+    page.get_by_role("button", name="开始说话", exact=True).wait_for()
+    assert len(tts_requests) == 1
+    assert page.evaluate("window.__childTest.audio.instances.length") == 1
+    assert page.evaluate("window.__childTest.tts.utterances.length") == 0
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
+def test_tts_cold_start_uses_reachable_eight_second_fallback(
     child_page, exact_fixture_url, viewport
 ):
     page = child_page.page
@@ -1524,10 +1582,13 @@ def test_tts_cold_start_uses_reachable_five_second_fallback(
 
     stored = json.loads(page.evaluate("sessionStorage.getItem('duck-diary.child-session.v1')"))
     assert stored["state"] == "speaking"
+    page.clock.fast_forward(7_999)
+    assert page.evaluate("window.__childTest.tts.utterances.length") == 0
+    assert page.evaluate("window.__childTest.audio.instances.length") == 0
     with page.expect_event(
         "requestfailed", lambda request: "/api/tts?" in request.url
     ) as aborted:
-        page.clock.fast_forward(5000)
+        page.clock.fast_forward(1)
     page.clock.fast_forward(1)
     assert exact_fixture_url(aborted.value.url, port)
     assert len(held_tts_routes) == 1

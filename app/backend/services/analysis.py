@@ -2,11 +2,13 @@
 from __future__ import annotations
 
 import logging
+import math
+import threading
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Callable, Literal, Protocol
 
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from .. import models, schemas
@@ -73,14 +75,32 @@ def _database_utc(value: datetime) -> datetime:
 
 
 def recover_expired_jobs(db: Session, *, now: datetime) -> int:
-    """Make abandoned processing jobs eligible again without erasing attempts."""
+    """Recover abandoned attempts and terminalize every exhausted runnable job."""
     db_now = _database_utc(now)
-    recovered = db.execute(
+    expired_processing = and_(
+        models.AnalysisJob.status == "processing",
+        models.AnalysisJob.lease_expires_at.is_not(None),
+        models.AnalysisJob.lease_expires_at <= db_now,
+    )
+    exhausted_pending = and_(
+        models.AnalysisJob.status == "pending",
+        models.AnalysisJob.available_at <= db_now,
+        models.AnalysisJob.attempt_count >= models.AnalysisJob.max_attempts,
+    )
+    maintenance_job_id = db.scalar(
+        select(models.AnalysisJob.id)
+        .where(or_(expired_processing, exhausted_pending))
+        .limit(1)
+    )
+    if maintenance_job_id is None:
+        db.rollback()
+        return 0
+    db.rollback()
+    retryable = db.execute(
         update(models.AnalysisJob)
         .where(
-            models.AnalysisJob.status == "processing",
-            models.AnalysisJob.lease_expires_at.is_not(None),
-            models.AnalysisJob.lease_expires_at <= db_now,
+            expired_processing,
+            models.AnalysisJob.attempt_count < models.AnalysisJob.max_attempts,
         )
         .values(
             status="pending",
@@ -90,8 +110,25 @@ def recover_expired_jobs(db: Session, *, now: datetime) -> int:
             updated_at=db_now,
         )
     )
+    exhausted = db.execute(
+        update(models.AnalysisJob)
+        .where(
+            or_(expired_processing, exhausted_pending),
+            models.AnalysisJob.attempt_count >= models.AnalysisJob.max_attempts,
+        )
+        .values(
+            status="failed",
+            available_at=db_now,
+            lease_owner=None,
+            lease_expires_at=None,
+            last_error_code=ANALYSIS_ERROR_CODE,
+            last_error_message=ANALYSIS_ERROR_MESSAGE,
+            finished_at=db_now,
+            updated_at=db_now,
+        )
+    )
     db.commit()
-    return recovered.rowcount
+    return retryable.rowcount + exhausted.rowcount
 
 
 def claim_next_analysis_job(
@@ -109,6 +146,7 @@ def claim_next_analysis_job(
             .where(
                 models.AnalysisJob.status == "pending",
                 models.AnalysisJob.available_at <= db_now,
+                models.AnalysisJob.attempt_count < models.AnalysisJob.max_attempts,
             )
             .order_by(models.AnalysisJob.available_at, models.AnalysisJob.id)
             .limit(1)
@@ -122,6 +160,7 @@ def claim_next_analysis_job(
                 models.AnalysisJob.id == candidate_id,
                 models.AnalysisJob.status == "pending",
                 models.AnalysisJob.available_at <= db_now,
+                models.AnalysisJob.attempt_count < models.AnalysisJob.max_attempts,
             )
             .values(
                 status="processing",
@@ -333,6 +372,88 @@ def _owned_job_update(
     )
 
 
+def renew_analysis_job_lease(
+    session_factory: Callable[[], Session],
+    *,
+    job_id: int,
+    worker_id: str,
+    attempt_count: int,
+    now: datetime,
+    lease_seconds: float,
+) -> bool:
+    """Extend only the still-live lease for this exact owner and attempt."""
+    db = session_factory()
+    try:
+        db_now = _database_utc(now)
+        renewed = db.execute(
+            update(models.AnalysisJob)
+            .where(
+                *_owned_job_update(
+                    job_id=job_id,
+                    worker_id=worker_id,
+                    attempt_count=attempt_count,
+                    now=db_now,
+                )
+            )
+            .values(
+                lease_expires_at=db_now + timedelta(seconds=lease_seconds),
+                updated_at=db_now,
+            )
+        )
+        if renewed.rowcount == 1:
+            db.commit()
+            return True
+        db.rollback()
+        return False
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
+def _run_lease_heartbeat(
+    session_factory: Callable[[], Session],
+    *,
+    job_id: int,
+    worker_id: str,
+    attempt_count: int,
+    clock: Callable[[], datetime],
+    lease_seconds: float,
+    interval_seconds: float,
+    stop_event: threading.Event,
+    lease_lost_event: threading.Event,
+) -> None:
+    while not stop_event.wait(interval_seconds):
+        try:
+            renewed = renew_analysis_job_lease(
+                session_factory,
+                job_id=job_id,
+                worker_id=worker_id,
+                attempt_count=attempt_count,
+                now=clock(),
+                lease_seconds=lease_seconds,
+            )
+        except Exception as exc:
+            logger.warning(
+                "analysis lease heartbeat failure job_id=%s attempt_count=%s error_type=%s",
+                job_id,
+                attempt_count,
+                type(exc).__name__,
+                exc_info=True,
+            )
+            continue
+        if renewed:
+            continue
+        lease_lost_event.set()
+        logger.warning(
+            "analysis lease lost during provider call job_id=%s attempt_count=%s",
+            job_id,
+            attempt_count,
+        )
+        return
+
+
 def _record_failure(
     session_factory: Callable[[], Session],
     *,
@@ -340,14 +461,14 @@ def _record_failure(
     worker_id: str,
     attempt_count: int,
     clock: Callable[[], datetime],
-) -> None:
+) -> bool:
     db = session_factory()
     try:
         db_now = _database_utc(clock())
         job = db.get(models.AnalysisJob, job_id)
         if job is None:
             db.rollback()
-            return
+            return False
         terminal = attempt_count >= job.max_attempts
         failure = db.execute(
             update(models.AnalysisJob)
@@ -372,10 +493,35 @@ def _record_failure(
         )
         if failure.rowcount == 1:
             db.commit()
-        else:
-            db.rollback()
+            return True
+        db.rollback()
+        return False
     finally:
         db.close()
+
+
+def _record_failure_outcome(
+    session_factory: Callable[[], Session],
+    *,
+    job_id: int,
+    worker_id: str,
+    attempt_count: int,
+    clock: Callable[[], datetime],
+) -> Literal["failed", "lease_lost"]:
+    if _record_failure(
+        session_factory,
+        job_id=job_id,
+        worker_id=worker_id,
+        attempt_count=attempt_count,
+        clock=clock,
+    ):
+        return "failed"
+    logger.warning(
+        "analysis lease lost before failure recording job_id=%s attempt_count=%s",
+        job_id,
+        attempt_count,
+    )
+    return "lease_lost"
 
 
 def _replace_projection(
@@ -508,8 +654,25 @@ def process_analysis_job(
     worker_id: str,
     analyzer: AnalysisEngine,
     clock: Callable[[], datetime],
-) -> None:
+    lease_seconds: float = 45,
+    heartbeat_interval_seconds: float | None = None,
+) -> Literal["succeeded", "failed", "lease_lost", "skipped"]:
     """Run a claimed job while keeping AI calls outside database sessions."""
+    heartbeat_interval = (
+        lease_seconds / 3
+        if heartbeat_interval_seconds is None
+        else heartbeat_interval_seconds
+    )
+    if (
+        not math.isfinite(lease_seconds)
+        or not math.isfinite(heartbeat_interval)
+        or lease_seconds <= 0
+        or heartbeat_interval <= 0
+        or heartbeat_interval > lease_seconds / 3
+    ):
+        raise ValueError(
+            "analysis heartbeat interval must be finite, positive, and no more than lease/3"
+        )
     try:
         frozen_input = _load_frozen_input(
             session_factory,
@@ -519,49 +682,114 @@ def process_analysis_job(
         )
     except _InvalidFrozenInput as exc:
         logger.warning("analysis frozen input failure job_id=%s", exc.job_id)
-        _record_failure(
+        return _record_failure_outcome(
             session_factory,
             job_id=exc.job_id,
             worker_id=worker_id,
             attempt_count=exc.attempt_count,
             clock=clock,
         )
-        return
     if frozen_input is None:
-        return
+        return "skipped"
 
+    heartbeat_stop = threading.Event()
+    lease_lost = threading.Event()
+    heartbeat = threading.Thread(
+        target=_run_lease_heartbeat,
+        kwargs={
+            "session_factory": session_factory,
+            "job_id": frozen_input.job_id,
+            "worker_id": worker_id,
+            "attempt_count": frozen_input.attempt_count,
+            "clock": clock,
+            "lease_seconds": lease_seconds,
+            "interval_seconds": heartbeat_interval,
+            "stop_event": heartbeat_stop,
+            "lease_lost_event": lease_lost,
+        },
+        name=f"analysis-lease-heartbeat-{frozen_input.job_id}",
+        daemon=True,
+    )
+    provider_error: Exception | None = None
+    projection: _ValidatedProjection | None = None
+    heartbeat.start()
     try:
         extraction = analyzer.extract_info(frozen_input.transcript)
-        assessment = analyzer.assess_conversation(
-            frozen_input.transcript,
-            list(frozen_input.dimensions),
-        )
-        projection = _validate_projection(
-            extraction,
-            assessment,
-            frozen_input=frozen_input,
-        )
-        _replace_projection(
-            session_factory,
-            frozen_input=frozen_input,
-            projection=projection,
-            worker_id=worker_id,
-            clock=clock,
-        )
+        if not lease_lost.is_set():
+            assessment = analyzer.assess_conversation(
+                frozen_input.transcript,
+                list(frozen_input.dimensions),
+            )
+            projection = _validate_projection(
+                extraction,
+                assessment,
+                frozen_input=frozen_input,
+            )
     except Exception as exc:  # Provider content is never persisted or exposed.
+        provider_error = exc
+    finally:
+        # Never compete with the final projection/failure transaction for SQLite's writer lock.
+        heartbeat_stop.set()
+        heartbeat.join()
+
+    if lease_lost.is_set():
+        logger.warning(
+            "analysis lease lost before projection job_id=%s attempt_count=%s",
+            frozen_input.job_id,
+            frozen_input.attempt_count,
+        )
+        return "lease_lost"
+
+    if provider_error is not None:
         logger.warning(
             "analysis provider or persistence failure job_id=%s error_type=%s",
             job_id,
-            type(exc).__name__,
-            exc_info=True,
+            type(provider_error).__name__,
+            exc_info=(
+                type(provider_error),
+                provider_error,
+                provider_error.__traceback__,
+            ),
         )
-        _record_failure(
+        return _record_failure_outcome(
             session_factory,
             job_id=frozen_input.job_id,
             worker_id=worker_id,
             attempt_count=frozen_input.attempt_count,
             clock=clock,
         )
+
+    assert projection is not None
+    try:
+        replaced = _replace_projection(
+            session_factory,
+            frozen_input=frozen_input,
+            projection=projection,
+            worker_id=worker_id,
+            clock=clock,
+        )
+    except Exception as exc:
+        logger.warning(
+            "analysis provider or persistence failure job_id=%s error_type=%s",
+            job_id,
+            type(exc).__name__,
+            exc_info=True,
+        )
+        return _record_failure_outcome(
+            session_factory,
+            job_id=frozen_input.job_id,
+            worker_id=worker_id,
+            attempt_count=frozen_input.attempt_count,
+            clock=clock,
+        )
+    if not replaced:
+        logger.warning(
+            "analysis lease lost before projection job_id=%s attempt_count=%s",
+            frozen_input.job_id,
+            frozen_input.attempt_count,
+        )
+        return "lease_lost"
+    return "succeeded"
 
 
 def retry_analysis(

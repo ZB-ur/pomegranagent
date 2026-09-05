@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from threading import Barrier, Event, Thread
+from time import monotonic, sleep
 
 import pytest
 from fastapi.testclient import TestClient
@@ -131,6 +132,25 @@ def _assessment_output():
         ],
         "overall": 99,
     }
+
+
+def _wait_for_lease_extension(job_id: int, *, beyond: datetime) -> datetime:
+    """Wait for a real heartbeat commit instead of sleeping for a guessed duration."""
+    deadline = monotonic() + 1
+    while monotonic() < deadline:
+        session = SessionLocal()
+        try:
+            lease_expires_at = session.scalar(
+                select(models.AnalysisJob.lease_expires_at).where(
+                    models.AnalysisJob.id == job_id
+                )
+            )
+        finally:
+            session.close()
+        if lease_expires_at is not None and lease_expires_at > beyond.replace(tzinfo=None):
+            return lease_expires_at
+        sleep(0.005)
+    pytest.fail("analysis lease heartbeat did not extend the durable lease")
 
 
 def _projection_counts(db_session, conversation_id: int) -> dict[str, int]:
@@ -319,6 +339,160 @@ def test_restart_recovers_only_expired_processing_jobs_and_preserves_attempts(db
     assert live_saved.lease_owner == "live-worker"
 
 
+def test_lease_renewal_requires_the_exact_owner_and_attempt_fence(db_session):
+    """Catches an old attempt extending a newer attempt that reused the same worker id."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=6,
+    ) == job.id
+    job_id = job.id
+    db_session.rollback()
+
+    assert analysis.renew_analysis_job_lease(
+        SessionLocal,
+        job_id=job_id,
+        worker_id="worker-b",
+        attempt_count=1,
+        now=NOW + timedelta(seconds=2),
+        lease_seconds=6,
+    ) is False
+    assert analysis.renew_analysis_job_lease(
+        SessionLocal,
+        job_id=job_id,
+        worker_id="worker-a",
+        attempt_count=2,
+        now=NOW + timedelta(seconds=2),
+        lease_seconds=6,
+    ) is False
+    assert analysis.renew_analysis_job_lease(
+        SessionLocal,
+        job_id=job_id,
+        worker_id="worker-a",
+        attempt_count=1,
+        now=NOW + timedelta(seconds=2),
+        lease_seconds=6,
+    ) is True
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job_id)
+    assert saved is not None
+    assert saved.lease_expires_at == (NOW + timedelta(seconds=8)).replace(tzinfo=None)
+
+
+def test_heartbeat_retries_after_one_transient_lease_write_failure(
+    db_session,
+    monkeypatch,
+):
+    """Catches one short SQLite write conflict disabling renewal for the whole attempt."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+    job_id = job.id
+    db_session.rollback()
+    first_renewal_failed = Event()
+    later_renewal_succeeded = Event()
+    failures: list[BaseException] = []
+    renewal_calls = 0
+    original_renew = analysis.renew_analysis_job_lease
+
+    def fail_once_then_renew(*args, **kwargs):
+        nonlocal renewal_calls
+        renewal_calls += 1
+        if renewal_calls == 1:
+            first_renewal_failed.set()
+            raise RuntimeError("transient sqlite writer conflict")
+        renewed = original_renew(*args, **kwargs)
+        if renewed:
+            later_renewal_succeeded.set()
+        return renewed
+
+    monkeypatch.setattr(analysis, "renew_analysis_job_lease", fail_once_then_renew)
+
+    def wait_for_retry(method: str) -> None:
+        if method == "extract":
+            assert later_renewal_succeeded.wait(1)
+
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=FakeAnalysisEngine(
+            extraction=_analysis_output(),
+            assessment=_assessment_output(),
+            on_call=wait_for_retry,
+        ),
+        clock=lambda: NOW,
+        lease_seconds=6,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    def run_worker_once() -> None:
+        try:
+            worker.run_once()
+        except BaseException as exc:  # Preserve the worker-thread failure for the assertion.
+            failures.append(exc)
+
+    thread = Thread(target=run_worker_once)
+    thread.start()
+    thread.join(2)
+
+    assert first_renewal_failed.is_set()
+    assert later_renewal_succeeded.is_set()
+    assert renewal_calls >= 2
+    assert not thread.is_alive()
+    assert failures == []
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job_id)
+    assert saved is not None
+    assert saved.status == "succeeded"
+
+
+def test_heartbeat_lease_loss_during_extraction_skips_the_second_provider_call(
+    db_session,
+    monkeypatch,
+):
+    """Catches a fenced-out attempt continuing to spend a second remote request."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+    assert analysis.claim_next_analysis_job(
+        db_session,
+        worker_id="worker-a",
+        now=NOW,
+        lease_seconds=6,
+    ) == job.id
+    job_id = job.id
+    db_session.rollback()
+    renewal_rejected = Event()
+
+    def reject_renewal(*_args, **_kwargs):
+        renewal_rejected.set()
+        return False
+
+    monkeypatch.setattr(analysis, "renew_analysis_job_lease", reject_renewal)
+
+    def wait_until_fenced(method: str) -> None:
+        if method == "extract":
+            assert renewal_rejected.wait(1)
+
+    analyzer = FakeAnalysisEngine(
+        extraction=_analysis_output(),
+        assessment=_assessment_output(),
+        on_call=wait_until_fenced,
+    )
+
+    result = analysis.process_analysis_job(
+        SessionLocal,
+        job_id=job_id,
+        worker_id="worker-a",
+        analyzer=analyzer,
+        clock=lambda: NOW,
+        lease_seconds=6,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    assert result == "lease_lost"
+    assert analyzer.extract_calls
+    assert analyzer.assessment_calls == []
+
+
 def test_claim_compare_and_set_loser_does_not_increment_the_live_attempt(db_session):
     """Catches a second claimant overwriting the first durable lease."""
     _, job = _ended_conversation_with_job(db_session)
@@ -486,6 +660,195 @@ def test_process_builds_the_frozen_input_outside_a_database_session_and_projects
     assert assessment.overall == 4.0
     assert feeding[0].content == "给小黄添了菜叶"
     assert feeding[0].duck_id == duck.id
+
+
+def test_worker_heartbeat_keeps_a_slow_success_owned_past_its_original_deadline(
+    db_session,
+):
+    """Catches valid provider results being discarded solely because both calls crossed the lease."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    job_id = job.id
+    conversation_id = conversation.id
+    db_session.rollback()
+    clock_now = [NOW]
+    provider_entered = Event()
+    release_provider = Event()
+    failures: list[BaseException] = []
+
+    def pause_extraction(method: str) -> None:
+        if method != "extract":
+            return
+        clock_now[0] = NOW + timedelta(seconds=4)
+        provider_entered.set()
+        assert release_provider.wait(2)
+
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=FakeAnalysisEngine(
+            extraction=_analysis_output(),
+            assessment=_assessment_output(),
+            on_call=pause_extraction,
+        ),
+        clock=lambda: clock_now[0],
+        lease_seconds=6,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    def run_worker_once() -> None:
+        try:
+            worker.run_once()
+        except BaseException as exc:  # Preserve the worker-thread failure for the assertion.
+            failures.append(exc)
+
+    thread = Thread(target=run_worker_once)
+    thread.start()
+    try:
+        assert provider_entered.wait(1)
+        extended_to = _wait_for_lease_extension(
+            job_id,
+            beyond=NOW + timedelta(seconds=6),
+        )
+        clock_now[0] = NOW + timedelta(seconds=7)
+    finally:
+        release_provider.set()
+        thread.join(2)
+
+    assert extended_to == (NOW + timedelta(seconds=10)).replace(tzinfo=None)
+    assert not thread.is_alive()
+    assert failures == []
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job_id)
+    assert saved is not None
+    assert saved.status == "succeeded"
+    assert _projection_counts(db_session, conversation_id)["assessment"] == 1
+
+
+def test_worker_heartbeat_allows_a_slow_failure_to_leave_processing(db_session):
+    """Catches a provider exception after the original deadline stranding the job forever."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+    job_id = job.id
+    db_session.rollback()
+    clock_now = [NOW]
+    provider_entered = Event()
+    release_provider = Event()
+    failures: list[BaseException] = []
+
+    def pause_extraction(method: str) -> None:
+        if method != "extract":
+            return
+        clock_now[0] = NOW + timedelta(seconds=4)
+        provider_entered.set()
+        assert release_provider.wait(2)
+
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=FakeAnalysisEngine(
+            extraction=RuntimeError("slow provider failure"),
+            assessment=_assessment_output(),
+            on_call=pause_extraction,
+        ),
+        clock=lambda: clock_now[0],
+        lease_seconds=6,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    def run_worker_once() -> None:
+        try:
+            worker.run_once()
+        except BaseException as exc:  # Preserve the worker-thread failure for the assertion.
+            failures.append(exc)
+
+    thread = Thread(target=run_worker_once)
+    thread.start()
+    try:
+        assert provider_entered.wait(1)
+        _wait_for_lease_extension(job_id, beyond=NOW + timedelta(seconds=6))
+        clock_now[0] = NOW + timedelta(seconds=7)
+    finally:
+        release_provider.set()
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert failures == []
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job_id)
+    assert saved is not None
+    assert saved.status == "pending"
+    assert saved.attempt_count == 1
+    assert saved.lease_owner is None
+    assert saved.available_at == (NOW + timedelta(seconds=8)).replace(tzinfo=None)
+
+
+def test_worker_joins_an_inflight_heartbeat_before_projection_persistence(
+    db_session,
+    monkeypatch,
+):
+    """Catches the final SQLite transaction racing an in-flight heartbeat writer."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+    job_id = job.id
+    db_session.rollback()
+    heartbeat_committed = Event()
+    release_heartbeat = Event()
+    assessment_returned = Event()
+    projection_started = Event()
+    failures: list[BaseException] = []
+    original_renew = analysis.renew_analysis_job_lease
+    original_replace = analysis._replace_projection
+
+    def hold_heartbeat(*args, **kwargs):
+        renewed = original_renew(*args, **kwargs)
+        heartbeat_committed.set()
+        assert release_heartbeat.wait(2)
+        return renewed
+
+    def observe_projection(*args, **kwargs):
+        projection_started.set()
+        return original_replace(*args, **kwargs)
+
+    monkeypatch.setattr(analysis, "renew_analysis_job_lease", hold_heartbeat)
+    monkeypatch.setattr(analysis, "_replace_projection", observe_projection)
+
+    def coordinate_provider(method: str) -> None:
+        if method == "extract":
+            assert heartbeat_committed.wait(1)
+        elif method == "assess":
+            assessment_returned.set()
+
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=FakeAnalysisEngine(
+            extraction=_analysis_output(),
+            assessment=_assessment_output(),
+            on_call=coordinate_provider,
+        ),
+        clock=lambda: NOW,
+        lease_seconds=6,
+        heartbeat_interval_seconds=0.01,
+    )
+
+    def run_worker_once() -> None:
+        try:
+            worker.run_once()
+        except BaseException as exc:  # Preserve the worker-thread failure for the assertion.
+            failures.append(exc)
+
+    thread = Thread(target=run_worker_once)
+    thread.start()
+    try:
+        assert heartbeat_committed.wait(1)
+        assert assessment_returned.wait(1)
+        assert not projection_started.wait(0.1)
+    finally:
+        release_heartbeat.set()
+        thread.join(2)
+
+    assert not thread.is_alive()
+    assert failures == []
+    assert projection_started.is_set()
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job_id)
+    assert saved is not None
+    assert saved.status == "succeeded"
 
 
 def test_frozen_transcript_excludes_a_later_message_in_the_same_conversation(db_session):
@@ -714,6 +1077,7 @@ def test_failure_uses_bounded_backoff_then_a_sanitized_terminal_state(
 
 def test_lease_loss_preserves_existing_projection_and_stale_worker_cannot_fail_it(
     db_session,
+    caplog,
 ):
     """Catches an old worker deleting results or resetting a lease taken by another worker."""
     conversation, job = _ended_conversation_with_job(db_session)
@@ -750,7 +1114,7 @@ def test_lease_loss_preserves_existing_projection_and_stale_worker_cannot_fail_i
         finally:
             other.close()
 
-    analysis.process_analysis_job(
+    result = analysis.process_analysis_job(
         SessionLocal,
         job_id=job.id,
         worker_id="worker-a",
@@ -772,10 +1136,13 @@ def test_lease_loss_preserves_existing_projection_and_stale_worker_cannot_fail_i
     assert saved.lease_owner == "worker-b"
     assert saved.last_error_code is None
     assert [log.content for log in logs] == ["保留的教师结果"]
+    assert result == "lease_lost"
+    assert "analysis lease lost before failure recording" in caplog.text
 
 
 def test_lease_loss_before_projection_writes_nothing_even_after_valid_ai_results(
     db_session,
+    caplog,
 ):
     """Catches a stale worker replacing results after its lease was taken over."""
     conversation, job = _ended_conversation_with_job(db_session)
@@ -811,7 +1178,7 @@ def test_lease_loss_before_projection_writes_nothing_even_after_valid_ai_results
         finally:
             other.close()
 
-    analysis.process_analysis_job(
+    result = analysis.process_analysis_job(
         SessionLocal,
         job_id=job.id,
         worker_id="worker-a",
@@ -834,6 +1201,8 @@ def test_lease_loss_before_projection_writes_nothing_even_after_valid_ai_results
     assert insight is not None
     assert insight.content == "保留的心得"
     assert _projection_counts(db_session, conversation.id)["assessment"] == 0
+    assert result == "lease_lost"
+    assert "analysis lease lost before projection" in caplog.text
 
 
 def test_a_succeeded_job_is_a_no_op_and_never_replaces_its_projection(db_session):
@@ -1218,6 +1587,133 @@ def test_worker_start_recovers_once_rejects_double_start_and_stops_cleanly(
     assert saved.attempt_count == 2
     assert saved.lease_owner is None
     assert worker.status() == "stopped"
+
+
+@pytest.mark.parametrize(
+    ("lease_seconds", "heartbeat_interval_seconds"),
+    [
+        (0, None),
+        (6, 0),
+        (6, 3),
+        (6, float("nan")),
+    ],
+)
+def test_worker_rejects_an_unsafe_heartbeat_configuration_before_claiming(
+    db_session,
+    lease_seconds,
+    heartbeat_interval_seconds,
+):
+    """Catches invalid timing configuration claiming a job it cannot keep alive."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+
+    with pytest.raises(ValueError, match="heartbeat"):
+        AnalysisWorker(
+            session_factory=SessionLocal,
+            analyzer=FakeAnalysisEngine(
+                extraction=_analysis_output(),
+                assessment=_assessment_output(),
+            ),
+            clock=lambda: NOW,
+            lease_seconds=lease_seconds,
+            heartbeat_interval_seconds=heartbeat_interval_seconds,
+        )
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "pending"
+    assert saved.attempt_count == 0
+
+
+def test_worker_run_once_recovers_and_reclaims_an_expired_job_without_restart(db_session):
+    """Catches normal polling ignoring a lease that expired after worker startup."""
+    conversation, job = _ended_conversation_with_job(db_session)
+    job.status = "processing"
+    job.attempt_count = 1
+    job.lease_owner = "dead-worker"
+    job.lease_expires_at = NOW - timedelta(seconds=1)
+    db_session.commit()
+    analyzer = FakeAnalysisEngine(
+        extraction=_analysis_output(),
+        assessment=_assessment_output(),
+    )
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=analyzer,
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is True
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "succeeded"
+    assert saved.attempt_count == 2
+    assert analyzer.extract_calls
+    assert _projection_counts(db_session, conversation.id)["assessment"] == 1
+
+
+def test_worker_poll_terminally_fails_an_expired_job_at_max_attempts(db_session):
+    """Catches expired processing jobs cycling past max_attempts forever."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+    job.status = "processing"
+    job.attempt_count = 3
+    job.max_attempts = 3
+    job.lease_owner = "dead-worker"
+    job.lease_expires_at = NOW - timedelta(seconds=1)
+    db_session.commit()
+    analyzer = FakeAnalysisEngine(
+        extraction=RuntimeError("must not call a provider after max attempts"),
+        assessment=_assessment_output(),
+    )
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=analyzer,
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is False
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "failed"
+    assert saved.attempt_count == 3
+    assert saved.lease_owner is None
+    assert saved.lease_expires_at is None
+    assert saved.last_error_code == "ANALYSIS_UPSTREAM_FAILED"
+    assert saved.last_error_message == "分析服务暂时不可用"
+    assert saved.finished_at == NOW.replace(tzinfo=None)
+    assert analyzer.extract_calls == []
+
+
+def test_worker_poll_terminally_fails_a_legacy_exhausted_pending_job(db_session):
+    """Catches pre-upgrade recovery output remaining pending but permanently unclaimable."""
+    _conversation, job = _ended_conversation_with_job(db_session)
+    job.attempt_count = 3
+    job.max_attempts = 3
+    db_session.commit()
+    analyzer = FakeAnalysisEngine(
+        extraction=RuntimeError("must not call a provider after max attempts"),
+        assessment=_assessment_output(),
+    )
+    worker = AnalysisWorker(
+        session_factory=SessionLocal,
+        analyzer=analyzer,
+        clock=lambda: NOW,
+    )
+
+    assert worker.run_once() is False
+
+    db_session.expire_all()
+    saved = db_session.get(models.AnalysisJob, job.id)
+    assert saved is not None
+    assert saved.status == "failed"
+    assert saved.attempt_count == 3
+    assert saved.last_error_code == "ANALYSIS_UPSTREAM_FAILED"
+    assert saved.finished_at == NOW.replace(tzinfo=None)
+    assert analyzer.extract_calls == []
 
 
 def test_worker_run_once_uses_the_injected_engine_and_durable_claim(db_session):

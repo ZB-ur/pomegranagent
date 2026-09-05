@@ -18,6 +18,7 @@ const COMPLETE_FIELDS = [
 const CHAT_INPUT_FIELDS = ['request_id', 'child_id', 'text', 'conversation_id', 'max_rounds'];
 const ANALYSIS_STATUSES = new Set(['pending', 'processing', 'succeeded', 'failed']);
 const END_REASONS = new Set(['max_rounds', 'complete']);
+const TTS_HTTP_TIMEOUT_MS = 10000;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const UTC_TIMESTAMP = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.\d+)?Z$/;
 
@@ -329,7 +330,7 @@ export function createChildAPI(duckAPI, duckAuth) {
       return duckAPI.request(`/api/tts?text=${encodeURIComponent(text)}`, {
         signal,
         responseType: 'blob',
-        timeoutMs: 10000,
+        timeoutMs: TTS_HTTP_TIMEOUT_MS,
         sequenceKey: 'child-tts',
       });
     },
