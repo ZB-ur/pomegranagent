@@ -1554,6 +1554,12 @@ def test_recovery_stage_keeps_exact_panel_and_pet_orb_geometry_without_scroll(
     page = child_page.page
     if transcript_mode == "empty":
         page.get_by_role("button", name="小芽", exact=True).click()
+        page.wait_for_function(
+            "window.__childTest.audio.instances.length === 1 "
+            "&& window.__childTest.audio.instances[0].playCalls === 1"
+        )
+        page.evaluate("window.__childTest.audio.emitPlaying(0)")
+        page.evaluate("window.__childTest.audio.emitEnded(0)")
     record = wait_for_active_ready(page)
     record.click()
     page.wait_for_function("window.__childTest.recognition.instances.length > 0")
