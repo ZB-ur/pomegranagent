@@ -1188,8 +1188,12 @@ def test_roster_panel_and_pet_orb_are_safe_visible_and_non_overlapping(
         image.wait_for()
         assert image.get_attribute("src") == canonical_avatar
         assert image.get_attribute("alt") == ""
+        fallback = cards.nth(1).locator(".child-card__avatar .avatar-fallback")
+        assert fallback.evaluate("element => element.hidden") is True
+        assert fallback.is_visible() is False
         image.dispatch_event("error")
         assert cards.nth(1).locator("img").count() == 0
+        assert fallback.is_visible() is True
         assert cards.locator(".child-card__avatar").all_inner_texts() == ["测", "小"]
         body = page.locator("body").inner_text()
         assert "javascript:alert(1)" not in body

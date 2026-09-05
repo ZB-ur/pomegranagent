@@ -274,6 +274,10 @@ body {
   place-items: center;
 }
 
+#child-app .child-card__avatar .avatar-fallback[hidden] {
+  display: none;
+}
+
 #child-app .child-card__label {
   min-inline-size: 0;
   overflow-wrap: anywhere;
