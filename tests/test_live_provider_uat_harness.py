@@ -1338,14 +1338,32 @@ def test_live_server_accepts_only_canonical_macos_text_encoding(tmp_path, monkey
     }
     canonical = f"0x{os.geteuid():X}:0x19:0x34"
 
+    if sys.platform == "darwin":
+        injected = subprocess.run(
+            (
+                PYTHON,
+                "-c",
+                "import os,sys; sys.stdout.write(os.environ.get('__CF_USER_TEXT_ENCODING',''))",
+            ),
+            check=True,
+            capture_output=True,
+            env={"PATH": os.environ.get("PATH", "/usr/bin:/bin")},
+            text=True,
+        )
+        assert injected.stdout == canonical
+
     monkeypatch.setattr(server.sys, "platform", "darwin")
     paths = server.validate_child_environment(
-        {**environment, "__CF_USER_TEXT_ENCODING": canonical}
+        {
+            **environment,
+            "LC_CTYPE": "C.UTF-8",
+            "__CF_USER_TEXT_ENCODING": canonical,
+        }
     )
     assert paths.root == run_root
     for invalid in (
         f"0x{os.geteuid() + 1:X}:0x19:0x34",
-        f"0x{os.geteuid():x}:0x19:0x34",
+        f"0x{os.geteuid():X}:0x1a:0x34",
         f"0x{os.geteuid():X}:0x019:0x34",
         f"0x{os.geteuid():X}:0x19:0x34:extra",
     ):
@@ -1353,6 +1371,14 @@ def test_live_server_accepts_only_canonical_macos_text_encoding(tmp_path, monkey
             server.validate_child_environment(
                 {**environment, "__CF_USER_TEXT_ENCODING": invalid}
             )
+    with pytest.raises(server.ServerSafetyError, match="environment"):
+        server.validate_child_environment(
+            {
+                **environment,
+                "LC_CTYPE": "zh_CN.UTF-8",
+                "__CF_USER_TEXT_ENCODING": canonical,
+            }
+        )
 
     monkeypatch.setattr(server.sys, "platform", "linux")
     with pytest.raises(server.ServerSafetyError, match="environment"):

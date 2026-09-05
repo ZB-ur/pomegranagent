@@ -50,6 +50,7 @@ NEUTRAL_KEYS = {
     "__CF_USER_TEXT_ENCODING",
     "LANG",
     "LC_ALL",
+    "LC_CTYPE",
     "PATH",
     "PYTHONNOUSERSITE",
     "PYTHON_DOTENV_DISABLED",
@@ -445,6 +446,7 @@ def validate_child_environment(
         or source.get("PYTHON_DOTENV_DISABLED") != "1"
         or source.get("PYTHONNOUSERSITE") != "1"
         or source.get("TZ") != "Asia/Shanghai"
+        or source.get("LC_CTYPE") not in {None, "C.UTF-8", "UTF-8"}
         or not source.get("DEEPSEEK_API_KEY")
         or not _valid_macos_text_encoding(source)
     ):
