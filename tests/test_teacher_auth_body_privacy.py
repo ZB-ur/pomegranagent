@@ -81,6 +81,7 @@ async def _raw_unauthenticated_request(
         "query_string": b"",
         "root_path": "",
         "headers": [
+            (b"host", b"testserver"),
             (b"content-type", b"application/json"),
             (b"content-length", str(len(_PRIVATE_JSON)).encode("ascii")),
         ],

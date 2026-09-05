@@ -39,6 +39,16 @@ class TeacherSession(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
+class TeacherPinThrottle(Base):
+    __tablename__ = "teacher_pin_throttle"
+    __table_args__ = (
+        CheckConstraint("id = 1", name="ck_teacher_pin_throttle_singleton"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True, default=1)
+    failure_timestamps: Mapped[str] = mapped_column(Text, default="[]")
+
+
 class Child(Base):
     __tablename__ = "children"
 

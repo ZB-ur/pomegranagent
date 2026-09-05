@@ -3,9 +3,7 @@ import re
 
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-
-from app.backend.main import app
-
+import pytest
 
 def assert_error(response, *, status: int, code: str):
     assert response.status_code == status
@@ -85,6 +83,50 @@ def test_api_error_uses_standard_envelope_for_business_failures():
 
     assert_error(response, status=409, code="BUSINESS_RULE")
     assert response.json()["error"]["field_errors"] == {"body.name": ["已存在"]}
+
+
+def test_api_error_can_carry_a_controlled_retry_after_header():
+    from app.backend.api_errors import APIError, install_api_error_handling
+
+    local_app = FastAPI()
+    install_api_error_handling(local_app)
+
+    @local_app.get("/rate-limited")
+    def rate_limited():
+        raise APIError(
+            429,
+            "PIN_RATE_LIMITED",
+            "请稍后重试",
+            headers={"Retry-After": "47"},
+        )
+
+    with TestClient(local_app) as local_client:
+        response = local_client.get("/rate-limited")
+
+    assert_error(response, status=429, code="PIN_RATE_LIMITED")
+    assert response.headers["retry-after"] == "47"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        pytest.param(
+            {"Location": "https://attacker.example"},
+            id="unsupported-name",
+        ),
+        pytest.param({"Retry-After": "-1"}, id="negative-value"),
+        pytest.param(
+            {"Retry-After": "1\r\nX-Injected: true"},
+            id="header-injection",
+        ),
+        pytest.param({"Retry-After": 1}, id="non-string-value"),
+    ],
+)
+def test_api_error_rejects_uncontrolled_or_noncanonical_headers(headers):
+    from app.backend.api_errors import APIError
+
+    with pytest.raises(ValueError):
+        APIError(429, "RATE_LIMITED", "请稍后重试", headers=headers)
 
 
 def test_unhandled_error_hides_internal_exception_detail():

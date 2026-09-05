@@ -612,7 +612,7 @@ def search_conversations(
     db: Session,
     payload: schemas.ConversationSearchRequest,
 ) -> schemas.ConversationSearchPage:
-    """Return one immutable-snapshot search page using strict history projection."""
+    """Return one insertion-watermark search page using strict history projection."""
     try:
         fingerprint = _search_fingerprint(payload)
         cursor_position = None

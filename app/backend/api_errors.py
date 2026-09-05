@@ -10,6 +10,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 REQUEST_ID_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
+RETRY_AFTER_PATTERN = re.compile(r"^[0-9]+$")
 logger = logging.getLogger("duck_diary")
 
 
@@ -20,6 +21,7 @@ class APIError(Exception):
     message: str
     field_errors: dict[str, list[str]] = field(default_factory=dict)
     retryable: bool = False
+    headers: dict[str, str] = field(default_factory=dict)
 
     def __init__(
         self,
@@ -28,6 +30,7 @@ class APIError(Exception):
         message: str,
         field_errors: dict[str, list[str]] | None = None,
         retryable: bool = False,
+        headers: dict[str, str] | None = None,
     ) -> None:
         super().__init__(message)
         self.status_code = status_code
@@ -35,6 +38,18 @@ class APIError(Exception):
         self.message = message
         self.field_errors = field_errors or {}
         self.retryable = retryable
+        self.headers = self._controlled_headers(headers or {})
+
+    @staticmethod
+    def _controlled_headers(headers: dict[str, str]) -> dict[str, str]:
+        controlled: dict[str, str] = {}
+        for name, value in headers.items():
+            if name.lower() != "retry-after" or not isinstance(value, str):
+                raise ValueError("unsupported API error response header")
+            if not RETRY_AFTER_PATTERN.fullmatch(value):
+                raise ValueError("invalid Retry-After response header")
+            controlled["Retry-After"] = value
+        return controlled
 
 
 def request_id_for(request: Request) -> str:
@@ -48,6 +63,8 @@ def request_id_for(request: Request) -> str:
 
 def error_response(request: Request, error: APIError) -> JSONResponse:
     request_id = request_id_for(request)
+    headers = dict(error.headers)
+    headers["X-Request-ID"] = request_id
     return JSONResponse(
         status_code=error.status_code,
         content={"error": {
@@ -57,7 +74,7 @@ def error_response(request: Request, error: APIError) -> JSONResponse:
             "retryable": error.retryable,
             "request_id": request_id,
         }},
-        headers={"X-Request-ID": request_id},
+        headers=headers,
     )
 
 

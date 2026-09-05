@@ -11,7 +11,8 @@ from sqlalchemy.exc import SQLAlchemyError
 
 
 SCHEMA_2_REVISION = "20260902_0001"
-SCHEMA_3_REVISION = "20260902_0002"
+SCHEMA_3_BASE_REVISION = "20260902_0002"
+SCHEMA_3_REVISION = "20260905_0003"
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 ALEMBIC_CONFIG_PATH = PROJECT_ROOT / "alembic.ini"
 MIGRATIONS_PATH = PROJECT_ROOT / "migrations"
@@ -280,12 +281,15 @@ _AVATAR_MEDIA_CHECKS = (
     ("ck_avatar_media_width_positive", "width > 0"),
 )
 
-_SCHEMA_3_COLUMNS = {**_SCHEMA_2_COLUMNS, "avatar_media": _AVATAR_MEDIA_COLUMNS}
-_SCHEMA_3_UNIQUES = {
+_SCHEMA_3_BASE_COLUMNS = {
+    **_SCHEMA_2_COLUMNS,
+    "avatar_media": _AVATAR_MEDIA_COLUMNS,
+}
+_SCHEMA_3_BASE_UNIQUES = {
     **_SCHEMA_2_UNIQUES,
     "avatar_media": (("uq_avatar_media_file_name", ("file_name",)),),
 }
-_SCHEMA_3_INDEXES = {
+_SCHEMA_3_BASE_INDEXES = {
     **_SCHEMA_2_INDEXES,
     "analysis_jobs": (
         *_SCHEMA_2_INDEXES["analysis_jobs"],
@@ -328,7 +332,24 @@ _SCHEMA_3_INDEXES = {
         ),
     ),
 }
-_SCHEMA_3_CHECKS = {"avatar_media": _AVATAR_MEDIA_CHECKS}
+_SCHEMA_3_BASE_CHECKS = {"avatar_media": _AVATAR_MEDIA_CHECKS}
+_PIN_THROTTLE_COLUMNS = (
+    ("id", "INTEGER", False, None, 1),
+    ("failure_timestamps", "TEXT", False, None, 0),
+)
+_PIN_THROTTLE_CHECKS = (
+    ("ck_teacher_pin_throttle_singleton", "id = 1"),
+)
+_SCHEMA_3_COLUMNS = {
+    **_SCHEMA_3_BASE_COLUMNS,
+    "teacher_pin_throttle": _PIN_THROTTLE_COLUMNS,
+}
+_SCHEMA_3_UNIQUES = _SCHEMA_3_BASE_UNIQUES
+_SCHEMA_3_INDEXES = _SCHEMA_3_BASE_INDEXES
+_SCHEMA_3_CHECKS = {
+    **_SCHEMA_3_BASE_CHECKS,
+    "teacher_pin_throttle": _PIN_THROTTLE_CHECKS,
+}
 _ALEMBIC_VERSION_SIGNATURE = (
     (("version_num", "VARCHAR(32)", False, None, 1),),
     (),
@@ -533,6 +554,19 @@ def _require_schema_2_fingerprint(connection, *, versioned: bool = False) -> Non
     )
 
 
+def _require_schema_3_base_fingerprint(connection) -> None:
+    _require_schema_fingerprint(
+        connection,
+        revision_label="schema-3 base",
+        columns=_SCHEMA_3_BASE_COLUMNS,
+        foreign_keys=_SCHEMA_2_FOREIGN_KEYS,
+        uniques=_SCHEMA_3_BASE_UNIQUES,
+        indexes=_SCHEMA_3_BASE_INDEXES,
+        checks=_SCHEMA_3_BASE_CHECKS,
+        versioned=True,
+    )
+
+
 def _require_schema_3_fingerprint(connection) -> None:
     _require_schema_fingerprint(
         connection,
@@ -550,6 +584,7 @@ def _database_action(engine: Engine) -> Literal[
     "upgrade_blank",
     "stamp_schema_2",
     "upgrade_schema_2",
+    "upgrade_schema_3_base",
     "current",
 ]:
     with engine.connect() as connection:
@@ -578,6 +613,9 @@ def _database_action(engine: Engine) -> Literal[
         if revision == SCHEMA_3_REVISION:
             _require_schema_3_fingerprint(connection)
             return "current"
+        if revision == SCHEMA_3_BASE_REVISION:
+            _require_schema_3_base_fingerprint(connection)
+            return "upgrade_schema_3_base"
         if revision == SCHEMA_2_REVISION:
             _require_schema_2_fingerprint(connection, versioned=True)
             return "upgrade_schema_2"

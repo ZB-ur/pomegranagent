@@ -257,12 +257,34 @@ def _review_document(
     )
 
 
-def get_review_detail(
+def _ensure_sqlite_read_transaction(db: Session) -> bool:
+    """Start a SQLite DBAPI snapshot and report whether this call owns it."""
+    caller_owns_session_transaction = db.in_transaction()
+    try:
+        connection = db.connection()
+        if connection.dialect.name != "sqlite":
+            return False
+        sqlite_connection = connection.connection.driver_connection
+        if not sqlite_connection.in_transaction:
+            connection.exec_driver_sql("BEGIN")
+            return not caller_owns_session_transaction
+        return False
+    except BaseException:
+        # ``db.connection()`` itself creates SQLAlchemy's logical transaction.
+        # If our raw BEGIN then fails, unwind only that helper-created wrapper;
+        # a caller-owned logical transaction (including unflushed ORM state)
+        # must remain untouched.
+        if not caller_owns_session_transaction and db.in_transaction():
+            db.rollback()
+        raise
+
+
+def _get_review_detail_in_transaction(
     db: Session,
     *,
     conversation_id: int,
 ) -> schemas.ConversationDetail:
-    """Load the immutable frozen detail and, once available, its review document."""
+    """Load one detail document from the caller's active database snapshot."""
     row = db.execute(
         select(models.Conversation, models.Child, models.AnalysisJob)
         .join(models.Child, models.Child.id == models.Conversation.child_id)
@@ -280,7 +302,6 @@ def get_review_detail(
         )
     ).one_or_none()
     if row is None:
-        db.rollback()
         raise _not_found_error()
     conversation, child, job = row
     messages = db.scalars(
@@ -298,7 +319,6 @@ def get_review_detail(
         or job.updated_at is None
         or job.status not in {"pending", "processing", "succeeded", "failed"}
     ):
-        db.rollback()
         raise _internal_error()
     analysis_error = (
         schemas.AnalysisError(
@@ -317,18 +337,13 @@ def get_review_detail(
             )
         )
         if assessment is None or assessment.status not in {"pending", "draft", "confirmed"}:
-            db.rollback()
             raise _internal_error()
         review_status = assessment.status
-        try:
-            review = _review_document(
-                db,
-                conversation_id=conversation.id,
-                assessment=assessment,
-            )
-        except APIError:
-            db.rollback()
-            raise
+        review = _review_document(
+            db,
+            conversation_id=conversation.id,
+            assessment=assessment,
+        )
     response = schemas.ConversationDetail(
         id=conversation.id,
         child=schemas.ChildIdentity(
@@ -361,8 +376,25 @@ def get_review_detail(
         ],
         review=review,
     )
-    db.rollback()
     return response
+
+
+def get_review_detail(
+    db: Session,
+    *,
+    conversation_id: int,
+) -> schemas.ConversationDetail:
+    """Load one revision-consistent detail without owning caller transactions."""
+
+    owns_sqlite_snapshot = _ensure_sqlite_read_transaction(db)
+    try:
+        return _get_review_detail_in_transaction(
+            db,
+            conversation_id=conversation_id,
+        )
+    finally:
+        if owns_sqlite_snapshot:
+            db.rollback()
 
 
 def _after_review_validation_before_cas() -> None:

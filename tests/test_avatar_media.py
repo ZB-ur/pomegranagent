@@ -278,7 +278,7 @@ async def _asgi_post(
         "raw_path": b"/api/media/avatars",
         "query_string": b"",
         "root_path": "",
-        "headers": headers,
+        "headers": [(b"host", b"testserver"), *headers],
         "client": ("testclient", 50000),
         "server": ("testserver", 80),
         "state": {},

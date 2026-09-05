@@ -56,7 +56,7 @@ def test_fixed_anchor_seed_has_exact_graph_and_stable_logical_hashes(
         "313c1c00a376081da5da91a0c15c171569531c50a774efb1582e8267afa3a6a7"
     )
     assert first.record_sha256 == (
-        "8aeee91e57d72e20127dfa56685ea27129c3291948d774d57e28c0365ec051ec"
+        "f8fffaf9790258a0317ca87d594d3b9b38f45fb82c22cc4fd3df65ea85855827"
     )
     assert first.record_sha256 == second.record_sha256
     assert first.media_sha256 == second.media_sha256
@@ -71,7 +71,7 @@ def test_fixed_anchor_seed_has_exact_graph_and_stable_logical_hashes(
     try:
         with engine.connect() as connection:
             assert _scalar(connection, "select version_num from alembic_version") == (
-                "20260902_0002"
+                "20260905_0003"
             )
             assert _scalar(connection, "select count(*) from children") == 8
             assert _scalar(connection, "select count(*) from children where active = 1") == 7
@@ -168,6 +168,12 @@ def test_fixed_anchor_seed_has_exact_graph_and_stable_logical_hashes(
                 "roster_requests",
             ):
                 assert _scalar(connection, f"select count(*) from {empty_table}") == 0
+            assert connection.execute(
+                text(
+                    "select id, failure_timestamps from teacher_pin_throttle "
+                    "order by id"
+                )
+            ).all() == [(1, "[]")]
 
         with Session(engine) as session:
             avatars = session.scalars(
@@ -353,7 +359,9 @@ def test_seeded_reports_growth_search_and_worker_are_demo_ready(tmp_path: Path) 
                 recovery_session,
                 now=datetime(2026, 9, 2, tzinfo=timezone.utc),
             ) == 0
-        session_factory = lambda: Session(engine)
+        def session_factory():
+            return Session(engine)
+
         worker = AnalysisWorker(
             session_factory=session_factory,
             analyzer=ProviderTripwire(),

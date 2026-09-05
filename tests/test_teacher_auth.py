@@ -1,12 +1,18 @@
 """Teacher PIN session boundary integration tests."""
 
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor
+import json
 import re
+from threading import Barrier
 from uuid import uuid4
 
+from fastapi import Response
+from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from app.backend import models
+from app.backend import models, schemas
+from app.backend.api_errors import APIError
 
 
 def _normalized_path(path: str) -> str:
@@ -66,6 +72,149 @@ def test_setup_is_one_time_and_wrong_pin_does_not_unlock(client):
     correct = client.post("/api/auth/unlock", json={"pin": "1234"})
     assert correct.status_code == 200
     assert correct.json() == {"configured": True, "authenticated": True}
+
+
+def test_five_failures_allow_no_sixth_attempt_even_with_the_correct_pin(client):
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+    assert client.post("/api/auth/lock").status_code == 200
+
+    for _ in range(5):
+        wrong = client.post("/api/auth/unlock", json={"pin": "9999"})
+        assert wrong.status_code == 401
+        assert wrong.json()["error"]["code"] == "PIN_INVALID"
+
+    limited = client.post("/api/auth/unlock", json={"pin": "1234"})
+
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "PIN_RATE_LIMITED"
+    assert 1 <= int(limited.headers["retry-after"]) <= 900
+    assert "duck_teacher_session=" not in limited.headers.get("set-cookie", "")
+    assert client.get("/api/auth/status").json()["authenticated"] is False
+
+
+def test_pin_failures_use_a_rolling_fifteen_minute_window(
+    client,
+    db_session,
+    monkeypatch,
+):
+    from app.backend import auth
+
+    now = [1_800_000_000]
+    monkeypatch.setattr(auth.time, "time", lambda: now[0])
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+    assert client.post("/api/auth/lock").status_code == 200
+
+    for offset in (0, 100, 200, 300, 400):
+        now[0] = 1_800_000_000 + offset
+        assert client.post(
+            "/api/auth/unlock",
+            json={"pin": "9999"},
+        ).status_code == 401
+
+    now[0] = 1_800_000_899
+    still_limited = client.post("/api/auth/unlock", json={"pin": "1234"})
+    assert still_limited.status_code == 429
+    assert still_limited.headers["retry-after"] == "1"
+
+    now[0] = 1_800_000_900
+    unlocked = client.post("/api/auth/unlock", json={"pin": "1234"})
+    assert unlocked.status_code == 200
+    db_session.expire_all()
+    assert db_session.get(models.TeacherPinThrottle, 1).failure_timestamps == "[]"
+
+
+def test_success_atomically_clears_recent_failure_state(client):
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+    assert client.post("/api/auth/lock").status_code == 200
+    for _ in range(4):
+        assert client.post(
+            "/api/auth/unlock",
+            json={"pin": "9999"},
+        ).status_code == 401
+
+    assert client.post("/api/auth/unlock", json={"pin": "1234"}).status_code == 200
+    assert client.post("/api/auth/lock").status_code == 200
+
+    for _ in range(5):
+        assert client.post(
+            "/api/auth/unlock",
+            json={"pin": "9999"},
+        ).status_code == 401
+    assert client.post("/api/auth/unlock", json={"pin": "1234"}).status_code == 429
+
+
+def test_failure_state_survives_a_new_testclient_session(client):
+    from app.backend.main import app
+
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+    assert client.post("/api/auth/lock").status_code == 200
+    for _ in range(3):
+        assert client.post(
+            "/api/auth/unlock",
+            json={"pin": "9999"},
+        ).status_code == 401
+
+    with TestClient(app) as restarted_client:
+        for _ in range(2):
+            assert restarted_client.post(
+                "/api/auth/unlock",
+                json={"pin": "9999"},
+            ).status_code == 401
+        limited = restarted_client.post(
+            "/api/auth/unlock",
+            json={"pin": "1234"},
+        )
+
+    assert limited.status_code == 429
+    assert limited.json()["error"]["code"] == "PIN_RATE_LIMITED"
+
+
+def test_six_concurrent_wrong_pins_are_serialized_at_the_global_limit(client):
+    from app.backend import auth
+    from app.backend.database import SessionLocal
+
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+    assert client.post("/api/auth/lock").status_code == 200
+    barrier = Barrier(6)
+
+    def attempt() -> tuple[int, str]:
+        db = SessionLocal()
+        try:
+            barrier.wait(timeout=5)
+            try:
+                auth.unlock(
+                    schemas.TeacherPinRequest(pin="9999"),
+                    Response(),
+                    db,
+                )
+            except APIError as error:
+                return error.status_code, error.code
+            raise AssertionError("wrong PIN unexpectedly unlocked")
+        finally:
+            db.close()
+
+    with ThreadPoolExecutor(max_workers=6) as executor:
+        results = list(executor.map(lambda _index: attempt(), range(6)))
+
+    assert Counter(results) == Counter({(401, "PIN_INVALID"): 5, (429, "PIN_RATE_LIMITED"): 1})
+    with SessionLocal() as db:
+        stored = json.loads(db.get(models.TeacherPinThrottle, 1).failure_timestamps)
+    assert len(stored) == 5
+
+
+def test_duplicate_setup_repairs_a_missing_throttle_singleton(client, db_session):
+    assert client.post("/api/auth/setup", json={"pin": "1234"}).status_code == 200
+    throttle = db_session.get(models.TeacherPinThrottle, 1)
+    assert throttle is not None
+    db_session.delete(throttle)
+    db_session.commit()
+
+    duplicate = client.post("/api/auth/setup", json={"pin": "5678"})
+
+    assert duplicate.status_code == 409
+    assert duplicate.json()["error"]["code"] == "PIN_ALREADY_CONFIGURED"
+    db_session.expire_all()
+    assert db_session.get(models.TeacherPinThrottle, 1) is not None
 
 
 def test_setup_race_returns_conflict_and_keeps_database_sessions_usable(

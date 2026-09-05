@@ -6,12 +6,12 @@ import re
 from threading import Barrier, Event, Thread
 
 import pytest
-from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy import create_engine, event, select, update
+from sqlalchemy.orm import Session, sessionmaker
 
 from app.backend import models, schemas
 from app.backend.api_errors import APIError
-from app.backend.database import SessionLocal
+from app.backend.database import Base, SessionLocal
 from app.backend.services import reviews
 
 
@@ -349,6 +349,372 @@ def test_succeeded_detail_has_one_complete_ordered_document_or_a_stable_corrupti
         status=404,
         code="CONVERSATION_NOT_FOUND",
     )
+
+
+def test_review_detail_uses_one_sqlite_snapshot_across_a_concurrent_atomic_save(tmp_path):
+    """Catches old revision metadata being combined with newly saved review projections."""
+    snapshot_engine = create_engine(
+        f"sqlite:///{tmp_path / 'review-detail-snapshot.db'}",
+        connect_args={"check_same_thread": False},
+    )
+    LocalSession = sessionmaker(autocommit=False, autoflush=False, bind=snapshot_engine)
+    Base.metadata.create_all(bind=snapshot_engine)
+    with snapshot_engine.connect() as connection:
+        assert connection.exec_driver_sql("PRAGMA journal_mode=WAL").scalar_one() == "wal"
+
+    with LocalSession() as seed:
+        dimension = models.AssessmentDimension(
+            key="snapshot",
+            name="快照维度",
+            enabled=True,
+            weight=1.0,
+        )
+        seed.add(dimension)
+        seed.commit()
+        conversation, _job, _assessment = _seed_reviewable_conversation(seed)
+        feeding_rows = seed.scalars(
+            select(models.FeedingLog)
+            .where(models.FeedingLog.conversation_id == conversation.id)
+            .order_by(models.FeedingLog.id)
+        ).all()
+        conversation_id = conversation.id
+        retained_feeding_id = feeding_rows[0].id
+        omitted_feeding_id = feeding_rows[1].id
+        dimension_id = dimension.id
+
+    payload = schemas.ReviewRequest.model_validate({
+        "revision": 2,
+        "feeding_logs": [{
+            "id": retained_feeding_id,
+            "category": "清洁",
+            "content": "并发保存后的流水",
+            "duck_id": None,
+        }],
+        "emotion": {"emotion": "期待", "intensity": 5, "note": "并发保存后的情绪"},
+        "insight": "并发保存后的洞察。",
+        "scores": [{
+            "dimension_id": dimension_id,
+            "score": 5,
+            "reason": "并发保存后的评分。",
+        }],
+        "action": "save_draft",
+    })
+    old_snapshot = (
+        2,
+        (
+            (retained_feeding_id, "喂食", "第一条喂食记录"),
+            (omitted_feeding_id, "观察", "第二条观察记录"),
+        ),
+        ("开心", 4, "愿意继续分享"),
+        "会主动观察小鸭的食量。",
+        ((dimension_id, 3, "快照维度的原始理由"),),
+        4.0,
+    )
+    new_snapshot = (
+        3,
+        ((retained_feeding_id, "清洁", "并发保存后的流水"),),
+        ("期待", 5, "并发保存后的情绪"),
+        "并发保存后的洞察。",
+        ((dimension_id, 5, "并发保存后的评分。"),),
+        5.0,
+    )
+    first_detail_select_finished = Event()
+    release_reader = Event()
+    reader_transaction_state: list[tuple[bool, bool]] = []
+    outcomes: list[object] = []
+
+    def pause_after_first_reader_select(
+        connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if (
+            connection.info.get("review_detail_snapshot_reader")
+            and statement.lstrip().upper().startswith("SELECT")
+            and not first_detail_select_finished.is_set()
+        ):
+            first_detail_select_finished.set()
+            assert release_reader.wait(timeout=5)
+
+    event.listen(snapshot_engine, "after_cursor_execute", pause_after_first_reader_select)
+
+    def read_in_own_session() -> None:
+        with LocalSession() as reader:
+            connection = reader.connection()
+            raw_connection = connection.connection.driver_connection
+            reader_transaction_state.append((reader.in_transaction(), raw_connection.in_transaction))
+            connection.info["review_detail_snapshot_reader"] = True
+            try:
+                outcomes.append(reviews.get_review_detail(
+                    reader,
+                    conversation_id=conversation_id,
+                ))
+            except BaseException as error:
+                outcomes.append(error)
+
+    reader = Thread(target=read_in_own_session)
+    reader.start()
+    try:
+        assert first_detail_select_finished.wait(timeout=5)
+        with LocalSession() as writer:
+            saved = reviews.save_review(
+                writer,
+                conversation_id=conversation_id,
+                payload=payload,
+                now=NOW,
+            )
+        assert saved.revision == 3
+    finally:
+        release_reader.set()
+        reader.join(timeout=10)
+        event.remove(snapshot_engine, "after_cursor_execute", pause_after_first_reader_select)
+        snapshot_engine.dispose()
+
+    assert not reader.is_alive()
+    assert reader_transaction_state == [(True, False)]
+    assert len(outcomes) == 1
+    outcome = outcomes[0]
+    if isinstance(outcome, APIError):
+        assert outcome.code == "REVIEW_REVISION_CONFLICT"
+        return
+    assert isinstance(outcome, schemas.ConversationDetail)
+    assert outcome.review is not None
+    observed = (
+        outcome.revision,
+        tuple((row.id, row.category, row.content) for row in outcome.review.feeding_logs),
+        (
+            outcome.review.emotion.emotion,
+            outcome.review.emotion.intensity,
+            outcome.review.emotion.note,
+        ),
+        outcome.review.insight,
+        tuple(
+            (row.dimension_id, row.score, row.reason)
+            for row in outcome.review.scores
+        ),
+        outcome.review.overall,
+    )
+    assert observed in {old_snapshot, new_snapshot}
+
+
+def test_review_detail_reuses_an_existing_sqlite_transaction(db_session):
+    """Catches detail issuing a nested BEGIN when the DBAPI connection is already transactional."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    conversation_id = conversation.id
+    connection = db_session.connection()
+    raw_connection = connection.connection.driver_connection
+    connection.exec_driver_sql("BEGIN")
+    assert raw_connection.in_transaction is True
+    begin_statements: list[str] = []
+
+    def capture_nested_begin(
+        current_connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if (
+            current_connection.connection.driver_connection is raw_connection
+            and statement.strip().upper().startswith("BEGIN")
+        ):
+            begin_statements.append(statement)
+
+    assert db_session.bind is not None
+    event.listen(db_session.bind, "before_cursor_execute", capture_nested_begin)
+    try:
+        detail = reviews.get_review_detail(db_session, conversation_id=conversation_id)
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", capture_nested_begin)
+
+    assert detail.revision == 2
+    assert begin_statements == []
+
+
+def test_review_detail_success_preserves_a_callers_pending_sqlite_transaction(db_session):
+    """Catches a read helper rolling back unrelated caller DML after success."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    child_id = conversation.child_id
+    connection = db_session.connection()
+    raw_connection = connection.connection.driver_connection
+    connection.exec_driver_sql("BEGIN")
+    db_session.execute(
+        update(models.Child)
+        .where(models.Child.id == child_id)
+        .values(nickname="尚未提交的昵称")
+    )
+    assert raw_connection.in_transaction is True
+
+    try:
+        detail = reviews.get_review_detail(
+            db_session,
+            conversation_id=conversation.id,
+        )
+        assert detail.child.nickname == "尚未提交的昵称"
+        assert raw_connection.in_transaction is True
+        assert db_session.scalar(
+            select(models.Child.nickname).where(models.Child.id == child_id)
+        ) == "尚未提交的昵称"
+    finally:
+        db_session.rollback()
+
+    with SessionLocal() as fresh:
+        assert fresh.scalar(
+            select(models.Child.nickname).where(models.Child.id == child_id)
+        ) == "雨雨"
+
+
+def test_review_detail_error_preserves_a_callers_pending_sqlite_transaction(db_session):
+    """Catches an API error path rolling back unrelated caller DML."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    child_id = conversation.child_id
+    connection = db_session.connection()
+    raw_connection = connection.connection.driver_connection
+    connection.exec_driver_sql("BEGIN")
+    db_session.execute(
+        update(models.Child)
+        .where(models.Child.id == child_id)
+        .values(nickname="错误路径仍待提交")
+    )
+    assert raw_connection.in_transaction is True
+
+    try:
+        with pytest.raises(APIError) as raised:
+            reviews.get_review_detail(db_session, conversation_id=999_999)
+        assert raised.value.code == "CONVERSATION_NOT_FOUND"
+        assert raw_connection.in_transaction is True
+        assert db_session.scalar(
+            select(models.Child.nickname).where(models.Child.id == child_id)
+        ) == "错误路径仍待提交"
+    finally:
+        db_session.rollback()
+
+    with SessionLocal() as fresh:
+        assert fresh.scalar(
+            select(models.Child.nickname).where(models.Child.id == child_id)
+        ) == "雨雨"
+
+
+def test_review_detail_preserves_a_callers_unflushed_orm_transaction(db_session):
+    """Catches DBAPI state misclassifying an existing ORM transaction as owned."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    pending_child = models.Child(name="调用方尚未 flush 的幼儿", active=True)
+    db_session.add(pending_child)
+    assert db_session.in_transaction() is True
+    assert pending_child in db_session.new
+
+    try:
+        detail = reviews.get_review_detail(
+            db_session,
+            conversation_id=conversation.id,
+        )
+        assert detail.revision == 2
+        assert db_session.in_transaction() is True
+        assert pending_child in db_session.new
+        assert pending_child.id is None
+    finally:
+        db_session.rollback()
+
+
+def test_review_detail_releases_its_owned_snapshot_after_an_unexpected_error(
+    db_session,
+    monkeypatch,
+):
+    """Catches an unexpected projection failure leaking the helper-owned BEGIN."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    conversation_id = conversation.id
+    db_session.rollback()
+
+    def fail_projection(*_args, **_kwargs):
+        raise RuntimeError("projection exploded")
+
+    monkeypatch.setattr(reviews, "_review_document", fail_projection)
+
+    with SessionLocal() as fresh:
+        assert fresh.in_transaction() is False
+        with pytest.raises(RuntimeError, match="projection exploded"):
+            reviews.get_review_detail(
+                fresh,
+                conversation_id=conversation_id,
+            )
+
+        raw_connection = fresh.connection().connection.driver_connection
+        assert raw_connection.in_transaction is False
+
+
+def test_review_detail_begin_failure_releases_helper_created_session_transaction(
+    db_session,
+):
+    """Catches a failed raw BEGIN leaking SQLAlchemy's helper-created transaction."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    conversation_id = conversation.id
+    db_session.rollback()
+    marker = RuntimeError("synthetic snapshot BEGIN failure")
+
+    def fail_begin(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if statement.strip().upper() == "BEGIN":
+            raise marker
+
+    assert db_session.bind is not None
+    event.listen(db_session.bind, "before_cursor_execute", fail_begin)
+    try:
+        with SessionLocal() as fresh:
+            assert fresh.in_transaction() is False
+            with pytest.raises(RuntimeError) as caught:
+                reviews.get_review_detail(fresh, conversation_id=conversation_id)
+            assert caught.value is marker
+            assert fresh.in_transaction() is False
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", fail_begin)
+
+
+def test_review_detail_begin_failure_preserves_caller_owned_orm_transaction(
+    db_session,
+):
+    """Catches failed snapshot setup rolling back a caller's unflushed ORM state."""
+    conversation, _job, _assessment = _seed_reviewable_conversation(db_session)
+    conversation_id = conversation.id
+    db_session.rollback()
+    marker = RuntimeError("synthetic caller snapshot BEGIN failure")
+
+    def fail_begin(
+        _connection,
+        _cursor,
+        statement,
+        _parameters,
+        _context,
+        _executemany,
+    ) -> None:
+        if statement.strip().upper() == "BEGIN":
+            raise marker
+
+    assert db_session.bind is not None
+    event.listen(db_session.bind, "before_cursor_execute", fail_begin)
+    try:
+        with SessionLocal() as fresh:
+            pending_child = models.Child(name="BEGIN 失败仍由调用方持有", active=True)
+            fresh.add(pending_child)
+            assert fresh.in_transaction() is True
+            with pytest.raises(RuntimeError) as caught:
+                reviews.get_review_detail(fresh, conversation_id=conversation_id)
+            assert caught.value is marker
+            assert fresh.in_transaction() is True
+            assert pending_child in fresh.new
+            assert pending_child.id is None
+            fresh.rollback()
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", fail_begin)
 
 
 def test_detail_and_save_require_the_job_to_match_the_frozen_transcript(client, db_session):

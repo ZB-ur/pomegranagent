@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import base64
 import asyncio
-from datetime import date, datetime, timedelta, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 import re
@@ -214,7 +214,10 @@ def test_search_unauthenticated_asgi_request_reads_zero_body_bytes(client):
             "raw_path": b"/api/conversations/search",
             "query_string": b"unknown=private",
             "root_path": "",
-            "headers": [(b"content-type", b"application/json")],
+            "headers": [
+                (b"host", b"testserver"),
+                (b"content-type", b"application/json"),
+            ],
             "client": ("testclient", 50000),
             "server": ("testserver", 80),
             "state": {},

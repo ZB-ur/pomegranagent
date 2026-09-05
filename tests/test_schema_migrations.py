@@ -24,6 +24,7 @@ from app.backend.schema_migrations import (
     _normalized_sql,
     ensure_database_schema,
 )
+from app.backend.versioning import load_runtime_version
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -81,6 +82,13 @@ AVATAR_MEDIA_CHECKS = (
     ("ck_avatar_media_size_positive", "size_bytes > 0"),
     ("ck_avatar_media_webp", "mime_type = 'image/webp'"),
     ("ck_avatar_media_width_positive", "width > 0"),
+)
+PIN_THROTTLE_COLUMNS = (
+    ("id", "INTEGER", False, None, 1),
+    ("failure_timestamps", "TEXT", False, None, 0),
+)
+PIN_THROTTLE_CHECKS = (
+    ("ck_teacher_pin_throttle_singleton", "id = 1"),
 )
 
 
@@ -451,7 +459,11 @@ def assert_schema_three_shape(
 ) -> None:
     historical_signature = physical_schema_signature(
         database,
-        excluded_tables={"alembic_version", "avatar_media"},
+        excluded_tables={
+            "alembic_version",
+            "avatar_media",
+            "teacher_pin_throttle",
+        },
         excluded_indexes=set(SCHEMA_3_INDEXES),
     )
     assert historical_signature == schema_two_signature
@@ -463,16 +475,25 @@ def assert_schema_three_shape(
             *SCHEMA_2_TABLES,
             "alembic_version",
             "avatar_media",
+            "teacher_pin_throttle",
         }
-        assert physical_schema_signature(
+        compatibility_tables = physical_schema_signature(
             database,
             excluded_tables={*SCHEMA_2_TABLES, "alembic_version"},
-        )["avatar_media"] == {
+        )
+        assert compatibility_tables["avatar_media"] == {
             "columns": AVATAR_MEDIA_COLUMNS,
             "foreign_keys": (),
             "unique_constraints": (("file_name",),),
             "indexes": (),
             "checks": AVATAR_MEDIA_CHECKS,
+        }
+        assert compatibility_tables["teacher_pin_throttle"] == {
+            "columns": PIN_THROTTLE_COLUMNS,
+            "foreign_keys": (),
+            "unique_constraints": (),
+            "indexes": (),
+            "checks": PIN_THROTTLE_CHECKS,
         }
     finally:
         engine.dispose()
@@ -514,6 +535,37 @@ def test_blank_database_upgrades_from_baseline_to_schema_three(
         SCHEMA_3_REVISION
     )
     assert_schema_three_shape(database, schema_two_signature)
+
+
+def test_schema_three_head_initializes_singleton_teacher_pin_throttle(
+    tmp_path: Path,
+):
+    database = tmp_path / "pin-throttle-head.db"
+    engine = engine_for(database)
+    try:
+        ensure_database_schema(engine, db_mode="app")
+    finally:
+        engine.dispose()
+
+    signature = physical_schema_signature(
+        database,
+        excluded_tables={
+            table
+            for table in SCHEMA_2_TABLES | {"alembic_version", "avatar_media"}
+        },
+    )
+    assert signature["teacher_pin_throttle"] == {
+        "columns": PIN_THROTTLE_COLUMNS,
+        "foreign_keys": (),
+        "unique_constraints": (),
+        "indexes": (),
+        "checks": PIN_THROTTLE_CHECKS,
+    }
+    with sqlite3.connect(database) as connection:
+        assert connection.execute(
+            "SELECT id, failure_timestamps FROM teacher_pin_throttle"
+        ).fetchall() == [(1, "[]")]
+    assert load_runtime_version().schema_version == "3"
 
 
 def test_blank_baseline_matches_complete_frozen_schema_two_signature(

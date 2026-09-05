@@ -334,6 +334,7 @@ _RUNTIME_DB_COLUMNS = {
         "updated_at",
     ),
     "teacher_credentials": ("id", "pin_salt", "pin_hash", "created_at", "updated_at"),
+    "teacher_pin_throttle": ("id", "failure_timestamps"),
     "teacher_sessions": ("id", "token_hash", "created_at"),
 }
 _RUNTIME_DB_TEXT_COLUMNS = {
@@ -382,6 +383,31 @@ class HarnessError(RuntimeError):
 
 class HarnessSafetyError(HarnessError):
     """A fail-closed filesystem, process, credential, or evidence violation."""
+
+
+class HarnessLifecycleError(HarnessSafetyError):
+    """Retain a primary failure and every later cleanup/finalization failure."""
+
+    def __init__(
+        self,
+        *,
+        original_error: BaseException,
+        attempt_errors: tuple[BaseException, ...] = (),
+        finalization_errors: tuple[BaseException, ...] = (),
+        pending_session: object | None = None,
+        message: str = "retained live UAT cleanup failed",
+    ) -> None:
+        super().__init__(message)
+        self.original_error = original_error
+        self.attempt_errors = tuple(attempt_errors)
+        self.finalization_errors = tuple(finalization_errors)
+        self.errors = (
+            original_error,
+            *self.attempt_errors,
+            *self.finalization_errors,
+        )
+        self.pending_session = pending_session
+        self.__cause__ = original_error
 
 
 @dataclass(frozen=True, slots=True)
@@ -448,7 +474,7 @@ class OwnedProcess:
     sid: int | None = None
 
 
-class OwnedProcessCleanupError(HarnessSafetyError):
+class OwnedProcessCleanupError(HarnessLifecycleError):
     """Preserve a validated owner when bounded cleanup cannot prove success."""
 
     def __init__(
@@ -457,11 +483,78 @@ class OwnedProcessCleanupError(HarnessSafetyError):
         owned: OwnedProcess,
         attempt_errors: tuple[BaseException, ...],
         original_error: BaseException,
+        pending_session: object | None = None,
+        finalization_errors: tuple[BaseException, ...] = (),
     ) -> None:
-        super().__init__("validated owner cleanup failed")
+        super().__init__(
+            original_error=original_error,
+            attempt_errors=attempt_errors,
+            finalization_errors=finalization_errors,
+            message="validated owner cleanup failed",
+        )
         self.owned = owned
-        self.attempt_errors = attempt_errors
-        self.original_error = original_error
+        self.pending_session = pending_session
+        # Keep the shorter spelling for callers inspecting an exception graph.
+        self.session = pending_session
+        self.process_resource_complete = False
+        self.cleanup_state = "owner-pending"
+
+
+class UnverifiedProcessCleanupError(HarnessLifecycleError):
+    """Retain the exact child when PGID/SID ownership could not be validated."""
+
+    def __init__(
+        self,
+        *,
+        process: object,
+        attempt_errors: tuple[BaseException, ...],
+        original_error: BaseException,
+        guardian_session: object | None = None,
+        finalization_errors: tuple[BaseException, ...] = (),
+    ) -> None:
+        super().__init__(
+            original_error=original_error,
+            attempt_errors=attempt_errors,
+            finalization_errors=finalization_errors,
+            message="unverified child cleanup failed",
+        )
+        self.process = process
+        self.exact_process = process
+        # This session may be finalized only after the guardian has reaped the
+        # exact child.  It must never enter the validated process-group path.
+        self.guardian_session = guardian_session
+        self.cleanup_state = "exact-child-pending"
+
+
+def _extend_lifecycle_attempts(
+    error: HarnessLifecycleError,
+    attempt_errors: tuple[BaseException, ...] | list[BaseException],
+) -> None:
+    """Append cleanup evidence without replacing the retained primary failure."""
+
+    error.attempt_errors = (*error.attempt_errors, *attempt_errors)
+    error.errors = (
+        error.original_error,
+        *error.attempt_errors,
+        *error.finalization_errors,
+    )
+
+
+def _extend_lifecycle_finalization(
+    error: HarnessLifecycleError,
+    finalization_errors: tuple[BaseException, ...] | list[BaseException],
+) -> None:
+    """Append finalization evidence without replacing process ownership."""
+
+    error.finalization_errors = (
+        *error.finalization_errors,
+        *finalization_errors,
+    )
+    error.errors = (
+        error.original_error,
+        *error.attempt_errors,
+        *error.finalization_errors,
+    )
 
 
 def _cleanup_validated_owner(
@@ -469,15 +562,24 @@ def _cleanup_validated_owner(
     *,
     stopper: Callable[[OwnedProcess], object],
     original_error: BaseException,
-    attempts: int = OWNER_CLEANUP_ATTEMPTS,
+    attempts: int = 1,
 ) -> object:
-    """Boundedly retry cleanup only after the caller has validated ownership."""
+    """Attempt one ownership-safe cleanup and retain state for the next layer."""
 
     attempt_errors: list[BaseException] = []
     for _attempt in range(attempts):
         try:
             return stopper(owned)
         except BaseException as exc:
+            if getattr(exc, "process_resource_complete", False) is True:
+                error = OwnedProcessCleanupError(
+                    owned=owned,
+                    attempt_errors=(exc,),
+                    original_error=original_error,
+                )
+                error.process_resource_complete = True
+                error.cleanup_state = "owner-reaped"
+                raise error from exc
             attempt_errors.append(exc)
     error = OwnedProcessCleanupError(
         owned=owned,
@@ -490,14 +592,17 @@ def _cleanup_validated_owner(
 @dataclass(slots=True)
 class LiveServerSession:
     port: int
-    owned: OwnedProcess
-    telemetry: object
-    output: object
+    owned: OwnedProcess | None
+    telemetry: object | None
+    output: object | None
     finished: bool = False
     provider_events: tuple[Mapping[str, object], ...] = ()
     process_stopped: bool = False
     output_closed: bool = False
     telemetry_finished: bool = False
+    telemetry_payload_valid: bool = False
+    telemetry_error: BaseException | None = None
+    process_cleanup_attempts: int = 0
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -595,8 +700,9 @@ def _open_absolute_directory_nofollow(path: Path) -> int:
                 _directory_open_flags(),
                 dir_fd=descriptor,
             )
-            os.close(descriptor)
+            descriptor_to_close = descriptor
             descriptor = next_descriptor
+            os.close(descriptor_to_close)
         return descriptor
     except BaseException:
         os.close(descriptor)
@@ -653,8 +759,9 @@ def _open_plan_root(plan: RunPlan) -> int:
                 _directory_open_flags(),
                 dir_fd=descriptor,
             )
-            os.close(descriptor)
+            descriptor_to_close = descriptor
             descriptor = next_descriptor
+            os.close(descriptor_to_close)
         root_entry = os.fstat(descriptor)
         if (
             (
@@ -708,8 +815,9 @@ def _open_plan_parent(plan: RunPlan, target: Path) -> tuple[int, str]:
             ):
                 os.close(next_descriptor)
                 raise HarnessSafetyError("evidence parent is unsafe")
-            os.close(descriptor)
+            descriptor_to_close = descriptor
             descriptor = next_descriptor
+            os.close(descriptor_to_close)
         return descriptor, relative.name
     except BaseException:
         os.close(descriptor)
@@ -736,6 +844,102 @@ def _regular_descriptor_identity(entry: os.stat_result) -> tuple[int, ...]:
         entry.st_mtime_ns,
         entry.st_uid,
     )
+
+
+def _classify_terminal_replacement(
+    parent_descriptor: int,
+    destination_name: str,
+    *,
+    temporary_name: str,
+    temporary_descriptor: int,
+    temporary_identity: tuple[int, ...],
+    payload: bytes,
+) -> str:
+    """Classify an ambiguous replace without equating I/O failure with absence."""
+
+    descriptor = None
+    try:
+        if (
+            _regular_descriptor_identity(os.fstat(temporary_descriptor))
+            != temporary_identity
+        ):
+            return "unknown"
+        try:
+            path_before = os.stat(
+                destination_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            path_before = None
+        if (
+            path_before is not None
+            and _regular_descriptor_identity(path_before) == temporary_identity
+        ):
+            if (
+                not stat.S_ISREG(path_before.st_mode)
+                or path_before.st_uid != os.geteuid()
+                or path_before.st_mode & 0o077
+                or path_before.st_nlink != 1
+                or path_before.st_size != len(payload)
+            ):
+                return "unknown"
+            flags = os.O_RDONLY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            descriptor = os.open(
+                destination_name,
+                flags,
+                dir_fd=parent_descriptor,
+            )
+            if _regular_descriptor_identity(os.fstat(descriptor)) != temporary_identity:
+                return "unknown"
+            chunks: list[bytes] = []
+            total = 0
+            while True:
+                chunk = os.read(
+                    descriptor,
+                    min(1024 * 1024, len(payload) - total + 1),
+                )
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > len(payload):
+                    return "unknown"
+                chunks.append(chunk)
+            if b"".join(chunks) != payload:
+                return "unknown"
+            if _regular_descriptor_identity(os.fstat(descriptor)) != temporary_identity:
+                return "unknown"
+            path_after = os.stat(
+                destination_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+            if _regular_descriptor_identity(path_after) != temporary_identity:
+                return "unknown"
+            return "committed"
+        try:
+            retained_temporary = os.stat(
+                temporary_name,
+                dir_fd=parent_descriptor,
+                follow_symlinks=False,
+            )
+        except FileNotFoundError:
+            return "unknown"
+        if _regular_descriptor_identity(retained_temporary) == temporary_identity:
+            return "not-committed"
+        return "unknown"
+    except OSError:
+        return "unknown"
+    finally:
+        if descriptor is not None:
+            descriptor_to_close = descriptor
+            descriptor = None
+            try:
+                os.close(descriptor_to_close)
+            except OSError:
+                pass
 
 
 def _read_pinned_run_file(
@@ -1403,31 +1607,23 @@ def build_seed_environment(parent: Mapping[str, str]) -> dict[str, str]:
 
 
 def _reap_child_after_validation_failure(process) -> None:
-    """Boundedly terminate one just-started leader when ownership is not usable."""
+    """Terminate one exact child without assuming process-group ownership."""
 
-    attempt_errors: list[BaseException] = []
-    for _attempt in range(OWNER_CLEANUP_ATTEMPTS):
-        try:
-            if process.poll() is None:
-                process.terminate()
-            try:
-                process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
-            if process.poll() is None:
-                raise HarnessSafetyError(
-                    "started child cleanup did not reap the leader"
-                )
-            return
-        except (HarnessSafetyError, OSError, ValueError, subprocess.TimeoutExpired) as exc:
-            attempt_errors.append(exc)
-    raise HarnessSafetyError("started child cleanup failed") from attempt_errors[-1]
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        process.wait(timeout=5)
+    if process.poll() is None:
+        raise HarnessSafetyError("started child cleanup did not reap the leader")
 
 
 def _retry_child_reap_after_validation_failure(
     process,
     *,
+    original_error: BaseException,
     attempts: int = OWNER_CLEANUP_ATTEMPTS,
 ) -> None:
     """Retry the exact child reaper without assuming process-group ownership."""
@@ -1439,7 +1635,12 @@ def _retry_child_reap_after_validation_failure(
             return
         except BaseException as exc:
             attempt_errors.append(exc)
-    raise HarnessSafetyError("started child cleanup failed") from attempt_errors[-1]
+    error = UnverifiedProcessCleanupError(
+        process=process,
+        attempt_errors=tuple(attempt_errors),
+        original_error=original_error,
+    )
+    raise error from attempt_errors[-1]
 
 
 def run_seed_process(
@@ -1507,10 +1708,10 @@ def run_seed_process(
         try:
             _owned_identity(owned, getpgid=getpgid, getsid=getsid)
         except BaseException as validation_error:
-            try:
-                _reap_child_after_validation_failure(process)
-            except BaseException as cleanup_error:
-                raise cleanup_error from validation_error
+            _retry_child_reap_after_validation_failure(
+                process,
+                original_error=validation_error,
+            )
             raise
         observe = _peek_owned_exit if peek_exit is None else peek_exit
         def stop_seed_owner(candidate: OwnedProcess) -> int:
@@ -1555,13 +1756,20 @@ def run_seed_process(
                 original_error=timeout_error,
             )
             raise timeout_error
+        operation_error = HarnessSafetyError(
+            "offline seed process failed"
+            if observed != 0
+            else "offline seed process cleanup failed"
+        )
+        operation_error.observed_status = observed
         returncode = _cleanup_validated_owner(
             owned,
             stopper=stop_seed_owner,
-            original_error=HarnessSafetyError("offline seed process cleanup failed"),
+            original_error=operation_error,
         )
         if returncode != 0:
-            raise HarnessSafetyError("offline seed process failed")
+            operation_error.returncode = returncode
+            raise operation_error
         source_validator(plan)
         stdout_file.seek(0, os.SEEK_END)
         stderr_file.seek(0, os.SEEK_END)
@@ -2064,10 +2272,24 @@ class TelemetryCollector:
             raise HarnessSafetyError("provider telemetry descriptor is invalid") from exc
         if not stat.S_ISFIFO(mode):
             raise HarnessSafetyError("provider telemetry descriptor is invalid")
-        self._descriptor = descriptor
+        self._descriptor: int | None = descriptor
         self._thread: threading.Thread | None = None
         self._events: list[dict[str, object]] = []
         self._error: HarnessSafetyError | None = None
+        self._joined = False
+        self._payload_valid = False
+
+    @property
+    def joined(self) -> bool:
+        """Whether the drain thread ended and released its read descriptor."""
+
+        return self._joined
+
+    @property
+    def payload_valid(self) -> bool:
+        """Whether the terminal payload passed validation after the drain ended."""
+
+        return self._payload_valid
 
     def start(self) -> None:
         if self._thread is not None:
@@ -2082,8 +2304,13 @@ class TelemetryCollector:
     def _drain(self) -> None:
         buffered = b""
         total = 0
+        descriptor = self._descriptor
+        self._descriptor = None
         try:
-            with os.fdopen(self._descriptor, "rb", buffering=0) as stream:
+            if descriptor is None:
+                raise HarnessSafetyError("provider telemetry descriptor is invalid")
+            with os.fdopen(descriptor, "rb", buffering=0) as stream:
+                descriptor = None
                 while True:
                     chunk = stream.read(16_384)
                     if not chunk:
@@ -2107,16 +2334,41 @@ class TelemetryCollector:
         except (OSError, ValueError) as exc:
             self._error = HarnessSafetyError("provider telemetry could not be read")
             self._error.__cause__ = exc
+        except BaseException as exc:
+            self._error = HarnessSafetyError("provider telemetry could not be read")
+            self._error.__cause__ = exc
+        finally:
+            if descriptor is not None:
+                pending_descriptor = descriptor
+                descriptor = None
+                try:
+                    os.close(pending_descriptor)
+                except OSError:
+                    pass
+
+    def close(self) -> None:
+        """Release a claimed descriptor when thread startup itself did not succeed."""
+
+        thread = self._thread
+        if thread is not None and thread.is_alive():
+            raise HarnessSafetyError("provider telemetry collector did not finish")
+        descriptor = self._descriptor
+        self._descriptor = None
+        if descriptor is not None:
+            os.close(descriptor)
 
     def finish(self, *, timeout: float = 10.0) -> tuple[Mapping[str, object], ...]:
         thread = self._thread
         if thread is None:
             raise HarnessSafetyError("provider telemetry collector was not started")
-        thread.join(timeout=timeout)
-        if thread.is_alive():
-            raise HarnessSafetyError("provider telemetry collector did not finish")
+        if not self._joined:
+            thread.join(timeout=timeout)
+            if thread.is_alive():
+                raise HarnessSafetyError("provider telemetry collector did not finish")
+            self._joined = True
         if self._error is not None:
             raise self._error
+        self._payload_valid = True
         return tuple(self._events)
 
 
@@ -2249,7 +2501,10 @@ def launch_server_process(
                 original_error=validation_error,
             )
         else:
-            _retry_child_reap_after_validation_failure(process)
+            _retry_child_reap_after_validation_failure(
+                process,
+                original_error=validation_error,
+            )
         raise
     return owned
 
@@ -2270,17 +2525,20 @@ def require_owned_process_alive(
 def _peek_owned_exit(
     owned: OwnedProcess,
     *,
-    waitid: Callable[[int, int, int], object | None] = os.waitid,
+    waitid: Callable[[int, int, int], object | None] | None = None,
 ) -> int | None:
     """Observe child exit while deliberately retaining its kernel PID/PGID identity."""
 
     if getattr(owned.process, "returncode", None) is not None:
         return owned.process.returncode
     required = ("P_PID", "WEXITED", "WNOHANG", "WNOWAIT")
-    if any(not hasattr(os, name) for name in required):
+    if any(not hasattr(os, name) for name in required) or (
+        waitid is None and not hasattr(os, "waitid")
+    ):
         raise HarnessSafetyError("unreaped process observation is unavailable")
+    selected_waitid = os.waitid if waitid is None else waitid
     try:
-        result = waitid(
+        result = selected_waitid(
             os.P_PID,
             owned.pid,
             os.WEXITED | os.WNOHANG | os.WNOWAIT,
@@ -2450,7 +2708,14 @@ def stop_owned_process_group(
     except (OSError, ValueError) as exc:
         raise HarnessSafetyError("owned process group could not be stopped") from exc
     if returncode != observed_status:
-        raise HarnessSafetyError("owned process group exit status changed")
+        error = HarnessSafetyError("owned process group exit status changed")
+        # The leader was reaped only after the group was proven quiescent.  A
+        # status mismatch remains reportable evidence corruption, but it must
+        # not make a caller signal or wait on a potentially reused PID again.
+        error.process_resource_complete = True
+        error.returncode = returncode
+        error.observed_status = observed_status
+        raise error
     return returncode
 
 
@@ -2471,13 +2736,19 @@ def start_live_server(
     bound = prebind()
     bound_closed = False
     read_fd = write_fd = None
+    output_fd = None
     output = None
     collector = None
     collector_started = False
     owned = None
     try:
         read_fd, write_fd = os.pipe()
-        collector = collector_factory(read_fd)
+        claimed_read_fd = read_fd
+        collector = collector_factory(claimed_read_fd)
+        # The factory receives a borrowed descriptor and claims it only after
+        # construction succeeds.  If construction raises, this scope remains
+        # responsible for closing the pipe read end.
+        read_fd = None
         collector.start()
         collector_started = True
         flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
@@ -2492,8 +2763,11 @@ def start_live_server(
                 dir_fd=output_parent,
             )
         finally:
-            os.close(output_parent)
+            parent_to_close = output_parent
+            output_parent = None
+            os.close(parent_to_close)
         output = os.fdopen(output_fd, "wb", buffering=0)
+        output_fd = None
         owned = launcher(
             plan,
             environment=environment,
@@ -2504,17 +2778,28 @@ def start_live_server(
         )
         bound.socket.close()
         bound_closed = True
-        os.close(write_fd)
+        write_to_close = write_fd
         write_fd = None
+        os.close(write_to_close)
         assert_run_plan_identity(plan)
     except BaseException as startup_error:
-        cleanup_error = None
+        cleanup_errors: list[BaseException] = []
         owner_cleanup_error = (
             startup_error
             if isinstance(startup_error, OwnedProcessCleanupError)
             else None
         )
-        if owned is not None and owner_cleanup_error is None:
+        unverified_cleanup_error = (
+            startup_error
+            if isinstance(startup_error, UnverifiedProcessCleanupError)
+            else None
+        )
+        if owned is None and owner_cleanup_error is not None:
+            owned = owner_cleanup_error.owned
+        process_stopped = (
+            getattr(startup_error, "process_resource_complete", False) is True
+        )
+        if owned is not None and owner_cleanup_error is None and not process_stopped:
             try:
                 _cleanup_validated_owner(
                     owned,
@@ -2523,45 +2808,163 @@ def start_live_server(
                 )
             except OwnedProcessCleanupError as exc:
                 owner_cleanup_error = exc
+                process_stopped = (
+                    getattr(exc, "process_resource_complete", False) is True
+                )
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+                process_stopped = (
+                    getattr(exc, "process_resource_complete", False) is True
+                )
+            else:
+                process_stopped = True
         if not bound_closed:
             try:
                 bound.socket.close()
                 bound_closed = True
             except BaseException as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
+                cleanup_errors.append(exc)
         if write_fd is not None:
+            write_to_close = write_fd
+            write_fd = None
             try:
-                os.close(write_fd)
-            except OSError as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
-        if collector_started:
-            try:
-                collector.finish()
+                os.close(write_to_close)
             except BaseException as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
-            # The collector thread owns this descriptor once start() succeeds.
-            read_fd = None
+                cleanup_errors.append(exc)
+        # No pending session can own raw descriptors that have not yet been
+        # wrapped by their final resource object.  Retire them before any
+        # early raise transfers the collector/output stream to the guardian.
         if read_fd is not None:
+            read_to_close = read_fd
+            read_fd = None
             try:
-                os.close(read_fd)
-            except OSError as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
-        if output is not None:
-            try:
-                output.close()
+                os.close(read_to_close)
             except BaseException as exc:
-                if cleanup_error is None:
-                    cleanup_error = exc
-        if owner_cleanup_error is not None:
+                cleanup_errors.append(exc)
+        if output_fd is not None:
+            raw_output_to_close = output_fd
+            output_fd = None
+            try:
+                os.close(raw_output_to_close)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        pending_session = None
+        if (
+            owner_cleanup_error is not None
+            and collector_started
+            and collector is not None
+            and output is not None
+        ):
+            pending_session = LiveServerSession(
+                port=bound.port,
+                owned=owner_cleanup_error.owned,
+                telemetry=collector,
+                output=output,
+                process_stopped=process_stopped,
+            )
+            owner_cleanup_error.pending_session = pending_session
+            owner_cleanup_error.session = pending_session
+            if cleanup_errors:
+                _extend_lifecycle_finalization(
+                    owner_cleanup_error,
+                    cleanup_errors,
+                )
             if owner_cleanup_error is startup_error:
                 raise
             raise owner_cleanup_error from startup_error
-        if cleanup_error is not None:
-            raise HarnessSafetyError("live server startup cleanup failed") from cleanup_error
+        if (
+            unverified_cleanup_error is not None
+            and collector_started
+            and collector is not None
+            and output is not None
+        ):
+            exact_pid = getattr(unverified_cleanup_error.process, "pid", 0)
+            unverified_cleanup_error.guardian_session = LiveServerSession(
+                port=bound.port,
+                owned=OwnedProcess(
+                    process=unverified_cleanup_error.process,
+                    pid=exact_pid,
+                    pgid=exact_pid,
+                    sid=exact_pid,
+                ),
+                telemetry=collector,
+                output=output,
+            )
+            if cleanup_errors:
+                _extend_lifecycle_finalization(
+                    unverified_cleanup_error,
+                    cleanup_errors,
+                )
+            raise unverified_cleanup_error
+        if (
+            (owned is None or process_stopped)
+            and collector_started
+            and collector is not None
+        ):
+            pending_session = LiveServerSession(
+                port=bound.port,
+                owned=owned,
+                telemetry=collector,
+                output=output,
+                process_stopped=owned is None or process_stopped,
+            )
+            try:
+                finish_live_server(pending_session)
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+            if not pending_session.finished:
+                retained = HarnessLifecycleError(
+                    original_error=startup_error,
+                    finalization_errors=tuple(cleanup_errors),
+                    pending_session=pending_session,
+                    message="live server startup finalization failed",
+                )
+                retained.process_resource_complete = True
+                raise retained from startup_error
+            collector_started = False
+            collector = None
+            output = None
+        if collector_started and collector is not None:
+            try:
+                collector.finish()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        elif collector is not None:
+            close_collector = getattr(collector, "close", None)
+            if callable(close_collector):
+                try:
+                    close_collector()
+                except BaseException as exc:
+                    cleanup_errors.append(exc)
+        if output is not None:
+            output_to_close = output
+            output = None
+            try:
+                output_to_close.close()
+            except BaseException as exc:
+                cleanup_errors.append(exc)
+        if unverified_cleanup_error is not None:
+            if cleanup_errors:
+                _extend_lifecycle_finalization(
+                    unverified_cleanup_error,
+                    cleanup_errors,
+                )
+            raise unverified_cleanup_error
+        if owner_cleanup_error is not None:
+            if cleanup_errors:
+                _extend_lifecycle_finalization(
+                    owner_cleanup_error,
+                    cleanup_errors,
+                )
+            if owner_cleanup_error is startup_error:
+                raise
+            raise owner_cleanup_error from startup_error
+        if cleanup_errors:
+            raise HarnessLifecycleError(
+                original_error=startup_error,
+                attempt_errors=tuple(cleanup_errors),
+                message="live server startup cleanup failed",
+            ) from startup_error
         raise startup_error
     return LiveServerSession(
         port=bound.port,
@@ -2582,33 +2985,56 @@ def finish_live_server(
     if not isinstance(session, LiveServerSession):
         raise HarnessSafetyError("live server session is invalid")
     if session.finished:
+        if session.telemetry_error is not None:
+            raise session.telemetry_error
         return session.provider_events
-    error: BaseException | None = None
+    errors: list[BaseException] = []
+    owner_error: OwnedProcessCleanupError | None = None
     observe = _peek_owned_exit if peek_exit is None else peek_exit
     if not session.process_stopped:
+        if not isinstance(session.owned, OwnedProcess):
+            raise HarnessSafetyError("live server process ownership is missing")
+        observation_error: BaseException | None = None
         try:
             observed_exit = observe(session.owned)
         except BaseException as exc:
             if isinstance(exc, HarnessSafetyError):
-                error = exc
+                observation_error = exc
             else:
-                error = HarnessSafetyError("live server process observation failed")
-                error.__cause__ = exc
+                observation_error = HarnessSafetyError(
+                    "live server process observation failed"
+                )
+                observation_error.__cause__ = exc
         else:
             if observed_exit is not None:
-                error = HarnessSafetyError("live server exited unexpectedly")
+                observation_error = HarnessSafetyError(
+                    "live server exited unexpectedly"
+                )
+        session.process_cleanup_attempts += 1
         try:
             _cleanup_validated_owner(
                 session.owned,
                 stopper=stopper,
-                original_error=error
+                original_error=observation_error
                 or HarnessSafetyError("live server cleanup failed"),
                 attempts=1,
             )
         except OwnedProcessCleanupError as exc:
-            error = exc
+            owner_error = exc
+            owner_error.pending_session = session
+            owner_error.session = session
+            if getattr(exc, "process_resource_complete", False) is True:
+                session.process_stopped = True
+        except BaseException as exc:
+            errors.append(exc)
+            if getattr(exc, "process_resource_complete", False) is True:
+                session.process_stopped = True
         else:
             session.process_stopped = True
+            if observation_error is not None:
+                errors.append(observation_error)
+    if session.output is None:
+        session.output_closed = True
     if not session.output_closed and getattr(session.output, "closed", False) is True:
         session.output_closed = True
     if not session.output_closed:
@@ -2618,36 +3044,59 @@ def finish_live_server(
         except BaseException as exc:
             if getattr(session.output, "closed", False) is True:
                 session.output_closed = True
-            if error is None:
-                error = exc
+            errors.append(exc)
         if not session.output_closed:
             try:
                 session.output.close()
             except BaseException as exc:
                 if getattr(session.output, "closed", False) is True:
                     session.output_closed = True
-                if error is None:
-                    error = exc
+                errors.append(exc)
             else:
                 session.output_closed = True
+    if session.telemetry is None:
+        session.telemetry_finished = True
+        session.telemetry_payload_valid = True
     if not session.telemetry_finished:
         try:
             events = tuple(session.telemetry.finish())
         except BaseException as exc:
-            if error is None:
-                error = exc
+            if getattr(session.telemetry, "joined", False) is True:
+                session.telemetry_finished = True
+                session.telemetry_payload_valid = False
+                session.telemetry_error = exc
+            errors.append(exc)
         else:
             session.provider_events = events
             session.telemetry_finished = True
+            session.telemetry_payload_valid = bool(
+                getattr(session.telemetry, "payload_valid", True)
+            )
     session.finished = (
         session.process_stopped
         and session.output_closed
         and session.telemetry_finished
     )
-    if error is not None:
-        if isinstance(error, HarnessSafetyError):
-            raise error
-        raise HarnessSafetyError("live server cleanup failed") from error
+    if owner_error is not None:
+        if errors:
+            owner_error.finalization_errors = (
+                *owner_error.finalization_errors,
+                *errors,
+            )
+            owner_error.errors = (
+                owner_error.original_error,
+                *owner_error.attempt_errors,
+                *owner_error.finalization_errors,
+            )
+        raise owner_error
+    if errors:
+        if len(errors) == 1 and isinstance(errors[0], HarnessSafetyError):
+            raise errors[0]
+        raise HarnessLifecycleError(
+            original_error=errors[0],
+            attempt_errors=tuple(errors[1:]),
+            message="live server cleanup failed",
+        ) from errors[0]
     return session.provider_events
 
 
@@ -2659,6 +3108,8 @@ def atomic_write_json(
     nonce: Callable[[], str] = lambda: secrets.token_hex(8),
     pinned_plan: RunPlan | None = None,
     terminal_commit: bool = False,
+    termination_event: threading.Event | None = None,
+    termination_complete_event: threading.Event | None = None,
 ) -> None:
     """Write one canonical 0600 JSON artifact and durably replace its target."""
 
@@ -2666,6 +3117,10 @@ def atomic_write_json(
     if type(terminal_commit) is not bool or (
         terminal_commit
         and (pinned_plan is None or destination != pinned_plan.manifest)
+    ) or (
+        (termination_event is None) != (termination_complete_event is None)
+    ) or (
+        termination_event is not None and not terminal_commit
     ):
         raise HarnessSafetyError("terminal evidence commit is invalid")
     parent = destination.parent
@@ -2709,6 +3164,8 @@ def atomic_write_json(
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
     descriptor = None
+    terminal_linearized = False
+    temporary_identity = None
     try:
         descriptor = os.open(
             temporary_name if parent_descriptor is not None else temporary,
@@ -2724,23 +3181,82 @@ def atomic_write_json(
                 raise OSError("short write")
             offset += written
         os.fsync(descriptor)
-        os.close(descriptor)
-        descriptor = None
+        temporary_identity = _regular_descriptor_identity(os.fstat(descriptor))
+        if not terminal_commit:
+            descriptor_to_close = descriptor
+            descriptor = None
+            os.close(descriptor_to_close)
         if terminal_commit:
             assert_run_plan_identity(pinned_plan)
             if parent_descriptor is not None:
                 os.fsync(parent_descriptor)
-        if parent_descriptor is not None and replace is os.replace:
-            os.replace(
-                temporary_name,
-                destination_name,
-                src_dir_fd=parent_descriptor,
-                dst_dir_fd=parent_descriptor,
-            )
+            if termination_event is not None:
+                if termination_event.is_set():
+                    raise OSError("terminal evidence commit interrupted")
+                termination_complete_event.set()
+                if termination_event.is_set():
+                    termination_complete_event.clear()
+                    raise OSError("terminal evidence commit interrupted")
+        try:
+            if parent_descriptor is not None and replace is os.replace:
+                os.replace(
+                    temporary_name,
+                    destination_name,
+                    src_dir_fd=parent_descriptor,
+                    dst_dir_fd=parent_descriptor,
+                )
+            else:
+                replace(temporary, destination)
+        except BaseException:
+            if not (
+                terminal_commit
+                and parent_descriptor is not None
+                and temporary_identity is not None
+            ):
+                raise
+            verification_attempt = 0
+            while True:
+                replacement_state = _classify_terminal_replacement(
+                    parent_descriptor,
+                    destination_name,
+                    temporary_name=temporary_name,
+                    temporary_descriptor=descriptor,
+                    temporary_identity=temporary_identity,
+                    payload=payload,
+                )
+                if replacement_state == "committed":
+                    terminal_linearized = True
+                    break
+                if replacement_state == "not-committed":
+                    raise
+                verification_attempt += 1
+                time.sleep(_guardian_backoff(verification_attempt))
         else:
-            replace(temporary, destination)
-        if terminal_commit:
-            pass
+            terminal_linearized = terminal_commit
+        if terminal_commit and descriptor is not None:
+            descriptor_to_close = descriptor
+            descriptor = None
+            try:
+                os.close(descriptor_to_close)
+            except OSError:
+                # A terminal rename has either been proven or returned
+                # success. Retrying the numeric FD could close an unrelated
+                # reused descriptor, and a close ambiguity cannot undo it.
+                pass
+        if parent_descriptor is not None and terminal_commit:
+            # The rename is the terminal commit point.  Once COMPLETE is
+            # visible we must not return a failure that leaves that status on
+            # disk, so retain the directory lease and retry durability until
+            # the post-rename fsync succeeds.
+            sync_attempt = 0
+            while True:
+                try:
+                    os.fsync(parent_descriptor)
+                except OSError:
+                    sync_attempt += 1
+                    time.sleep(_guardian_backoff(sync_attempt))
+                else:
+                    break
         elif parent_descriptor is not None:
             os.fsync(parent_descriptor)
         else:
@@ -2749,10 +3265,18 @@ def atomic_write_json(
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
-    except OSError as exc:
+    except BaseException as exc:
+        if (
+            terminal_commit
+            and not terminal_linearized
+            and termination_complete_event is not None
+        ):
+            termination_complete_event.clear()
         if descriptor is not None:
+            descriptor_to_close = descriptor
+            descriptor = None
             try:
-                os.close(descriptor)
+                os.close(descriptor_to_close)
             except OSError:
                 pass
         try:
@@ -2762,7 +3286,9 @@ def atomic_write_json(
                 temporary.unlink()
         except OSError:
             pass
-        raise HarnessSafetyError("atomic evidence write failed") from exc
+        if isinstance(exc, OSError):
+            raise HarnessSafetyError("atomic evidence write failed") from exc
+        raise
     finally:
         if parent_descriptor is not None:
             try:
@@ -4216,8 +4742,12 @@ def _runtime_database_texts(
             ):
                 raise failed
             if connection.execute(
+                "SELECT id, failure_timestamps FROM teacher_pin_throttle ORDER BY id"
+            ).fetchall() != [(1, "[]")]:
+                raise failed
+            if connection.execute(
                 "SELECT version_num FROM alembic_version"
-            ).fetchall() != [("20260902_0002",)]:
+            ).fetchall() != [("20260905_0003",)]:
                 raise failed
 
             texts: list[str] = []
@@ -6300,6 +6830,8 @@ def execute_retained_uat(
         [RunPlan, Mapping[str, object], Mapping[str, object]],
         Mapping[str, object],
     ] = validate_database_provenance,
+    termination_event: threading.Event | None = None,
+    termination_complete_event: threading.Event | None = None,
 ) -> RunPlan:
     """Execute one retained run through injectable, fake-safe orchestration seams."""
 
@@ -6308,7 +6840,16 @@ def execute_retained_uat(
     session_finished = False
     finisher_attempts = 0
     finisher_errors: list[BaseException] = []
+
+    if (termination_event is None) != (termination_complete_event is None):
+        raise HarnessSafetyError("controller termination state is invalid")
+
+    def reject_termination() -> None:
+        if termination_event is not None and termination_event.is_set():
+            raise HarnessSafetyError("controller interrupted the retained run")
+
     try:
+        reject_termination()
         before_first = capture_resources(repository)
         before_second = capture_resources(repository)
         assert_protected_resources_equal(before_first, before_second)
@@ -6325,6 +6866,7 @@ def execute_retained_uat(
             nonce=nonce,
         )
         atomic_write_json(plan.resources_before, before_second, pinned_plan=plan)
+        reject_termination()
         plan = source_materializer(plan)
         if plan.source_root_identity is not None:
             assert_reviewed_source_pinned(plan)
@@ -6336,6 +6878,7 @@ def execute_retained_uat(
             business_today=business_today,
         )
         assert_run_plan_identity(plan)
+        reject_termination()
         seed_result = seed_runner(
             plan,
             argv=seed_argv,
@@ -6346,6 +6889,7 @@ def execute_retained_uat(
             canonical_json_line(dict(seed_result)).encode("utf-8"),
             plan,
         )
+        reject_termination()
         seed_baseline = capture_post_seed_baseline(plan)
         atomic_write_json(plan.seed_baseline, seed_baseline, pinned_plan=plan)
         _safe_owned_directory(plan.app_log.parent, label="run log directory")
@@ -6366,11 +6910,13 @@ def execute_retained_uat(
         )
 
         backend_environment = build_backend_environment(environ, plan, provider)
+        reject_termination()
         session = server_starter(
             plan,
             environment=backend_environment,
             python_executable=python_executable,
         )
+        reject_termination()
         health, version, cache_control, auth = readiness_probe(session)
         validate_readiness(
             health=health,
@@ -6378,10 +6924,12 @@ def execute_retained_uat(
             version_cache_control=cache_control,
             auth=auth,
         )
+        reject_termination()
         RuntimeEmitter(output_stream).emit(
             build_runtime_object(plan, port=getattr(session, "port", None))
         )
         control = consume_control_stream(input_stream, plan)
+        reject_termination()
         if not control.finalize_requested:
             raise HarnessSafetyError("controller finalize was not requested")
         if not control.has_teacher_secret:
@@ -6396,6 +6944,7 @@ def execute_retained_uat(
             finisher_errors.append(exc)
             raise
         session_finished = True
+        reject_termination()
         if plan.source_root_identity is not None:
             assert_reviewed_source_pinned(plan)
         _verify_retained_teacher_credential(plan, teacher_pin)
@@ -6493,11 +7042,14 @@ def execute_retained_uat(
         )
         if plan.source_root_identity is not None:
             assert_reviewed_source_pinned(plan)
+        reject_termination()
         atomic_write_json(
             plan.manifest,
             manifest,
             pinned_plan=plan,
             terminal_commit=True,
+            termination_event=termination_event,
+            termination_complete_event=termination_complete_event,
         )
         return plan
     except KeyboardInterrupt as exc:
@@ -6505,6 +7057,11 @@ def execute_retained_uat(
         error.__cause__ = exc
     except BaseException as exc:
         error = exc
+
+    if session is None:
+        pending = getattr(error, "pending_session", None)
+        if isinstance(pending, LiveServerSession):
+            session = pending
 
     if session is not None and not session_finished:
         while finisher_attempts < OWNER_CLEANUP_ATTEMPTS:
@@ -6516,41 +7073,55 @@ def execute_retained_uat(
             else:
                 session_finished = True
                 break
-        if not session_finished:
-            owned_errors = [
-                candidate
-                for candidate in finisher_errors
-                if isinstance(candidate, OwnedProcessCleanupError)
-            ]
-            if owned_errors:
-                retained_owner = owned_errors[0].owned
-                attempt_errors: list[BaseException] = []
-                for candidate in finisher_errors:
-                    if (
-                        isinstance(candidate, OwnedProcessCleanupError)
-                        and candidate.owned is retained_owner
-                    ):
-                        attempt_errors.extend(candidate.attempt_errors)
-                    else:
-                        attempt_errors.append(candidate)
-                original_error = (
-                    error.original_error
-                    if isinstance(error, OwnedProcessCleanupError)
-                    else error
+    original_error = (
+        error.original_error
+        if isinstance(error, HarnessLifecycleError)
+        else error
+    )
+    cleanup_errors: list[BaseException] = []
+    inherited_finalization_errors: list[BaseException] = []
+    if isinstance(error, HarnessLifecycleError):
+        cleanup_errors.extend(error.attempt_errors)
+        inherited_finalization_errors.extend(error.finalization_errors)
+    for candidate in finisher_errors:
+        if candidate is error:
+            continue
+        if isinstance(candidate, HarnessLifecycleError):
+            if candidate.original_error is not original_error:
+                cleanup_errors.append(candidate.original_error)
+            cleanup_errors.extend(candidate.attempt_errors)
+            inherited_finalization_errors.extend(candidate.finalization_errors)
+        else:
+            cleanup_errors.append(candidate)
+    pending_owner_error: OwnedProcessCleanupError | None = None
+    pending_process_error: UnverifiedProcessCleanupError | None = None
+    ownership_candidates = (error, *reversed(finisher_errors))
+    for candidate in ownership_candidates:
+        if isinstance(candidate, OwnedProcessCleanupError):
+            candidate_session = getattr(candidate, "pending_session", None)
+            process_finished = bool(
+                getattr(candidate, "process_resource_complete", False) is True
+                or (
+                    isinstance(candidate_session, LiveServerSession)
+                    and candidate_session.process_stopped
                 )
-                error = OwnedProcessCleanupError(
-                    owned=retained_owner,
-                    attempt_errors=tuple(attempt_errors),
-                    original_error=original_error,
-                )
-            else:
-                cleanup_error = HarnessSafetyError("owned server cleanup failed")
-                cleanup_error.__cause__ = finisher_errors[-1]
-                error = cleanup_error
+            )
+            resources_finished = bool(
+                not isinstance(candidate_session, LiveServerSession)
+                or candidate_session.finished
+            )
+            if not process_finished or not resources_finished:
+                pending_owner_error = candidate
+                break
+        if isinstance(candidate, UnverifiedProcessCleanupError):
+            pending_process_error = candidate
+            break
+    finalization_errors = inherited_finalization_errors
     if plan is not None:
         reason = (
             "CONTROLLER_EVIDENCE_MISSING"
-            if isinstance(error, HarnessSafetyError) and "controller" in str(error).lower()
+            if isinstance(original_error, HarnessSafetyError)
+            and "controller" in str(original_error).lower()
             else "SAFETY_FAILURE"
         )
         try:
@@ -6562,12 +7133,62 @@ def execute_retained_uat(
             )
             atomic_write_json(plan.resources_after, after, pinned_plan=plan)
             assert_protected_resources_equal(before_second, after)
-        except BaseException:
+        except BaseException as exc:
+            finalization_errors.append(exc)
             reason = "SAFETY_FAILURE"
-        finalize_failed_run(
-            plan,
-            reason_code=reason,
+        try:
+            finalize_failed_run(
+                plan,
+                reason_code=reason,
+            )
+        except BaseException as exc:
+            finalization_errors.append(exc)
+    if pending_owner_error is not None:
+        retained = OwnedProcessCleanupError(
+            owned=pending_owner_error.owned,
+            attempt_errors=tuple(cleanup_errors),
+            original_error=original_error,
+            pending_session=getattr(pending_owner_error, "pending_session", None),
+            finalization_errors=tuple(finalization_errors),
         )
+        retained.process_resource_complete = bool(
+            getattr(pending_owner_error, "process_resource_complete", False) is True
+            or (
+                isinstance(retained.pending_session, LiveServerSession)
+                and retained.pending_session.process_stopped
+            )
+        )
+        if retained.process_resource_complete:
+            retained.cleanup_state = "owner-reaped"
+        raise retained from pending_owner_error
+    if pending_process_error is not None:
+        retained = UnverifiedProcessCleanupError(
+            process=pending_process_error.process,
+            attempt_errors=tuple(cleanup_errors),
+            original_error=original_error,
+            guardian_session=getattr(
+                pending_process_error,
+                "guardian_session",
+                None,
+            ),
+            finalization_errors=tuple(finalization_errors),
+        )
+        raise retained from pending_process_error
+    if cleanup_errors or finalization_errors:
+        pending_session = (
+            session
+            if isinstance(session, LiveServerSession) and not session.finished
+            else None
+        )
+        lifecycle_error = HarnessLifecycleError(
+            original_error=original_error,
+            attempt_errors=tuple(cleanup_errors),
+            finalization_errors=tuple(finalization_errors),
+            pending_session=pending_session,
+        )
+        if isinstance(pending_session, LiveServerSession):
+            lifecycle_error.process_resource_complete = pending_session.process_stopped
+        raise lifecycle_error from original_error
     if isinstance(error, HarnessSafetyError):
         raise error
     raise HarnessSafetyError("retained live UAT failed safely") from error
@@ -6589,12 +7210,16 @@ class SignalAwareControlStream:
                 readable, _, _ = select.select([self._descriptor], [], [], 0.25)
             except (OSError, ValueError) as exc:
                 raise HarnessSafetyError("controller input failed") from exc
+            if self._termination.is_set():
+                return
             if not readable:
                 continue
             try:
                 chunk = os.read(self._descriptor, 4096)
             except OSError as exc:
                 raise HarnessSafetyError("controller input failed") from exc
+            if self._termination.is_set():
+                return
             if not chunk:
                 if buffered:
                     raise HarnessSafetyError("canonical control frame is invalid")
@@ -6602,6 +7227,8 @@ class SignalAwareControlStream:
             buffered += chunk
             while b"\n" in buffered:
                 raw, buffered = buffered.split(b"\n", 1)
+                if self._termination.is_set():
+                    return
                 try:
                     yield (raw + b"\n").decode("utf-8", errors="strict")
                 except UnicodeError as exc:
@@ -6611,22 +7238,48 @@ class SignalAwareControlStream:
 
 
 class _SignalTermination:
+    _current: _SignalTermination | None = None
+
     def __init__(self) -> None:
         self.event = threading.Event()
+        self.complete_event = threading.Event()
         self._previous: dict[int, object] = {}
+        self._parent: _SignalTermination | None = None
 
     def __enter__(self):
-        for signum in (signal.SIGINT, signal.SIGTERM):
-            self._previous[signum] = signal.getsignal(signum)
-            signal.signal(signum, self._mark)
+        kind = type(self)
+        self._parent = kind._current
+        if self._parent is not None:
+            # Nested latches form one logical interruption lease.  In
+            # particular, a signal observed by the entrypoint before ``main``
+            # finishes parsing arguments must remain visible to ``main``.
+            self.event = self._parent.event
+            self.complete_event = self._parent.complete_event
+        installed: list[int] = []
+        try:
+            for signum in (signal.SIGINT, signal.SIGTERM):
+                self._previous[signum] = signal.getsignal(signum)
+                signal.signal(signum, self._mark)
+                installed.append(signum)
+        except BaseException:
+            for signum in reversed(installed):
+                signal.signal(signum, self._previous[signum])
+            raise
+        kind._current = self
         return self
 
     def _mark(self, _signum, _frame) -> None:
-        self.event.set()
+        if not self.complete_event.is_set():
+            self.event.set()
 
     def __exit__(self, _error_type, _error, _traceback) -> None:
-        for signum, previous in self._previous.items():
-            signal.signal(signum, previous)
+        kind = type(self)
+        try:
+            for signum, previous in self._previous.items():
+                signal.signal(signum, previous)
+        finally:
+            if kind._current is self:
+                kind._current = self._parent
 
 
 def read_dotenv_values(
@@ -6685,13 +7338,15 @@ def main(
     python_executable: str | None = None,
     business_today: Callable[[], date] = _business_today,
 ) -> int:
-    parsed = parse_args(argv)
-    selected_environment = dict(os.environ if environ is None else environ)
-    selected_output = sys.stdout if output_stream is None else output_stream
     with _SignalTermination() as termination:
+        parsed = parse_args(argv)
+        selected_environment = dict(os.environ if environ is None else environ)
+        selected_output = sys.stdout if output_stream is None else output_stream
         selected_input = input_stream
         if selected_input is None:
             selected_input = SignalAwareControlStream(sys.stdin.fileno(), termination.event)
+        if termination.event.is_set():
+            raise HarnessSafetyError("controller interrupted the retained run")
         execute(
             repository=PROJECT_ROOT,
             expected_head=parsed.expected_head,
@@ -6706,21 +7361,229 @@ def main(
             server_starter=start_live_server,
             readiness_probe=probe_live_readiness,
             server_finisher=finish_live_server,
+            termination_event=termination.event,
+            termination_complete_event=termination.complete_event,
         )
+        if termination.event.is_set():
+            raise HarnessSafetyError("controller interrupted the retained run")
     return 0
 
 
-def _entrypoint() -> int:
-    try:
-        return main()
-    except SystemExit:
-        raise
-    except BaseException as error:
-        name = type(error).__name__
-        if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]{0,127}", name) is None:
-            name = "Exception"
-        print(f"retained live UAT failed error_type={name}", file=sys.stderr)
-        return 1
+def _guardian_backoff(attempt: int) -> float:
+    return min(1.0, 0.05 * max(1, attempt))
+
+
+def _guard_session_resources(
+    error: HarnessLifecycleError,
+    pending: LiveServerSession,
+    *,
+    guardian_sleep: Callable[[float], None],
+    guardian_max_attempts: int | None,
+) -> None:
+    """Finalize non-process resources after process ownership is settled."""
+
+    pending.process_stopped = True
+    finalization_attempt = 0
+    while not pending.finished:
+        finalization_attempt += 1
+        try:
+            finish_live_server(pending)
+        except BaseException as exc:
+            _extend_lifecycle_finalization(error, (exc,))
+            if pending.finished:
+                return
+            if (
+                guardian_max_attempts is not None
+                and finalization_attempt >= guardian_max_attempts
+            ):
+                retained = HarnessLifecycleError(
+                    original_error=error.original_error,
+                    attempt_errors=error.attempt_errors,
+                    finalization_errors=error.finalization_errors,
+                    message="live server guardian finalization failed",
+                )
+                retained.process_resource_complete = True
+                retained.pending_session = pending
+                raise retained from exc
+            guardian_sleep(_guardian_backoff(finalization_attempt))
+        else:
+            if pending.finished:
+                return
+            state_error = HarnessSafetyError(
+                "live server guardian finalization did not converge"
+            )
+            _extend_lifecycle_finalization(error, (state_error,))
+            if (
+                guardian_max_attempts is not None
+                and finalization_attempt >= guardian_max_attempts
+            ):
+                retained = HarnessLifecycleError(
+                    original_error=error.original_error,
+                    attempt_errors=error.attempt_errors,
+                    finalization_errors=error.finalization_errors,
+                    message="live server guardian finalization failed",
+                )
+                retained.process_resource_complete = True
+                retained.pending_session = pending
+                raise retained from state_error
+            guardian_sleep(_guardian_backoff(finalization_attempt))
+
+
+def _guard_pending_process(
+    error: BaseException,
+    *,
+    validated_stopper: Callable[[OwnedProcess], object],
+    direct_reaper: Callable[[object], None],
+    guardian_sleep: Callable[[float], None],
+    guardian_max_attempts: int | None,
+) -> BaseException:
+    """Synchronously retain control until a surfaced process lease is complete."""
+
+    if guardian_max_attempts is not None and guardian_max_attempts <= 0:
+        raise HarnessSafetyError("process guardian attempt limit is invalid")
+    if isinstance(error, OwnedProcessCleanupError):
+        if getattr(error, "process_resource_complete", False) is True:
+            pending = error.pending_session
+            if isinstance(pending, LiveServerSession):
+                _guard_session_resources(
+                    error,
+                    pending,
+                    guardian_sleep=guardian_sleep,
+                    guardian_max_attempts=guardian_max_attempts,
+                )
+            error.cleanup_state = "owner-reaped"
+            return error
+        guardian_errors: list[BaseException] = []
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                validated_stopper(error.owned)
+            except BaseException as exc:
+                if getattr(exc, "process_resource_complete", False) is True:
+                    guardian_errors.append(exc)
+                    break
+                guardian_errors.append(exc)
+                if guardian_max_attempts is not None and attempt >= guardian_max_attempts:
+                    retained = OwnedProcessCleanupError(
+                        owned=error.owned,
+                        attempt_errors=(
+                            *error.attempt_errors,
+                            *guardian_errors,
+                        ),
+                        original_error=error.original_error,
+                        pending_session=error.pending_session,
+                        finalization_errors=error.finalization_errors,
+                    )
+                    raise retained from exc
+                guardian_sleep(_guardian_backoff(attempt))
+            else:
+                break
+        if guardian_errors:
+            _extend_lifecycle_attempts(error, guardian_errors)
+        pending = error.pending_session
+        if isinstance(pending, LiveServerSession):
+            _guard_session_resources(
+                error,
+                pending,
+                guardian_sleep=guardian_sleep,
+                guardian_max_attempts=guardian_max_attempts,
+            )
+        error.cleanup_state = "owner-reaped"
+        return error
+    if isinstance(error, UnverifiedProcessCleanupError):
+        guardian_errors = []
+        attempt = 0
+        while True:
+            attempt += 1
+            try:
+                direct_reaper(error.process)
+            except BaseException as exc:
+                guardian_errors.append(exc)
+                if guardian_max_attempts is not None and attempt >= guardian_max_attempts:
+                    retained = UnverifiedProcessCleanupError(
+                        process=error.process,
+                        attempt_errors=(
+                            *error.attempt_errors,
+                            *guardian_errors,
+                        ),
+                        original_error=error.original_error,
+                        guardian_session=error.guardian_session,
+                        finalization_errors=error.finalization_errors,
+                    )
+                    raise retained from exc
+                guardian_sleep(_guardian_backoff(attempt))
+            else:
+                break
+        if guardian_errors:
+            _extend_lifecycle_attempts(error, guardian_errors)
+        pending = error.guardian_session
+        if isinstance(pending, LiveServerSession):
+            _guard_session_resources(
+                error,
+                pending,
+                guardian_sleep=guardian_sleep,
+                guardian_max_attempts=guardian_max_attempts,
+            )
+        error.cleanup_state = "exact-child-reaped"
+        return error
+    if isinstance(error, HarnessLifecycleError):
+        pending = getattr(error, "pending_session", None)
+        if isinstance(pending, LiveServerSession) and not pending.finished:
+            if not pending.process_stopped:
+                promoted = OwnedProcessCleanupError(
+                    owned=pending.owned,
+                    attempt_errors=error.attempt_errors,
+                    original_error=error.original_error,
+                    pending_session=pending,
+                    finalization_errors=error.finalization_errors,
+                )
+                return _guard_pending_process(
+                    promoted,
+                    validated_stopper=validated_stopper,
+                    direct_reaper=direct_reaper,
+                    guardian_sleep=guardian_sleep,
+                    guardian_max_attempts=guardian_max_attempts,
+                )
+            _guard_session_resources(
+                error,
+                pending,
+                guardian_sleep=guardian_sleep,
+                guardian_max_attempts=guardian_max_attempts,
+            )
+    return error
+
+
+def _entrypoint(
+    *,
+    main_runner: Callable[[], int] = main,
+    validated_stopper: Callable[[OwnedProcess], object] = stop_owned_process_group,
+    direct_reaper: Callable[[object], None] = _reap_child_after_validation_failure,
+    guardian_sleep: Callable[[float], None] = time.sleep,
+    guardian_max_attempts: int | None = None,
+) -> int:
+    # Keep termination signals latched until every surfaced process lease is
+    # resolved.  ``main`` installs a nested latch for its control stream; when
+    # it unwinds on failure, this outer latch remains active while the guardian
+    # performs its mandatory exact-owner cleanup.
+    with _SignalTermination():
+        try:
+            return main_runner()
+        except SystemExit:
+            raise
+        except BaseException as error:
+            error = _guard_pending_process(
+                error,
+                validated_stopper=validated_stopper,
+                direct_reaper=direct_reaper,
+                guardian_sleep=guardian_sleep,
+                guardian_max_attempts=guardian_max_attempts,
+            )
+            name = type(error).__name__
+            if re.fullmatch(r"[A-Za-z][A-Za-z0-9_.]{0,127}", name) is None:
+                name = "Exception"
+            print(f"retained live UAT failed error_type={name}", file=sys.stderr)
+            return 1
 
 
 if __name__ == "__main__":

@@ -44,6 +44,7 @@ async def _raw_asgi_create(
         messages.append(message)
 
     headers = [
+        (b"host", b"testserver"),
         (b"content-type", b"application/json"),
         (b"content-length", str(len(encoded)).encode("ascii")),
         (b"cookie", f"{COOKIE_NAME}={cookie}".encode("ascii")),

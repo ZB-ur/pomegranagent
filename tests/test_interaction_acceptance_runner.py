@@ -2541,8 +2541,6 @@ backend | ^test_provider_settings_reject_nonofficial_deepseek_origins_and_paths\
 backend | ^test_(fake_harness_dry_run_has_one_stdout_owned_stop_redaction_and_retained_failure|execute_retained_uat_rejects_teacher_pin_not_matching_runtime_scrypt)$ | 2 | 14
 backend | ^test_finish_live_server_retries_cleanup_after_stopper_fails_before_signal$ | 1 | 14
 backend | ^test_finish_live_server_continues_cleanup_when_initial_observation_fails$ | 1 | 14
-backend | ^test_start_live_server_retries_owned_cleanup_before_losing_session$ | 1 | 14
-backend | ^test_launch_server_process_retries_validated_owner_cleanup_before_raising$ | 1 | 14
 backend | ^test_run_seed_process_cleans_owned_group_after_observation_failure$ | 1 | 14
 backend | ^test_launch_server_process_preserves_owner_when_both_cleanup_attempts_fail$ | 1 | 14
 backend | ^test_finish_live_server_skips_io_for_preclosed_output_and_converges$ | 1 | 14
@@ -2554,7 +2552,18 @@ backend | ^test_start_live_server_preserves_owner_when_cleanup_and_collector_sto
 backend | ^test_execute_retained_uat_preserves_server_starter_owned_cleanup_error$ | 1 | 14
 backend | ^test_execute_retained_uat_retries_finisher_and_preserves_readiness_error$ | 1 | 14
 backend | ^test_finish_live_server_closes_output_after_flush_or_fsync_failure\[(flush-expected_output_calls0-expected_fsync_calls0|fsync-expected_output_calls1-expected_fsync_calls1)\]$ | 2 | 14
-backend | ^test_start_live_server_preserves_launcher_owned_error_during_parent_cleanup$ | 1 | 14"""
+backend | ^test_start_live_server_preserves_launcher_owned_error_during_parent_cleanup$ | 1 | 14
+backend | ^test_api_error_can_carry_a_controlled_retry_after_header$ | 1 | 3,14
+backend | ^test_api_error_rejects_uncontrolled_or_noncanonical_headers\[(unsupported-name|negative-value|header-injection|non-string-value)\]$ | 4 | 3,14
+backend | ^test_(matching_attacker_host_and_origin_are_rejected_against_scope_server|static_request_with_host_different_from_scope_server_is_rejected)$ | 2 | 3,14
+backend | ^test_app_mode_rejects_non_loopback_scope_even_when_host_matches\[(attacker\.example|localhost|0\.0\.0\.0)\]$ | 3 | 3,14
+backend | ^test_(app_mode_allows_exact_loopback_scope_host_and_port|duplicate_raw_host_headers_are_rejected)$ | 2 | 3,14
+backend | ^test_host_header_must_include_the_exact_nondefault_scope_port\[(testserver|testserver:8124)\]$ | 2 | 3,14
+backend | ^test_(launch_server_process_hands_validated_owner_to_outer_guardian|start_live_server_hands_pending_session_to_outer_finisher)$ | 2 | 14
+backend | ^test_second_round_(unverified_launch_cleanup_retains_exact_process_and_errors|unverified_seed_cleanup_retains_exact_process_and_errors|start_attaches_pending_session_for_outer_takeover|execute_recovers_pending_session_from_failed_starter|entrypoint_guardian_retries_validated_owner_until_reaped|entrypoint_latches_sigterm_until_guardian_reaps_owner|early_sigterm_is_not_lost_before_main_execute|execute_rejects_preexisting_termination_before_resources|main_rejects_sigterm_latched_inside_execute|signal_aware_stream_does_not_yield_after_select_race|signal_after_terminal_linearization_is_not_latched|entrypoint_guardian_never_returns_with_pending_owner|entrypoint_guardian_reaps_exact_unverified_process_only|start_preserves_unverified_process_when_other_cleanup_fails|guardian_retries_pending_session_finalization_to_terminal|telemetry_invalid_payload_joins_once_and_rethrows_same_error|telemetry_unexpected_parser_error_fails_closed|session_converges_terminal_telemetry_error_without_redrain|execute_preserves_primary_cleanup_and_finalization_order|failed_manifest_does_not_replace_pending_validated_owner|write_fd_close_after_close_cannot_hit_reused_descriptor|read_fd_transfer_cannot_close_collector_reused_descriptor|collector_constructor_failure_closes_borrowed_read_fd|atomic_write_close_after_close_cannot_hit_reused_descriptor|terminal_commit_fsyncs_parent_after_replace|terminal_commit_rejects_signal_during_precommit|terminal_replace_failure_clears_completion_latch|terminal_replace_then_raise_is_verified_as_committed|terminal_replace_ambiguity_retries_transient_verification|directory_traversal_close_after_close_preserves_reused_fd\[(absolute|plan-root|plan-parent)\]|output_fd_is_closed_when_parent_descriptor_close_fails|seed_nonzero_primary_survives_cleanup_failure|reaped_status_mismatch_marks_process_resource_complete|entrypoint_finishes_generic_pending_session_resources|startup_complete_marker_resources_reach_entrypoint_guardian|startup_cleanup_success_retains_unfinished_telemetry|preowner_startup_failure_retains_collector_until_guardian|preoutput_startup_failure_retains_collector_until_guardian|fdopen_failure_closes_raw_output_before_retaining_collector)$ | 41 | 14
+backend | ^test_review_detail_(uses_one_sqlite_snapshot_across_a_concurrent_atomic_save|reuses_an_existing_sqlite_transaction|success_preserves_a_callers_pending_sqlite_transaction|error_preserves_a_callers_pending_sqlite_transaction|preserves_a_callers_unflushed_orm_transaction|releases_its_owned_snapshot_after_an_unexpected_error|begin_failure_releases_helper_created_session_transaction|begin_failure_preserves_caller_owned_orm_transaction)$ | 8 | 8,9,14
+backend | ^test_schema_three_head_initializes_singleton_teacher_pin_throttle$ | 1 | 1,14
+backend | ^test_(five_failures_allow_no_sixth_attempt_even_with_the_correct_pin|pin_failures_use_a_rolling_fifteen_minute_window|success_atomically_clears_recent_failure_state|failure_state_survives_a_new_testclient_session|six_concurrent_wrong_pins_are_serialized_at_the_global_limit|duplicate_setup_repairs_a_missing_throttle_singleton)$ | 6 | 3,14"""
 
 
 _P5_SELECTOR_ORACLE = (
@@ -2571,7 +2580,7 @@ _P6_POST_REVIEW_SELECTOR_ADDITIONS_SHA256 = (
     "ed7fe56d4422466c4f88b5e27a208fb89e0d57297bbbc2dccb724b2f7440f24b"
 )
 _P6_AUDIT_FIX_SELECTOR_ADDITIONS_SHA256 = (
-    "36090adf74bf960d012981f08771f6ebce44b4ddf20c3c7aae087f08db331021"
+    "91d6d15b889431432faaacf5136ecbfd6508937c51808f5c24fa2c570b51df58"
 )
 
 
@@ -2692,7 +2701,7 @@ def test_literal_p5_selector_oracle_is_exact_ordered_prefix_with_p6_suffix_separ
     assert len(p5_rows) == 97
     assert len(p6_rows) == 56
     assert len(post_review_rows) == 5
-    assert len(audit_fix_rows) == 21
+    assert len(audit_fix_rows) == 30
     p6_end = len(p5_rows) + len(p6_rows)
     post_review_end = p6_end + len(post_review_rows)
     assert actual_rows[: len(p5_rows)] == p5_rows
@@ -2790,7 +2799,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
 
     assert actual_today_retry_rows == EXPECTED_TODAY_RETRY_SELECTOR_ROWS
     assert actual_rows == expected_rows
-    assert len(actual_rows) == 179
+    assert len(actual_rows) == 188
     assert module.GATE_TITLES == EXPECTED_GATE_TITLES
     assert tuple(
         (item.source, item.evidence_id, item.expected_count, item.gates)
@@ -2815,7 +2824,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
             ]
             assert len(matches) == 1
         materialized_count += len(node_ids)
-    assert materialized_count == 427
+    assert materialized_count == 497
 
     assert module.SELECTOR_TO_GATES == {
         (row.command_id, row.node_pattern): row.gates for row in module.SELECTOR_MANIFEST
@@ -4153,8 +4162,8 @@ def test_schema_v2_accepts_one_truthful_full_technical_pending_record(tmp_path):
     assert len(record["focus_measurements"]) == 2
     assert len(record["database_action_evidence"]) == 2
     assert len(record["timeout_evidence"]) == 2
-    assert hashlib.sha256(json_bytes).hexdigest() == "cb877a6d59d15bd3c7daca3df027bd66e84f2cede1f8a0013087d1af6781c71d"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "6d899e9b3e47efc4d334fcc6d2ce1fcead86bc773806ea976f2a4138b55f5b99"
+    assert hashlib.sha256(json_bytes).hexdigest() == "7cb8a4c0825f55d97f8a3d3d9b9eb9d15c68dcb21d2f46952fe70d16738a830b"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "1b19c3c444eb0493c56447b706164775c3aed5c43104bdf515500f88a3bf3ef8"
 
 
 def test_schema_v2_accepts_pending_for_the_exact_post_commit_resource_head(tmp_path):
@@ -4719,8 +4728,8 @@ def test_canonical_json_and_markdown_are_one_way_stable_goldens():
 
     assert module.canonical_json_bytes(record) == json_bytes
     assert module.render_report_markdown(record) == markdown
-    assert hashlib.sha256(json_bytes).hexdigest() == "57f1dd0aee56e9fdb9c83039e3a1dfffb306c2a7c377518aab88d8f554e825f3"
-    assert hashlib.sha256(markdown.encode()).hexdigest() == "f4c190f2b6193dd2edcf1c080b3dfd85fbdfe2c1bd571f923bf34223bc95d392"
+    assert hashlib.sha256(json_bytes).hexdigest() == "02267453bd7f0fffe056ca4ea3a9163206dd7c57bc335e226fd1e1263444f04c"
+    assert hashlib.sha256(markdown.encode()).hexdigest() == "4aa02cfde380e83ca2364df6ee70b093e7a44fc40425cf6dcaa4a64df0f1fd38"
     assert "Runner schema: `2`" in markdown
     assert "argv:" in markdown
     assert "Focus measurements:" in markdown
@@ -5690,7 +5699,6 @@ def test_unit7_result_cross_product_accepts_every_frozen_valid_state():
 
 def test_unit7_result_cross_product_rejects_every_invalid_state():
     module = importlib.import_module("scripts.run_interaction_acceptance")
-    stable = FakeResources()
     invalid_states = [
         (
             "not-started-child-exit",
