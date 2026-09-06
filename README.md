@@ -1,65 +1,86 @@
 # 鸭鸭日记本 🦆
 
-一款面向幼儿园的**个人教学辅助 Web 应用**。幼儿通过「按住说话」与 AI 角色「鸭鸭日记本」语音对话，记录饲养小鸭的过程；系统自动提炼饲养流水、情绪、心得，并对幼儿进行隐性的多维能力评估，教师端做数据沉淀与成长分析。
+面向幼儿园真实值日场景的个人教学辅助 Web 应用。幼儿和会说话的「鸭鸭日记本」完成语音对话，记录照护小鸭的经历；系统把自然表达整理成可审阅的日记与能力观察，最终由教师确认并沉淀为成长记录。
 
-## 功能
+<p align="center">
+  <a href="docs/manual/assets/20260905T220349410323Z-8ed37c2232ab-f24bfb9ef129/child-avatar-selected.png">
+    <img src="docs/manual/assets/20260905T220349410323Z-8ed37c2232ab-f24bfb9ef129/child-avatar-selected.png" width="960" alt="幼儿端进入会话后的准备状态">
+  </a>
+</p>
 
-- **幼儿端**：IP 形象（柯尔鸭）+ 全程语音引导 + 按住说话（PTT）+ 对话流 + 开场/结束动画，投影友好大字号
-- **教师端**：幼儿/小鸭/排班管理、值日审阅（提炼修正 + 星级评分 + 确认）、能力成长曲线、明细检索
-- **AI 引擎**：对话（角色扮演 + 轮次控制 + 提前终止 + 历史感知）、信息提炼、多维评估（打分 + 理由）、小鸭档案汇总
-- **CrewAI 研发团队**：5 Crew 11 Agent + Flow 图工程编排（用于持续研发）
+## 核心体验
 
-## 技术栈
+### 幼儿自然表达
 
-| 层 | 选型 |
-|---|---|
-| 前端 | 原生 HTML/CSS/JS（零构建零 CDN，单机开箱即用） |
-| 后端 | FastAPI + SQLAlchemy + SQLite |
-| LLM | DeepSeek `deepseek-v4-pro`（OpenAI 兼容接口） |
-| TTS | Edge-TTS（神经语音，失败降级浏览器 TTS） |
-| ASR | 浏览器 Web Speech API |
-| 研发编排 | CrewAI（5 Crew + Flow 图工程） |
+当天值日幼儿进入会话后，点一下开始说话、再次点击结束。鸭鸭日记本的 IP 形象贯穿流程，界面以大字号、语音引导和明确状态呈现操作与系统反馈；对话对象始终是「鸭鸭日记本」，小鸭则是幼儿照护和记录的对象。
+
+<p align="center">
+  <a href="docs/manual/assets/20260905T220349410323Z-8ed37c2232ab-f24bfb9ef129/child-conversation-complete.png">
+    <img src="docs/manual/assets/20260905T220349410323Z-8ed37c2232ab-f24bfb9ef129/child-conversation-complete.png" width="960" alt="幼儿端三轮对话完成状态">
+  </a>
+</p>
+
+### 教师审阅确认
+
+系统异步提炼饲养流水、情绪和心得，并生成带理由的能力观察。教师可以对完整结构化结果进行修改、保存草稿和最终确认；原始会话、当前分析版本与确认状态可以相互核对。
+
+<p align="center">
+  <a href="docs/manual/assets/20260905T220349410323Z-8ed37c2232ab-f24bfb9ef129/teacher-review-confirmed.png">
+    <img src="docs/manual/assets/20260905T220349410323Z-8ed37c2232ab-f24bfb9ef129/teacher-review-confirmed.png" width="1000" alt="教师端日记审阅与确认">
+  </a>
+</p>
+
+### 成长沉淀
+
+教师端提供周度概览、能力成长曲线和历史明细检索，让已确认的日记从单次记录转化为可持续观察的成长线索。
+
+<p align="center">
+  <a href="docs/manual/assets/20260905T220349410323Z-8ed37c2232ab-f24bfb9ef129/teacher-weekly-growth.png">
+    <img src="docs/manual/assets/20260905T220349410323Z-8ed37c2232ab-f24bfb9ef129/teacher-weekly-growth.png" width="880" alt="教师端幼儿能力成长曲线">
+  </a>
+</p>
+
+## 已实现能力
+
+- **幼儿端**：值日幼儿选择、点击式录音、浏览器语音识别、三轮上下文对话、语音播放、断网/刷新恢复和明确的完成状态。
+- **教师端**：今日任务、幼儿与小鸭资料管理、头像上传、月度搭档排班、单日临时调班、分析队列、日记审阅确认、周报、成长曲线和组合条件检索。
+- **服务端**：FastAPI API、SQLite 持久化、Schema 迁移、幂等写入、并发租约、后台分析任务、版本化审阅、头像媒体存储和安全的演示数据重建。
+- **AI 与语音**：DeepSeek OpenAI 兼容接口；Edge-TTS 优先，失败时降级为浏览器 TTS。
 
 ## 快速开始
 
-### macOS / Linux
+### 1. 安装
+
+macOS / Linux：
 
 ```bash
 cd pomegranagent
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env      # 填入真实 DEEPSEEK_API_KEY
-./run.sh                  # 或 uvicorn app.backend.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+cp .env.example .env
 ```
 
-### Windows
+Windows：
 
 ```bat
 cd pomegranagent
 python -m venv .venv
 .venv\Scripts\activate
 pip install -r requirements.txt
-copy .env.example .env    # 填入真实 DEEPSEEK_API_KEY
-run.bat                   # 双击，或 uvicorn app.backend.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+copy .env.example .env
 ```
 
-启动后浏览器访问：
+在 `.env` 中配置 `DEEPSEEK_API_KEY`。
 
-- **幼儿端**：http://localhost:8000/
-- **教师端**：http://localhost:8000/teacher.html
+### 2. 初始化数据（可选）
 
-> 普通启动只幂等创建 3 个参考评估维度，不会创建幼儿、小鸭或演示记录。
-> 完整演示数据必须通过下方显式 `full-demo` CLI 写入。
->
-> 服务仅监听本机回环地址 `127.0.0.1`；刻意不支持局域网或公网访问。
+需要空白环境时直接跳到第 3 步；普通启动只幂等创建参考评估维度，不会自动创建幼儿、小鸭或演示记录。需要完整演示环境时，必须在首次启动服务前执行下面的初始化。
 
-### 创建或重新创建完整演示数据
+<details>
+<summary><strong>创建完整演示数据</strong></summary>
 
-所有目标路径和锚点日期都必须显式传给首次 seed。脚本会离线生成 8 个合成幼儿、
-3 只合成小鸭、排班、28 个历史会话、完整分析/审阅投影与本地头像；不会调用 AI/TTS，
-也不会设置教师 PIN。目标已有任一数据库/WAL/SHM、媒体或日志资源时，必须改用
-`--force` 并提供一个尚不存在且不重叠的归档目录。
+首次创建会离线生成合成幼儿、小鸭、排班、历史会话、分析/审阅投影和本地头像，不会调用 AI/TTS，也不会设置教师 PIN。
 
 ```bash
 python scripts/seed_demo_database.py full-demo \
@@ -69,15 +90,20 @@ python scripts/seed_demo_database.py full-demo \
   --log-path logs/app.log
 ```
 
-需要重新创建现有演示 bundle 时，先停止服务。第一条命令必须报告 connection refused，
-确认本机服务已停止后再继续。兼容重建脚本会先完整 staging 和校验新 bundle，再把旧
-数据库及 sidecars、媒体和日志归档到带 UTC 时间戳的子目录；安装失败会恢复旧 bundle。
+如果任一目标数据库、WAL/SHM、媒体或日志已经存在，不要继续运行首次初始化，也不要在服务运行时直接追加 `--force`；请停止服务并使用下面的安全重建流程。
+
+</details>
+
+<details>
+<summary><strong>安全地重建现有演示数据</strong></summary>
+
+先停止服务并确认健康检查连接失败。重建工具会先在 staging 中生成和校验新 bundle，再归档旧数据库及 sidecar、媒体和日志；安装失败时恢复旧 bundle。以下命令使用 macOS/Linux 续行语法；Windows 可在命令提示符中以相同参数单行执行。
 
 ```bash
 # 1. Stop run.sh/run.bat first. This must fail to connect.
 curl --fail http://127.0.0.1:8000/api/health
 
-# 2. Archive the whole old bundle and install a deterministic schema-3 full demo.
+# 2. Archive the old bundle and install a deterministic schema-3 demo.
 python scripts/rebuild_demo_database.py \
   --confirm-rebuild \
   --anchor-date 2026-09-02 \
@@ -85,53 +111,82 @@ python scripts/rebuild_demo_database.py \
   --media-root data/media \
   --log-path logs/app.log \
   --archive-dir data/archive
-
-# 3. Start the loopback-only service.
-./run.sh
 ```
+
+</details>
+
+### 3. 启动
+
+```bash
+# macOS / Linux
+./run.sh
+# 或直接运行：
+uvicorn app.backend.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+```
+
+```bat
+:: Windows
+run.bat
+:: 或直接运行：
+uvicorn app.backend.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
+```
+
+服务默认只监听本机回环地址 `127.0.0.1`。启动后访问：
+
+- 幼儿端：<http://127.0.0.1:8000/>
+- 教师端：<http://127.0.0.1:8000/teacher.html>
+
+## 技术栈
+
+| 层 | 选型 |
+|---|---|
+| 前端 | 原生 HTML/CSS/JavaScript，无构建步骤、无 CDN 依赖 |
+| 后端 | FastAPI + SQLAlchemy |
+| 数据 | SQLite + Alembic/应用启动迁移 |
+| LLM | DeepSeek，通过 `DEEPSEEK_MODEL` 和官方 OpenAI 兼容接口配置 |
+| TTS | Edge-TTS，失败时降级浏览器 TTS |
+| ASR | 浏览器 Web Speech API |
+
+## 测试与验收
+
+测试命令需要 Node.js 20.10 或更高版本。测试会保护应用数据库、日志和 TTS 缓存，资源缺失、类型异常或测试期间发生变化都会令测试主动失败：
+
+- 首次克隆：先在服务启动前执行第 2 步的完整演示数据初始化，再执行一次 `mkdir data/tts_cache`（Windows 使用 `mkdir data\tts_cache`）。
+- 既有环境：不要 seed 或重建；确认 `data/duck_diary.db`、`logs/app.log` 是普通文件，`data/tts_cache` 是真实目录。
+- 两种情况都必须先停止应用服务，再串行运行以下套件，避免多个测试进程共享 SQLite 资源。
+
+```bash
+pip install -r requirements-dev.txt
+python -m playwright install chromium
+
+node --test --test-concurrency=1 \
+  tests/frontend/shared/*.test.mjs \
+  tests/frontend/child/*.test.mjs \
+  tests/frontend/teacher/*.test.mjs
+
+python -m pytest tests --ignore=tests/browser -q
+python -m pytest tests/browser -q
+```
+
+当前版本已经过完整自动化验收与真实浏览器场景验收。真实模型、TTS 下载/解码/播放和主要教师工作流已有留存证据；真实麦克风采集与声学识别仍需在人工设备环境中验收。仓库内提交的是经策展的截图和验收摘要，包含数据库、请求与播放记录的原始机器证据保留在本地验收目录，不随 Git 提交。
+
+查看 [使用说明书截图与真实场景验收记录](docs/manual/README.md)。
 
 ## 目录结构
 
-```
-pomegranagent/
-├── app/
-│   ├── backend/          # FastAPI 后端
-│   │   ├── main.py       # 路由（含 /api/tts 等）
-│   │   ├── models.py     # SQLAlchemy 数据模型
-│   │   ├── schemas.py    # Pydantic 模型
-│   │   ├── ai_engine.py  # 对话/提炼/评估/小鸭档案
-│   │   └── database.py   # SQLite 连接
-│   └── frontend/         # 幼儿端 + 教师端 + IP 素材
-│       ├── index.html    # 幼儿端
-│       ├── teacher.html  # 教师端
-│       └── assets/       # 柯尔鸭 IP 素材
-├── crews/                # CrewAI 研发团队（5 Crew）
-├── flows/                # Flow 图工程编排
-├── tests/                # 集成测试 + e2e + 截图
-├── docs/                 # 需求/方案/评估报告
-├── config/llm.py         # DeepSeek 集中配置
-├── main.py               # CrewAI 流水线入口
-├── run.sh / run.bat      # 一键启动脚本
-└── requirements.txt
+```text
+app/backend/     FastAPI API、业务服务、数据模型与迁移
+app/frontend/    幼儿端、教师端及鸭鸭日记本 IP 素材
+scripts/         演示数据、自动验收和真实场景验收工具
+tests/           后端、前端与浏览器测试
+docs/            产品设计、实施记录与验收材料
+crews/ + flows/  CrewAI 研发编排
 ```
 
-## 测试
+## 设计与安全约束
 
-```bash
-pytest tests/test_api.py -q      # 集成测试（13 个）
-python tests/e2e.py              # 端到端（真实 LLM）
-python tests/screenshot.py       # Playwright 全页面截图
-```
-
-## 关键设计
-
-- **AI 角色**：「鸭鸭日记本」——会说话的日记本，**不是**任何一只真实小鸭；小鸭是幼儿照顾的对象
-- **对话机制**：一问一答算 1 轮，默认最大 3 轮；信息充分可提前终止；注入幼儿档案 + 近期摘要 + 小鸭档案营造「活人感」
-- **评估**：AI 初评 + 教师确认，按次打分 + 周期汇总，幼儿全程无感知
-- **语音**：Edge-TTS 神经语音（温柔女声）优先，失败自动降级浏览器 TTS
-
-## 成本与安全
-
-- **密钥**：`DEEPSEEK_API_KEY` 只放 `.env`（已 gitignore），勿提交
-- **成本**：对话/提炼/评估均调用 DeepSeek，按量计费；V4 Pro 价格约为 Flash 的 3 倍
-- **中文编码**：Windows 遇 GBK 报错时，运行前设 `PYTHONIOENCODING=utf-8`
+- AI 角色是会说话的「鸭鸭日记本」，不是任何一只真实小鸭。
+- 一问一答为一轮，默认最多三轮；信息充分时可以提前结束。
+- AI 结果必须经过教师审阅确认后，才进入正式成长记录。
+- `DEEPSEEK_API_KEY` 只保存在已被 Git 忽略的 `.env` 中，禁止提交到仓库。
+- 应用默认面向单机本地使用；如需局域网或公网部署，必须另行补充身份认证、传输加密和运维边界。
