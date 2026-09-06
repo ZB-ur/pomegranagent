@@ -1315,6 +1315,29 @@ def test_space_is_single_action_for_native_and_global_paths(child_page, viewport
     ) == {"starts": 2, "stops": 2}
 
 
+def test_held_global_space_does_not_stop_after_listening_focus_transition(child_page):
+    prepare_child_page(
+        child_page,
+        VIEWPORTS[0],
+        roster=[SYNTHETIC_CHILD],
+        active_by_child={1: SYNTHETIC_ACTIVE},
+    )
+    page = child_page.page
+    wait_for_active_ready(page)
+    page.locator("#app-title").focus()
+
+    page.keyboard.down("Space")
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+    page.wait_for_function("document.activeElement?.id === 'child-status'")
+    page.keyboard.down("Space")
+    page.keyboard.up("Space")
+
+    assert page.evaluate(
+        "({ starts: window.__childTest.recognition.starts, stops: window.__childTest.recognition.stops })"
+    ) == {"starts": 1, "stops": 0}
+    assert page.locator(".child-view").get_attribute("data-state") == "listening"
+
+
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)
 def test_keyboard_focus_visible_uses_start_to_ready_flow(child_page, viewport):
     page = child_page.page

@@ -510,6 +510,12 @@ test('controls derive the one child lock for every state without a mutable busy 
   assert.equal(terminal.recordDisabled, true);
   assert.equal(terminal.textDisabled, true);
   assert.equal(terminal.retryDisabled, true);
+
+  const pendingStop = controlsFor(createInitialSnapshot({
+    value: 'listening', stopRequested: true,
+  }));
+  assert.equal(pendingStop.recordAction, 'stop');
+  assert.equal(pendingStop.recordDisabled, true);
 });
 
 test('recovery unlock remains child-locked and reset creates a clean nested snapshot', () => {

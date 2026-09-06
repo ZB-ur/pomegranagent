@@ -80,7 +80,7 @@ const STATE_PRESENTATION = Object.freeze({
   selecting_child: Object.freeze({ lead: '请选择今天值日的小朋友。', pill: '选一位小朋友' }),
   opening: Object.freeze({ lead: '日记本正在准备和你聊天。', pill: '正在打招呼' }),
   ready: Object.freeze({ lead: '想好以后，点一下开始说话。', pill: '可以说话' }),
-  listening: Object.freeze({ lead: '日记本正在认真听。', pill: '正在听' }),
+  listening: Object.freeze({ lead: '说完后，再点一下或按空格结束。', pill: '正在听' }),
   submitting: Object.freeze({ lead: '正在把这句话发给日记本。', pill: '正在发送' }),
   speaking: Object.freeze({ lead: '日记本正在回答。', pill: '正在回答' }),
   submission_failed: Object.freeze({ lead: '原话已经保留，可以再试一次。', pill: '发送未完成' }),
@@ -268,7 +268,9 @@ export function createChildView(root, actions, dom) {
       case 'listening':
         action = button({
           id: 'record-button',
-          text: snapshot.value === 'ready' ? '开始说话' : '结束说话',
+          text: snapshot.value === 'ready'
+            ? '开始说话'
+            : snapshot.stopRequested ? '正在结束…' : '结束说话',
           token: 'record-toggle',
           disabled: controls.recordDisabled,
           className: 'child-pet-orb__action',
@@ -295,6 +297,7 @@ export function createChildView(root, actions, dom) {
     if (!STATES.includes(snapshot.value)) throw new TypeError('Unknown child view state');
 
     const previousState = currentState;
+    const previousStopRequested = currentSnapshot?.stopRequested ?? false;
     const epoch = ++renderEpoch;
     const controls = controlsFor(snapshot);
     const nextActionables = new Set();
@@ -365,7 +368,10 @@ export function createChildView(root, actions, dom) {
       hydrateTeacherTextFromSnapshot();
       syncTeacherDialogControls();
     }
-    if (previousState !== snapshot.value) {
+    if (previousState !== snapshot.value
+      || (snapshot.value === 'listening'
+        && previousStopRequested === false
+        && snapshot.stopRequested === true)) {
       const selector = focusTargetFor(snapshot, controls);
       scheduleFocus(epoch, snapshot.value, selector);
     }
@@ -1215,7 +1221,9 @@ function statusFor(snapshot, controls) {
     case 'selecting_child': return snapshot.roster.length === 0 ? '今天还未排班，请老师帮忙' : '请选择今天值日的小朋友';
     case 'opening': return '鸭鸭日记本正在和你打招呼';
     case 'ready': return '点一下开始说话，也可以按空格键';
-    case 'listening': return '正在听，停顿后会自动发送';
+    case 'listening': return snapshot.stopRequested
+      ? '正在整理刚才的话，请稍候'
+      : '正在听，说完后请再按一次空格或点一下结束说话';
     case 'submitting': return '这句话正在发给鸭鸭日记本';
     case 'speaking': return '鸭鸭日记本正在回答';
     case 'submission_failed': return submissionRetryAvailable(snapshot, controls)
@@ -1240,8 +1248,8 @@ function focusTargetFor(snapshot, controls) {
     case 'loading_roster': return '#child-status';
     case 'selecting_child': return '#app-title';
     case 'opening': return '#child-status';
-    case 'ready':
-    case 'listening': return controls.recordDisabled ? '#child-status' : '#record-button';
+    case 'ready': return controls.recordDisabled ? '#child-status' : '#record-button';
+    case 'listening': return '#child-status';
     case 'submitting':
     case 'speaking':
     case 'saving_conversation': return '#child-status';

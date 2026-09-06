@@ -236,7 +236,8 @@ export function transition(snapshot, event) {
 export function controlsFor(snapshot) {
   assertSnapshot(snapshot);
   const busy = BUSY_STATES.has(snapshot.value);
-  const canRecord = snapshot.value === 'ready' || snapshot.value === 'listening';
+  const canRecord = snapshot.value === 'ready'
+    || (snapshot.value === 'listening' && snapshot.stopRequested === false);
   const canType = snapshot.teacherUnlocked === true
     && (snapshot.value === 'ready' || snapshot.value === 'submission_failed');
   const canRetry = snapshot.value === 'submission_failed' && snapshot.error?.retryable === true;

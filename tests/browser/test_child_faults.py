@@ -67,6 +67,8 @@ def _start_held_chat(child_page, exact_fixture_url, viewport):
     page.get_by_role("button", name="开始说话", exact=True).click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
     page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭讲了一个故事。', true)")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     with page.expect_request(lambda request: request.url.endswith("/api/chat")) as requested:
         page.evaluate("window.__childTest.recognition.emitEnd()")
     assert exact_fixture_url(requested.value.url, port)
@@ -152,6 +154,8 @@ def _drive_ended_flow(child_page):
     page.get_by_role("button", name="开始说话", exact=True).click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
     page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭讲了一个故事。', true)")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
     page.wait_for_function("window.__childTest.audio.instances.length === 1")
     page.evaluate("window.__childTest.audio.emitPlaying(0)")
@@ -285,7 +289,7 @@ def test_browser_parent_logging_is_redirected_from_real_application_log(
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
-def test_controlled_recognition_waits_for_explicit_terminal_event(
+def test_natural_recognition_end_restarts_and_preserves_text_until_user_finish(
     child_page, exact_fixture_url, viewport
 ):
     page = child_page.page
@@ -319,10 +323,23 @@ def test_controlled_recognition_waits_for_explicit_terminal_event(
     record.click()
 
     assert page.evaluate("window.__childTest.recognition.starts") == 1
-    page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭换了清水。', true)")
+    page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭换了', true)")
     assert chat_requests == []
 
     page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.wait_for_function("window.__childTest.recognition.starts === 2")
+    assert chat_requests == []
+    assert page.locator(".child-view").get_attribute("data-state") == "listening"
+    assert page.evaluate("window.__childTest.recognition.stops") == 0
+
+    page.evaluate("window.__childTest.recognition.emitResult(0, '清水。', true)")
+    assert chat_requests == []
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
+    assert chat_requests == []
+
+    with page.expect_request(lambda request: request.url.endswith("/api/chat")):
+        page.evaluate("window.__childTest.recognition.emitEnd()")
     page.get_by_role("button", name="重新发送", exact=True).wait_for()
     assert len(chat_requests) == 1
     assert chat_requests[0]["text"] == "我给小鸭换了清水。"
@@ -388,7 +405,52 @@ def test_manual_space_stop_requires_one_explicit_end(child_page, exact_fixture_u
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
-def test_silence_clock_stops_one_live_run_at_exactly_1500ms(
+def test_explicit_stop_without_end_recovers_once_at_5000ms_without_chat(
+    child_page, exact_fixture_url, viewport
+):
+    page = child_page.page
+    page.clock.install(time=1_700_000_000)
+    page.set_viewport_size(viewport)
+    chat_requests = []
+    port = child_page.server.port
+
+    child_page.fulfill_json("**/api/roster/today", [SYNTHETIC_CHILD])
+    child_page.fulfill_json("**/api/children/1/active-conversation", SYNTHETIC_ACTIVE)
+
+    def chat(route):
+        assert exact_fixture_url(route.request.url, port)
+        chat_requests.append(route.request.post_data_json)
+        route.fulfill(status=503, content_type="application/json", body="{}")
+
+    page.route("**/api/chat", chat)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="开始", exact=True).click()
+    page.get_by_role("button", name="开始说话", exact=True).click()
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+    page.evaluate("window.__childTest.recognition.emitResult(0, '这句话不能丢。', true)")
+    page.clock.pause_at(page.evaluate("Date.now()") / 1000 + 1)
+
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
+    assert page.locator(".child-view").get_attribute("data-state") == "listening"
+    assert chat_requests == []
+
+    page.clock.fast_forward(4_999)
+    assert page.locator(".child-view").get_attribute("data-state") == "listening"
+    assert chat_requests == []
+
+    page.clock.fast_forward(1)
+    page.wait_for_function(
+        "document.querySelector('.child-view')?.dataset.state === 'recovery'"
+    )
+    assert chat_requests == []
+    page.clock.fast_forward(5_000)
+    assert page.locator(".child-view").get_attribute("data-state") == "recovery"
+    assert chat_requests == []
+
+
+@pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
+def test_silence_clock_never_stops_or_submits_without_explicit_finish(
     child_page, exact_fixture_url, viewport
 ):
     page = child_page.page
@@ -417,7 +479,12 @@ def test_silence_clock_stops_one_live_run_at_exactly_1500ms(
     page.clock.fast_forward(1499)
     assert page.evaluate("window.__childTest.recognition.stops") == 0
     page.clock.fast_forward(1)
-    assert page.evaluate("window.__childTest.recognition.stops") == 1
+    assert page.evaluate("window.__childTest.recognition.stops") == 0
+    assert page.locator(".child-view").get_attribute("data-state") == "listening"
+    assert chat_requests == []
+
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
 
     page.evaluate("window.__childTest.recognition.emitEnd()")
     page.get_by_role("button", name="开始说话", exact=True).wait_for()
@@ -482,6 +549,8 @@ def test_chat_retryable_fault_reuses_persisted_request_id_once(
     page.get_by_role("button", name="开始说话", exact=True).click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
     page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭添了清水。', true)")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
     retry = page.get_by_role("button", name="重新发送", exact=True)
     retry.wait_for()
@@ -552,6 +621,8 @@ def test_near_limit_preserved_draft_scrolls_inside_its_fixed_row_without_overlap
         "text => window.__childTest.recognition.emitResult(0, text, true)",
         NEAR_LIMIT_CHILD_TEXT,
     )
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
 
     retry = page.get_by_role("button", name="重新发送", exact=True)
@@ -718,6 +789,8 @@ def test_chat_11000ms_response_uses_same_request_and_audio_path(
     page.evaluate(
         "window.__childTest.recognition.emitResult(0, '我看见小鸭排队喝水。', true)"
     )
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     with page.expect_request(lambda request: request.url.endswith("/api/chat")):
         page.evaluate("window.__childTest.recognition.emitEnd()")
     page.evaluate("() => Promise.resolve()")
@@ -820,6 +893,8 @@ def test_first_chat_thirty_second_timeout_retains_draft_and_reuses_request_id_on
         "window.__childTest.recognition.emitResult(0, '我给小鸭准备了超时证据。', true)"
     )
     page.clock.pause_at(page.evaluate("Date.now()") / 1000 + 1)
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     with page.expect_request(lambda request: request.url.endswith("/api/chat")) as requested:
         page.evaluate("window.__childTest.recognition.emitEnd()")
     assert exact_fixture_url(requested.value.url, port)
@@ -1013,6 +1088,8 @@ def test_completion_delay_is_single_flight_and_saves_once(
     page.evaluate(
         "window.__childTest.recognition.emitResult(0, '我给小鸭讲了一个故事。', true)"
     )
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
     page.wait_for_function("window.__childTest.audio.instances.length === 1")
     page.evaluate("window.__childTest.audio.emitPlaying(0)")
@@ -1102,7 +1179,7 @@ def test_child_core_flow_is_page_keyboard_only_and_saves_once(
         body = route.request.post_data_json
         chat_requests.append(body)
         round_index = len(chat_requests)
-        assert round_index in {1, 2}
+        assert round_index in {1, 2, 3}
         route.fulfill(
             status=200,
             content_type="application/json",
@@ -1113,8 +1190,8 @@ def test_child_core_flow_is_page_keyboard_only_and_saves_once(
                 "diary_message_id": round_index * 2,
                 "reply": f"第{round_index}轮日记回复。",
                 "round": round_index,
-                "ended": round_index == 2,
-                "end_reason": "complete" if round_index == 2 else None,
+                "ended": round_index == 3,
+                "end_reason": "max_rounds" if round_index == 3 else None,
                 "replayed": False,
             }),
         )
@@ -1136,7 +1213,7 @@ def test_child_core_flow_is_page_keyboard_only_and_saves_once(
                 "conversation_saved": True,
                 "status": "completed",
                 "completed_at": "2026-08-23T00:01:00.000Z",
-                "message_count": 4,
+                "message_count": 6,
                 "last_message_id": body["expected_last_message_id"],
                 "analysis_job_id": 3,
                 "analysis_status": "pending",
@@ -1171,7 +1248,11 @@ def test_child_core_flow_is_page_keyboard_only_and_saves_once(
 
     page.clock.pause_at(page.evaluate("Date.now()") / 1000 + 1)
     for round_index, child_text in enumerate(
-        ["第一轮我给小鸭添了水。", "第二轮我给小鸭讲了故事。"]
+        [
+            "第一轮我给小鸭添了水。",
+            "第二轮我给小鸭讲了故事。",
+            "第三轮我和搭档一起照顾小鸭。",
+        ]
     ):
         press(f"round-{round_index + 1}-record", "Space")
         page.wait_for_function(
@@ -1184,6 +1265,8 @@ def test_child_core_flow_is_page_keyboard_only_and_saves_once(
         page.clock.fast_forward(1_499)
         assert page.evaluate("window.__childTest.recognition.stops") == round_index
         page.clock.fast_forward(1)
+        assert page.evaluate("window.__childTest.recognition.stops") == round_index
+        press(f"round-{round_index + 1}-finish", "Space")
         assert page.evaluate("window.__childTest.recognition.stops") == round_index + 1
         page.evaluate("window.__childTest.recognition.emitEnd()")
         audio_index = round_index + 1
@@ -1196,7 +1279,7 @@ def test_child_core_flow_is_page_keyboard_only_and_saves_once(
         page.evaluate(
             "index => window.__childTest.audio.emitEnded(index)", audio_index
         )
-        if round_index == 0:
+        if round_index < 2:
             page.wait_for_function("document.activeElement?.id === 'record-button'")
 
     completed = page.get_by_role("button", name="换下一位小朋友", exact=True)
@@ -1206,10 +1289,11 @@ def test_child_core_flow_is_page_keyboard_only_and_saves_once(
     assert [body["text"] for body in chat_requests] == [
         "第一轮我给小鸭添了水。",
         "第二轮我给小鸭讲了故事。",
+        "第三轮我和搭档一起照顾小鸭。",
     ]
-    assert len({body["request_id"] for body in chat_requests}) == 2
-    assert len(tts_requests) == 3
-    assert complete_requests == [{"expected_last_message_id": 4}]
+    assert len({body["request_id"] for body in chat_requests}) == 3
+    assert len(tts_requests) == 4
+    assert complete_requests == [{"expected_last_message_id": 6}]
     assert page.locator(".child-view").get_attribute("data-state") == "completed"
     assert page.get_by_role("status").inner_text() == "今天的话已经安全记下来啦"
     log = page.get_by_role("log", name="对话记录")
@@ -1218,19 +1302,25 @@ def test_child_core_flow_is_page_keyboard_only_and_saves_once(
         "第1轮日记回复。",
         "第二轮我给小鸭讲了故事。",
         "第2轮日记回复。",
+        "第三轮我和搭档一起照顾小鸭。",
+        "第3轮日记回复。",
     ]:
         assert log.get_by_text(text, exact=True).count() == 1
 
     press("completed-exit", "Enter")
     page.get_by_role("button", name="开始", exact=True).wait_for()
     assert page.locator(".child-view").get_attribute("data-state") == "welcome"
-    assert complete_requests == [{"expected_last_message_id": 4}]
+    assert complete_requests == [{"expected_last_message_id": 6}]
     assert user_actions == [
         ("welcome", "page.keyboard", "Enter"),
         ("child-selection-focus", "page.keyboard", "Tab"),
         ("child-selection", "page.keyboard", "Enter"),
         ("round-1-record", "page.keyboard", "Space"),
+        ("round-1-finish", "page.keyboard", "Space"),
         ("round-2-record", "page.keyboard", "Space"),
+        ("round-2-finish", "page.keyboard", "Space"),
+        ("round-3-record", "page.keyboard", "Space"),
+        ("round-3-finish", "page.keyboard", "Space"),
         ("completed-exit", "page.keyboard", "Enter"),
     ]
 
@@ -1293,6 +1383,8 @@ def test_chat_fault_matrix_retains_draft_without_success_copy(
     page.get_by_role("button", name="开始说话", exact=True).click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
     page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭盖好了小房子。', true)")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
 
     page.get_by_role("button", name="重新发送", exact=True).wait_for()
@@ -1369,6 +1461,8 @@ def test_chat_replay_deduplicates_acknowledged_message_ids(
     page.get_by_role("button", name="开始说话", exact=True).click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
     page.evaluate(f"window.__childTest.recognition.emitResult(0, {json.dumps(child_text)}, true)")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
     page.wait_for_function("window.__childTest.audio.instances.length === 1")
     page.evaluate("window.__childTest.audio.emitPlaying(0)")
@@ -1436,6 +1530,8 @@ def test_chat_conflicting_replay_enters_sanitized_recovery(
     page.get_by_role("button", name="开始说话", exact=True).click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
     page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭换了水。', true)")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
 
     page.get_by_role("alert").wait_for()
@@ -1559,6 +1655,8 @@ def test_tts_faults_settle_and_do_not_block_completion(
     page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭讲了一个故事。', true)")
     if fault == "play_rejected":
         page.evaluate("window.__childTest.audio.rejectNextPlayOnce()")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
     if fault == "audio_error":
         page.wait_for_function("window.__childTest.audio.instances.length === 1")
@@ -1687,6 +1785,8 @@ def test_tts_cold_start_uses_reachable_fifteen_second_fallback(
     record.click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
     page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭讲了一个故事。', true)")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     with page.expect_request(lambda request: "/api/tts?" in request.url) as requested:
         page.evaluate("window.__childTest.recognition.emitEnd()")
     assert exact_fixture_url(requested.value.url, port)
@@ -1796,6 +1896,8 @@ def test_completion_fault_matrix_never_claims_saved_copy(
     page.get_by_role("button", name="开始说话", exact=True).click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
     page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭讲了一个故事。', true)")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
     page.wait_for_function("window.__childTest.audio.instances.length === 1")
     page.evaluate("window.__childTest.audio.emitPlaying(0)")
@@ -1878,6 +1980,8 @@ def test_completion_replay_reaches_completed_once_after_strict_save(
     page.get_by_role("button", name="开始说话", exact=True).click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
     page.evaluate("window.__childTest.recognition.emitResult(0, '我给小鸭讲了一个故事。', true)")
+    page.keyboard.press("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
     page.evaluate("window.__childTest.recognition.emitEnd()")
     page.wait_for_function("window.__childTest.audio.instances.length === 1")
     page.evaluate("window.__childTest.audio.emitPlaying(0)")

@@ -1,4 +1,5 @@
 const SILENCE_MS = 1500;
+const STOP_SETTLE_MS = 5000;
 const SCHEDULING = Symbol('speech timer scheduling');
 
 export function createSpeechController(deps) {
@@ -49,8 +50,12 @@ export function createSpeechController(deps) {
       finalByIndex: new Map(),
       generation: ++nextGeneration,
       interimByIndex: new Map(),
+      committedText: '',
       phase: 'listening',
       recognition: null,
+      recognitionEnded: false,
+      startInProgress: false,
+      waitingForEnd: false,
       timer: null,
       timerFailure: false,
       cleanupStarted: false,
@@ -80,7 +85,7 @@ export function createSpeechController(deps) {
     if (!assignRecognition(run, 'interimResults', true)) return;
     if (!assignRecognition(run, 'continuous', true)) return;
     if (!startRecognition(run)) return;
-    if (isListeningRun(run)) arm(run);
+    if (isListeningRun(run) && !run.recognitionEnded) arm(run);
   }
 
   function assignRecognition(run, property, value) {
@@ -107,6 +112,8 @@ export function createSpeechController(deps) {
       terminal(run, errorEvent('SPEECH_FAILED', true), { cleanupRecognition: false });
       return false;
     }
+    run.startInProgress = true;
+    run.recognitionEnded = false;
     try {
       consumeThenable(startMethod.call(run.recognition), {
         onRejected(error) {
@@ -115,6 +122,12 @@ export function createSpeechController(deps) {
       });
     } catch (error) {
       if (isCurrent(run)) terminal(run, syncErrorEvent(error), { cleanupRecognition: false });
+      return false;
+    } finally {
+      run.startInProgress = false;
+    }
+    if (isListeningRun(run) && run.recognitionEnded) {
+      fail(run, true);
       return false;
     }
     return isListeningRun(run);
@@ -142,7 +155,7 @@ export function createSpeechController(deps) {
   }
 
   function handleResult(run, event) {
-    if (!isCurrent(run)) return;
+    if (!isCurrent(run) || run.recognitionEnded || run.waitingForEnd) return;
     let text;
     try {
       updateTranscript(run, event);
@@ -153,11 +166,11 @@ export function createSpeechController(deps) {
     }
     if (!isCurrent(run)) return;
     emit({ type: 'partial', text });
-    if (isListeningRun(run)) arm(run);
+    if (isListeningRun(run) && !run.recognitionEnded) arm(run);
   }
 
   function handleSpeechEnd(run) {
-    if (isListeningRun(run)) arm(run);
+    if (isListeningRun(run) && !run.recognitionEnded && !run.waitingForEnd) arm(run);
   }
 
   function handleError(run, event) {
@@ -168,12 +181,41 @@ export function createSpeechController(deps) {
     } catch {
       eventToEmit = errorEvent('SPEECH_FAILED', true);
     }
+    if (eventToEmit.type === 'empty'
+      && (run.phase === 'listening' || run.phase === 'stopping')) {
+      run.waitingForEnd = true;
+      if (run.phase === 'listening') releaseTimer(run, false, false);
+      return;
+    }
     terminal(run, eventToEmit, { cleanupRecognition: false });
   }
 
   function handleEnd(run) {
     if (!isCurrent(run)) return;
+    run.recognitionEnded = true;
+    if (run.phase !== 'stopping') {
+      if (run.startInProgress) return;
+      restartAfterNaturalEnd(run);
+      return;
+    }
     terminal(run, terminalTranscriptEvent(run), { cleanupRecognition: false });
+  }
+
+  function restartAfterNaturalEnd(run) {
+    if (!isListeningRun(run) || !run.recognitionEnded) return;
+    // Browsers may end a continuous recognition session on their own. Keep the
+    // user-visible recording session alive until the explicit stop action.
+    commitTranscriptSegment(run);
+    run.waitingForEnd = false;
+    releaseTimer(run, false, false);
+    if (!isListeningRun(run) || !startRecognition(run)) return;
+    if (isListeningRun(run) && !run.recognitionEnded) arm(run);
+  }
+
+  function commitTranscriptSegment(run) {
+    run.committedText = transcript(run);
+    run.finalByIndex.clear();
+    run.interimByIndex.clear();
   }
 
   function updateTranscript(run, event) {
@@ -204,11 +246,11 @@ export function createSpeechController(deps) {
 
   function transcript(run) {
     const indexes = new Set([...run.finalByIndex.keys(), ...run.interimByIndex.keys()]);
-    return [...indexes]
+    const liveText = [...indexes]
       .sort((left, right) => left - right)
       .map(index => run.finalByIndex.has(index) ? run.finalByIndex.get(index) : run.interimByIndex.get(index))
-      .join('')
-      .trim();
+      .join('');
+    return `${run.committedText}${liveText}`.trim();
   }
 
   function terminalTranscriptEvent(run) {
@@ -236,7 +278,7 @@ export function createSpeechController(deps) {
   }
 
   function arm(run) {
-    if (!isListeningRun(run)) return;
+    if (!isListeningRun(run) || run.recognitionEnded) return;
     if (!releaseTimer(run, true, true) || !isListeningRun(run)) return;
 
     run.timer = SCHEDULING;
@@ -264,7 +306,8 @@ export function createSpeechController(deps) {
   function timerFired(run, handle) {
     if (!isCurrent(run) || (run.timer !== SCHEDULING && run.timer !== handle)) return;
     run.timer = null;
-    requestStop(run);
+    // Silence expiry is advisory only and must never stop recognition.
+    // The user's second click or Space press owns normal completion.
   }
 
   function clearReturnedHandle(run, handle) {
@@ -286,7 +329,50 @@ export function createSpeechController(deps) {
     }
     if (!isCurrent(run) || run.phase !== 'stopping') return;
 
+    if (run.recognitionEnded) {
+      terminal(run, terminalTranscriptEvent(run), { cleanupRecognition: false });
+      return;
+    }
+
+    if (!armStopWatchdog(run)) return;
+
+    // A no-speech error is followed by onend. Do not stop an already-ending
+    // native recognizer; wait for that boundary under the same watchdog.
+    if (run.waitingForEnd) return;
+
     stopRecognition(run, false);
+  }
+
+  function armStopWatchdog(run) {
+    if (!isCurrent(run) || run.phase !== 'stopping') return false;
+    run.timer = SCHEDULING;
+    let handle;
+    try {
+      handle = setTimer(() => stopWatchdogFired(run, handle), STOP_SETTLE_MS);
+      consumeThenable(handle, {
+        onRejected() {
+          if (isCurrent(run)) fail(run, true, run.stopAttempted);
+        },
+      });
+    } catch {
+      if (run.timer === SCHEDULING) run.timer = null;
+      if (isCurrent(run)) fail(run, true, run.stopAttempted);
+      return false;
+    }
+
+    if (!isCurrent(run) || run.phase !== 'stopping' || run.timer !== SCHEDULING) {
+      clearReturnedHandle(run, handle);
+      return false;
+    }
+    run.timer = handle;
+    return true;
+  }
+
+  function stopWatchdogFired(run, handle) {
+    if (!isCurrent(run) || run.phase !== 'stopping'
+      || (run.timer !== SCHEDULING && run.timer !== handle)) return;
+    run.timer = null;
+    fail(run, true, run.stopAttempted);
   }
 
   function stopRecognition(run, terminalCleanup) {

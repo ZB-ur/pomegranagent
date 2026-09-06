@@ -479,7 +479,7 @@ test('renders all twelve states with unique semantic frame, exact status, and fo
     ['selecting_child', '请选择今天值日的小朋友', 'app-title'],
     ['opening', '鸭鸭日记本正在和你打招呼', 'child-status'],
     ['ready', '点一下开始说话，也可以按空格键', 'record-button'],
-    ['listening', '正在听，停顿后会自动发送', 'record-button'],
+    ['listening', '正在听，说完后请再按一次空格或点一下结束说话', 'child-status'],
     ['submitting', '这句话正在发给鸭鸭日记本', 'child-status'],
     ['speaking', '鸭鸭日记本正在回答', 'child-status'],
     ['submission_failed', '暂时没有收到日记本的确认，原话已经保留', 'retry-button'],
@@ -509,6 +509,25 @@ test('renders all twelve states with unique semantic frame, exact status, and fo
     assert.equal(byId(fake.root, 'teacher-help-button').tagName, 'BUTTON');
     assert.equal(fake.focused(), byId(fake.root, focusId));
   }
+});
+
+test('renders a pending manual stop as disabled while recognition settles', () => {
+  const fake = createFakeDOM();
+  const view = createChildView(fake.root, actions(), fake.dom);
+  view.render(snapshotFor('listening'));
+  fake.flush();
+  const previousStatus = byId(fake.root, 'child-status');
+  assert.equal(fake.focused(), previousStatus);
+
+  view.render(snapshotFor('listening', { stopRequested: true }));
+  fake.flush();
+
+  const record = byId(fake.root, 'record-button');
+  assert.equal(fake.root.contains(previousStatus), false);
+  assert.equal(record.disabled, true);
+  assert.equal(record.textContent, '正在结束…');
+  assert.equal(byId(fake.root, 'child-status').textContent, '正在整理刚才的话，请稍候');
+  assert.equal(fake.focused(), byId(fake.root, 'child-status'));
 });
 
 test('projects one local PetOrb in every state and one ConversationPanel in conversation states', () => {
