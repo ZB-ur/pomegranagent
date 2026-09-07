@@ -26,6 +26,10 @@ let cleaned = false;
 
 function isInteractiveTarget(target) {
   if (!(target instanceof Element)) return false;
+  // Space on the record control belongs to the app's keydown toggle. Treating
+  // it as a native button action defers activation until keyup and can turn
+  // one held key into both start and stop after a render/focus transition.
+  if (target.closest('#record-button') !== null) return false;
   if (target.isContentEditable) return true;
   return target.closest(
     'a[href],button,input,textarea,select,option,summary,[contenteditable],'
@@ -39,6 +43,12 @@ function isDialogActive() {
 }
 
 function forwardGlobalKeydown(event) {
+  if (event.code === 'Space' && event.repeat === true
+    && event.target instanceof Element
+    && event.target.closest('#record-button') !== null) {
+    event.preventDefault();
+    return;
+  }
   app.handleGlobalKeydown(event);
 }
 

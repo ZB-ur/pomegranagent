@@ -2640,7 +2640,7 @@ _P5_SPEECH_SELECTOR_ROW = (
 )
 _P6_EXPLICIT_SPEECH_SELECTOR_ROW = (
     "child_node",
-    r"^the 1500 ms silence pulse never stops a run and explicit stop still owns completion$",
+    r"^start and result create no timer while explicit stop creates only the 5000 ms watchdog$",
     1,
     (10,),
 )

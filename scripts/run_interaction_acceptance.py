@@ -3125,7 +3125,7 @@ child_node | ^unbound and matching bound drafts become child-retryable without c
 child_node | ^a COMPLETE_FAILED recovery reload returns to saving_conversation at the same remote boundary$ | 1 | 5,7
 child_node | ^pending completion keeps the remote completion boundary and never reopens chat$ | 1 | 5,7
 child_node | ^ended chat saved through the machine restores only the completion path$ | 1 | 5,7
-child_node | ^the 1500 ms silence pulse never stops a run and explicit stop still owns completion$ | 1 | 10
+child_node | ^start and result create no timer while explicit stop creates only the 5000 ms watchdog$ | 1 | 10
 child_node | ^a timeout before deferred loader invocation falls back safely and ignores its late blob$ | 1 | 10
 teacher_node | ^Today validates every queue DTO shape, fixed labels, and queue-specific combinations$ | 1 | 7
 browser | ^test_child_health_validation_fallback_preserves_foundation_maintenance\[(1024x576|1280x720)\]$ | 2 | 2

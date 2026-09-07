@@ -146,17 +146,28 @@ def test_browser_entry_named_machine_facade():
     assert "export " not in source
 
 
-def test_browser_entry_keyboard_policy_is_forward_only():
+def test_browser_entry_keyboard_policy_intercepts_only_record_button_space_repeat():
     source = browser_source()
     assert "function isInteractiveTarget(target)" in source
+    assert "target.closest('#record-button') !== null" in source
     assert "target.isContentEditable" in source
+    assert source.index("target.closest('#record-button') !== null") < source.index("target.isContentEditable")
     assert "[role=\"dialog\"][aria-modal=\"true\"],dialog[open]" in source
     assert "function forwardGlobalKeydown(event)" in source
     forwarder = re.search(r"function forwardGlobalKeydown\(event\) \{(?P<body>.*?)\n\}", source, re.DOTALL)
     assert forwarder is not None
-    assert "app.handleGlobalKeydown(event)" in forwarder.group("body")
-    for forbidden in ("preventDefault", "recordToggle", "speech"):
-        assert forbidden not in forwarder.group("body")
+    body = forwarder.group("body")
+    for token in (
+        "event.code === 'Space'",
+        "event.repeat === true",
+        "event.target instanceof Element",
+        "event.target.closest('#record-button') !== null",
+        "event.preventDefault();",
+        "app.handleGlobalKeydown(event)",
+    ):
+        assert token in body
+    for forbidden in ("recordToggle", "speech"):
+        assert forbidden not in body
 
 
 def test_browser_entry_store_factory():
@@ -1323,19 +1334,56 @@ def test_held_global_space_does_not_stop_after_listening_focus_transition(child_
         active_by_child={1: SYNTHETIC_ACTIVE},
     )
     page = child_page.page
-    wait_for_active_ready(page)
-    page.locator("#app-title").focus()
+    record = wait_for_active_ready(page)
+    record.focus()
+    assert page.evaluate("document.activeElement?.id") == "record-button"
+    page.evaluate(
+        """
+        () => {
+          window.__recordSpaceKeydowns = [];
+          document.addEventListener('keydown', event => {
+            if (event.code !== 'Space') return;
+            window.__recordSpaceKeydowns.push({
+              defaultPrevented: event.defaultPrevented,
+              repeat: event.repeat,
+              targetId: event.target?.id ?? null,
+            });
+          });
+        }
+        """
+    )
 
     page.keyboard.down("Space")
     page.wait_for_function("window.__childTest.recognition.starts === 1")
-    page.wait_for_function("document.activeElement?.id === 'child-status'")
     page.keyboard.down("Space")
     page.keyboard.up("Space")
 
     assert page.evaluate(
         "({ starts: window.__childTest.recognition.starts, stops: window.__childTest.recognition.stops })"
     ) == {"starts": 1, "stops": 0}
+    assert page.evaluate("window.__recordSpaceKeydowns") == [
+        {"defaultPrevented": True, "repeat": False, "targetId": "record-button"},
+        {"defaultPrevented": False, "repeat": True, "targetId": "child-status"},
+    ]
     assert page.locator(".child-view").get_attribute("data-state") == "listening"
+
+    page.evaluate("window.__recordSpaceKeydowns = []")
+    page.keyboard.down("Space")
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.get_by_role("button", name="开始说话", exact=True).wait_for()
+    page.wait_for_function("document.activeElement?.id === 'record-button'")
+    page.keyboard.down("Space")
+    page.keyboard.up("Space")
+
+    assert page.evaluate(
+        "({ starts: window.__childTest.recognition.starts, stops: window.__childTest.recognition.stops })"
+    ) == {"starts": 1, "stops": 1}
+    assert page.evaluate("window.__recordSpaceKeydowns") == [
+        {"defaultPrevented": True, "repeat": False, "targetId": "child-status"},
+        {"defaultPrevented": True, "repeat": True, "targetId": "record-button"},
+    ]
+    assert page.locator(".child-view").get_attribute("data-state") == "ready"
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=VIEWPORT_IDS)

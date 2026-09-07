@@ -104,7 +104,6 @@ test('exports only the controller factory and returns the exact frozen surface',
     onEvent: event => events.push(event),
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
-    silenceMs: 0,
     unknownTimingOverride: 1,
   });
 
@@ -121,11 +120,14 @@ test('exports only the controller factory and returns the exact frozen surface',
   assert.equal(instances[0].interimResults, true);
   assert.equal(instances[0].continuous, true);
   assert.equal(instances[0].startCount, 1);
-  assert.deepEqual(clock.delays, [1500]);
+  assert.deepEqual(clock.delays, []);
   assert.equal(controller.start(), undefined);
   assert.equal(instances.length, 1);
   assert.equal(controller.stop(), undefined);
+  assert.deepEqual(clock.delays, [5000]);
+  assert.equal(clock.pending(), 1);
   assert.equal(controller.dispose(), undefined);
+  assert.equal(clock.pending(), 0);
   assert.deepEqual(events, []);
 });
 
@@ -147,7 +149,7 @@ test('validates the injected construction boundary and keeps unsupported recogni
   assert.deepEqual(events, [errorEvent('SPEECH_UNSUPPORTED', false)]);
 });
 
-test('the 1500 ms silence pulse never stops a run and explicit stop still owns completion', () => {
+test('start and result create no timer while explicit stop creates only the 5000 ms watchdog', () => {
   const clock = fakeClock();
   const { Recognition, instances } = recognitionClass();
   const events = [];
@@ -156,40 +158,23 @@ test('the 1500 ms silence pulse never stops a run and explicit stop still owns c
     onEvent: event => events.push(event),
     setTimer: clock.setTimer,
     clearTimer: clock.clearTimer,
-    silenceMs: 1,
   });
   controller.start();
   const recognition = instances[0];
-  const initial = clock.handles()[0];
-
-  clock.advance(1499);
-  assert.equal(recognition.stopCount ?? 0, 0);
-  clock.advance(1);
-  assert.equal(recognition.stopCount ?? 0, 0);
   assert.equal(clock.pending(), 0);
+  assert.deepEqual(clock.delays, []);
   assert.deepEqual(events, []);
+
+  recognition.onresult({ resultIndex: 0, results: [result('我喂菜', false)] });
+  assert.equal(clock.pending(), 0);
+  assert.deepEqual(clock.delays, []);
   controller.stop();
   assert.equal(recognition.stopCount, 1);
+  assert.equal(clock.pending(), 1);
+  assert.deepEqual(clock.delays, [5000]);
   recognition.onend();
-  assert.deepEqual(events, [{ type: 'empty' }]);
-
-  controller.start();
-  const next = instances[1];
-  const secondInitial = clock.handles()[0];
-  next.onresult({ resultIndex: 0, results: [result('我喂菜', false)] });
-  assert.equal(clock.pending(), 1);
-  assert.equal(clock.clears.includes(secondInitial), true);
-  next.onspeechend();
-  assert.equal(clock.pending(), 1);
-  assert.deepEqual(clock.delays, [1500, 5000, 1500, 1500, 1500]);
-  clock.advance(1500);
-  assert.equal(next.stopCount ?? 0, 0);
   assert.equal(clock.pending(), 0);
-  controller.stop();
-  assert.equal(next.stopCount, 1);
-  next.onend();
-  assert.equal(clock.pending(), 0);
-  assert.deepEqual(events.slice(-2), [
+  assert.deepEqual(events, [
     { type: 'partial', text: '我喂菜' },
     { type: 'final', text: '我喂菜' },
   ]);
@@ -580,7 +565,7 @@ test('synchronous recognition callbacks and onEvent reentry cannot arm an obsole
   });
   reentryController.start();
   assert.equal(reentryFactory.instances.length, 2);
-  assert.equal(reentryClock.pending(), 1);
+  assert.equal(reentryClock.pending(), 0);
   assert.equal(reentryController.recognition, reentryFactory.instances[1]);
   assert.deepEqual(reentryEvents, [errorEvent('SPEECH_FAILED', true)]);
 
@@ -599,105 +584,62 @@ test('synchronous recognition callbacks and onEvent reentry cannot arm an obsole
   assert.equal(disposeController.recognition, null);
 });
 
-test('a synchronously firing advisory timer is cleared without stopping its live run', () => {
-  const { Recognition, instances } = recognitionClass({ stop() { this.onend(); } });
+test('a synchronously firing stop watchdog fails closed and clears its returned handle', () => {
+  const { Recognition, instances } = recognitionClass();
   const events = [];
   const clears = [];
+  let timerCalls = 0;
   const controller = createSpeechController({
     Recognition,
     onEvent: event => events.push(event),
     setTimer(callback, delay) {
-      if (delay === 1500) {
-        callback();
-        return 91;
-      }
       assert.equal(delay, 5000);
-      return 92;
+      timerCalls += 1;
+      callback();
+      return 91;
     },
     clearTimer(handle) { clears.push(handle); },
   });
   assert.doesNotThrow(() => controller.start());
+  assert.equal(timerCalls, 0);
   assert.equal(instances[0].stopCount ?? 0, 0);
-  assert.deepEqual(clears, [91]);
   assert.deepEqual(events, []);
   assert.equal(controller.recognition, instances[0]);
   assert.equal(controller.isListening(), true);
-  controller.stop();
-  assert.equal(instances[0].stopCount, 1);
-  assert.deepEqual(clears, [91, 92]);
-  assert.deepEqual(events, [{ type: 'empty' }]);
+
+  assert.doesNotThrow(() => controller.stop());
+  assert.equal(timerCalls, 1);
+  assert.equal(instances[0].stopCount ?? 0, 0);
+  assert.equal(instances[0].abortCount, 1);
+  assert.deepEqual(clears, [91]);
+  assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
   assert.equal(controller.recognition, null);
 });
 
-test('current timer and manual-stop dependency failures emit one SPEECH_FAILED and stale callbacks stay inert', () => {
-  const initialClock = fakeClock();
-  const initialFactory = recognitionClass();
-  const initialEvents = [];
-  const initial = createSpeechController({
-    Recognition: initialFactory.Recognition,
-    onEvent: event => initialEvents.push(event),
-    setTimer() { throw new Error('timer'); },
-    clearTimer: initialClock.clearTimer,
-  });
-  assert.doesNotThrow(() => initial.start());
-  assert.deepEqual(initialEvents, [errorEvent('SPEECH_FAILED', true)]);
-  assert.equal(initial.recognition, null);
-
-  const resultClock = fakeClock();
-  const resultFactory = recognitionClass();
-  const resultEvents = [];
-  let sets = 0;
-  const rearm = createSpeechController({
-    Recognition: resultFactory.Recognition,
-    onEvent: event => resultEvents.push(event),
-    setTimer(callback, delay) {
-      sets += 1;
-      if (sets > 1) throw new Error('rearm');
-      return resultClock.setTimer(callback, delay);
+test('stop-watchdog and recognition-stop dependency failures emit once and stale callbacks stay inert', () => {
+  const timerFactory = recognitionClass();
+  const timerEvents = [];
+  let timerCalls = 0;
+  const timerFailure = createSpeechController({
+    Recognition: timerFactory.Recognition,
+    onEvent: event => timerEvents.push(event),
+    setTimer(_callback, delay) {
+      timerCalls += 1;
+      assert.equal(delay, 5000);
+      throw new Error('watchdog');
     },
-    clearTimer: resultClock.clearTimer,
+    clearTimer() {},
   });
-  rearm.start();
-  const lateInitialTimer = resultClock.handles()[0];
-  assert.doesNotThrow(() => resultFactory.instances[0].onresult({ results: [result('内容', false)] }));
-  assert.deepEqual(resultEvents, [
-    { type: 'partial', text: '内容' },
-    errorEvent('SPEECH_FAILED', true),
-  ]);
-  assert.equal(rearm.recognition, null);
-  resultClock.fire(lateInitialTimer);
-  assert.equal(resultFactory.instances[0].stopCount ?? 0, 0);
-
-  const clearFactory = recognitionClass();
-  const clearEvents = [];
-  let throwClear = false;
-  const clearFailure = createSpeechController({
-    Recognition: clearFactory.Recognition,
-    onEvent: event => clearEvents.push(event),
-    setTimer: () => 11,
-    clearTimer() { if (throwClear) throw new Error('clear'); },
-  });
-  clearFailure.start();
-  throwClear = true;
-  assert.doesNotThrow(() => clearFactory.instances[0].onresult({ results: [result('重置', false)] }));
-  assert.deepEqual(clearEvents, [
-    { type: 'partial', text: '重置' },
-    errorEvent('SPEECH_FAILED', true),
-  ]);
-
-  const manualClearFactory = recognitionClass();
-  const manualClearEvents = [];
-  const manualClear = createSpeechController({
-    Recognition: manualClearFactory.Recognition,
-    onEvent: event => manualClearEvents.push(event),
-    setTimer: () => 12,
-    clearTimer() { throw new Error('manual clear'); },
-  });
-  manualClear.start();
-  assert.doesNotThrow(() => manualClear.stop());
-  assert.equal(manualClearFactory.instances[0].stopCount, 1);
-  assert.deepEqual(manualClearEvents, [errorEvent('SPEECH_FAILED', true)]);
-  assert.equal(manualClear.recognition, null);
+  assert.doesNotThrow(() => timerFailure.start());
+  assert.equal(timerCalls, 0);
+  assert.deepEqual(timerEvents, []);
+  assert.doesNotThrow(() => timerFailure.stop());
+  assert.equal(timerCalls, 1);
+  assert.equal(timerFactory.instances[0].abortCount, 1);
+  assert.deepEqual(timerEvents, [errorEvent('SPEECH_FAILED', true)]);
+  timerFactory.instances[0].onend?.();
+  assert.deepEqual(timerEvents, [errorEvent('SPEECH_FAILED', true)]);
+  assert.equal(timerFailure.recognition, null);
 
   const stopClock = fakeClock();
   const stopFactory = recognitionClass({ stop() { throw new Error('stop'); } });
@@ -711,25 +653,6 @@ test('current timer and manual-stop dependency failures emit one SPEECH_FAILED a
   assert.deepEqual(stopEvents, [errorEvent('SPEECH_FAILED', true)]);
   assert.equal(stopFailure.recognition, null);
   assert.equal(stopClock.pending(), 0);
-
-  const silenceClock = fakeClock();
-  const silenceFactory = recognitionClass({ stop() { throw new Error('silence stop'); } });
-  const silenceEvents = [];
-  const silenceFailure = createSpeechController({
-    Recognition: silenceFactory.Recognition,
-    onEvent: event => silenceEvents.push(event), setTimer: silenceClock.setTimer, clearTimer: silenceClock.clearTimer,
-  });
-  silenceFailure.start();
-  assert.doesNotThrow(() => silenceClock.advance(1500));
-  assert.equal(silenceFactory.instances[0].stopCount ?? 0, 0);
-  assert.deepEqual(silenceEvents, []);
-  assert.equal(silenceFailure.recognition, silenceFactory.instances[0]);
-  assert.equal(silenceFailure.isListening(), true);
-  assert.equal(silenceClock.pending(), 0);
-  assert.doesNotThrow(() => silenceFailure.stop());
-  assert.equal(silenceFactory.instances[0].stopCount, 1);
-  assert.deepEqual(silenceEvents, [errorEvent('SPEECH_FAILED', true)]);
-  assert.equal(silenceFailure.recognition, null);
 });
 
 test('suppressed cleanup failures during supersede, dispose, error, and natural end never add SPEECH_FAILED', () => {
@@ -795,7 +718,7 @@ test('suppressed cleanup failures during supersede, dispose, error, and natural 
   assert.equal(endFactory.instances[0].startCount, 2);
   naturalEnd.stop();
   endFactory.instances[0].onend();
-  assert.deepEqual(endEvents, [errorEvent('SPEECH_FAILED', true)]);
+  assert.deepEqual(endEvents, [{ type: 'empty' }]);
 });
 
 test('an onEvent exception is contained without terminating a listening partial run', () => {
@@ -810,11 +733,11 @@ test('an onEvent exception is contained without terminating a listening partial 
   controller.start();
   assert.doesNotThrow(() => instances[0].onresult({ results: [result('仍在听', false)] }));
   assert.equal(controller.isListening(), true);
-  assert.equal(clock.pending(), 1);
+  assert.equal(clock.pending(), 0);
   assert.doesNotThrow(() => instances[0].onend());
   assert.equal(controller.isListening(), true);
   assert.equal(instances[0].startCount, 2);
-  assert.equal(clock.pending(), 1);
+  assert.equal(clock.pending(), 0);
   assert.doesNotThrow(() => controller.stop());
   assert.equal(controller.isListening(), true);
   assert.doesNotThrow(() => instances[0].onend());
@@ -846,58 +769,6 @@ test('supersede abort disposal leaves the controller permanently terminal withou
   assert.equal(instances.length, 1);
 });
 
-test('manual-stop clearTimer reentry does not stop an invalidated old recognizer', () => {
-  const clock = fakeClock();
-  const events = [];
-  let controller;
-  const { Recognition, instances } = recognitionClass();
-  controller = createSpeechController({
-    Recognition,
-    onEvent: event => events.push(event),
-    setTimer: clock.setTimer,
-    clearTimer(handle) {
-      clock.clearTimer(handle);
-      controller.dispose();
-    },
-  });
-  controller.start();
-  controller.stop();
-
-  assert.equal(instances[0].stopCount ?? 0, 0);
-  assert.equal(instances[0].abortCount, 1);
-  assert.equal(controller.recognition, null);
-  assert.equal(controller.isListening(), false);
-  assert.equal(clock.pending(), 0);
-  assert.deepEqual(events, []);
-});
-
-test('manual-stop clearTimer start reentry keeps only the replacement generation active', () => {
-  const clock = fakeClock();
-  const events = [];
-  let controller;
-  const { Recognition, instances } = recognitionClass();
-  controller = createSpeechController({
-    Recognition,
-    onEvent: event => events.push(event),
-    setTimer: clock.setTimer,
-    clearTimer(handle) {
-      clock.clearTimer(handle);
-      controller.start();
-    },
-  });
-  controller.start();
-  const old = instances[0];
-  controller.stop();
-
-  assert.equal(old.stopCount ?? 0, 0);
-  assert.equal(old.abortCount, 1);
-  assert.equal(instances.length, 2);
-  assert.equal(controller.recognition, instances[1]);
-  assert.equal(controller.isListening(), true);
-  assert.equal(clock.pending(), 1);
-  assert.deepEqual(events, []);
-});
-
 test('throwing name accessors in constructor, configuration, and start failures never escape start', () => {
   const trappedError = () => Object.defineProperty({}, 'name', {
     get() { throw new Error('name trap'); },
@@ -924,32 +795,7 @@ test('throwing name accessors in constructor, configuration, and start failures 
   }
 });
 
-test('advisory silence does not stop, while manual stop failures abort best-effort without a second terminal event', () => {
-  const advisoryClock = fakeClock();
-  const advisoryCalls = [];
-  const advisoryEvents = [];
-  const { Recognition: AdvisoryRecognition, instances: advisoryInstances } = recognitionClass({
-    abort() { advisoryCalls.push('abort'); },
-    stop() { advisoryCalls.push('stop'); throw new Error('stop failure'); },
-  });
-  const advisory = createSpeechController({
-    Recognition: AdvisoryRecognition,
-    onEvent: event => advisoryEvents.push(event),
-    setTimer: advisoryClock.setTimer,
-    clearTimer: advisoryClock.clearTimer,
-  });
-  advisory.start();
-  advisoryClock.advance(1500);
-  assert.deepEqual(advisoryCalls, []);
-  assert.deepEqual(advisoryEvents, []);
-  assert.equal(advisory.recognition, advisoryInstances[0]);
-  advisory.stop();
-  assert.deepEqual(advisoryCalls, ['stop', 'abort']);
-  assert.deepEqual(advisoryEvents, [errorEvent('SPEECH_FAILED', true)]);
-  assert.equal(advisory.recognition, null);
-  assert.equal(advisoryClock.pending(), 0);
-  assert.equal(advisoryInstances[0].abortCount, 1);
-
+test('manual stop failures abort best-effort without a second terminal event', () => {
   const clock = fakeClock();
   const calls = [];
   const events = [];
@@ -1059,7 +905,7 @@ test('constructor and every recognition configuration setter stop invalidated ge
     assert.equal(replaced.instances[0].startCount ?? 0, 0, property);
     assert.equal(replaced.controller.recognition, replaced.instances[1], property);
     assert.equal(replaced.instances[1].startCount, 1, property);
-    assert.equal(replaced.clock.pending(), 1, property);
+    assert.equal(replaced.clock.pending(), 0, property);
     assert.deepEqual(replaced.events, [], property);
   }
 });
@@ -1092,7 +938,7 @@ test('a hostile stop getter may replace the run but is read once and never invok
   assert.equal(instances.length, 2);
   assert.equal(controller.recognition, instances[1]);
   assert.equal(instances[1].startCount, 1);
-  assert.equal(clock.pending(), 1);
+  assert.equal(clock.pending(), 0);
   assert.deepEqual(events, []);
 });
 
@@ -1215,7 +1061,7 @@ test('cleanup thenables keep a terminal generation suppressed through synchronou
   }
 });
 
-test('timer dependency then getter failures are current SPEECH_FAILED paths rather than swallowed values', () => {
+test('stop-watchdog then getter failures are handled at their exact lifecycle boundaries', () => {
   const thenTrap = () => Object.defineProperty({}, 'then', {
     get() { throw new Error('timer then trap'); },
   });
@@ -1229,6 +1075,9 @@ test('timer dependency then getter failures are current SPEECH_FAILED paths rath
     clearTimer: () => {},
   });
   assert.doesNotThrow(() => initial.start());
+  assert.deepEqual(initialEvents, []);
+  assert.equal(initial.recognition !== null, true);
+  assert.doesNotThrow(() => initial.stop());
   assert.deepEqual(initialEvents, [errorEvent('SPEECH_FAILED', true)]);
   assert.equal(initial.recognition, null);
 
@@ -1244,7 +1093,8 @@ test('timer dependency then getter failures are current SPEECH_FAILED paths rath
   clear.start();
   assert.doesNotThrow(() => clear.stop());
   assert.equal(instances[0].stopCount, 1);
-  assert.deepEqual(clearEvents, [errorEvent('SPEECH_FAILED', true)]);
+  instances[0].onend();
+  assert.deepEqual(clearEvents, [{ type: 'empty' }]);
   assert.equal(clear.recognition, null);
 });
 
@@ -1284,38 +1134,6 @@ test('a raw recognizer returned after constructor disposal is aborted exactly on
   assert.equal(instances.length, 1);
 });
 
-test('terminal clearTimer cleanup keeps a hostile old stop getter in the suppression critical section', () => {
-  const events = [];
-  const instances = [];
-  let controller;
-  class Recognition {
-    constructor() { instances.push(this); }
-    start() { this.startCount = (this.startCount ?? 0) + 1; }
-    abort() { this.abortCount = (this.abortCount ?? 0) + 1; }
-    get stop() {
-      this.stopGetterCount = (this.stopGetterCount ?? 0) + 1;
-      controller.start();
-      return () => { this.stopCallCount = (this.stopCallCount ?? 0) + 1; };
-    }
-  }
-  controller = createSpeechController({
-    Recognition,
-    onEvent: event => events.push(event),
-    setTimer: () => 17,
-    clearTimer() { throw new Error('clear failure'); },
-  });
-  controller.start();
-  const old = instances[0];
-  assert.doesNotThrow(() => controller.stop());
-
-  assert.equal(old.stopGetterCount, 1);
-  assert.equal(old.stopCallCount, 1);
-  assert.equal(instances.length, 1);
-  assert.equal(controller.recognition, null);
-  assert.equal(controller.isListening(), false);
-  assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
-});
-
 test('a rejected recognition-start thenable terminalizes the captured run', async () => {
   const clock = fakeClock();
   const events = [];
@@ -1335,7 +1153,7 @@ test('a rejected recognition-start thenable terminalizes the captured run', asyn
   assert.equal(clock.pending(), 0);
 });
 
-test('a rejected setTimer thenable terminalizes the initial arm', async () => {
+test('a rejected stop-watchdog timer thenable terminalizes the stopping run', async () => {
   const events = [];
   const { Recognition, instances } = recognitionClass();
   const controller = createSpeechController({
@@ -1346,6 +1164,9 @@ test('a rejected setTimer thenable terminalizes the initial arm', async () => {
   });
 
   assert.doesNotThrow(() => controller.start());
+  assert.deepEqual(events, []);
+  assert.equal(instances[0].abortCount ?? 0, 0);
+  assert.doesNotThrow(() => controller.stop());
   await settleMicrotasks();
   assert.equal(instances[0].abortCount, 1);
   assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
@@ -1353,7 +1174,7 @@ test('a rejected setTimer thenable terminalizes the initial arm', async () => {
   assert.equal(controller.isListening(), false);
 });
 
-test('a rejected clearTimer thenable terminalizes the captured stopping run', async () => {
+test('a rejected watchdog clear thenable is contained after the terminal event', async () => {
   const events = [];
   const { Recognition, instances } = recognitionClass();
   const controller = createSpeechController({
@@ -1364,10 +1185,11 @@ test('a rejected clearTimer thenable terminalizes the captured stopping run', as
   });
   controller.start();
   assert.doesNotThrow(() => controller.stop());
+  instances[0].onend();
   await settleMicrotasks();
 
   assert.equal(instances[0].stopCount, 1);
-  assert.deepEqual(events, [errorEvent('SPEECH_FAILED', true)]);
+  assert.deepEqual(events, [{ type: 'empty' }]);
   assert.equal(controller.recognition, null);
   assert.equal(controller.isListening(), false);
 });
@@ -1433,7 +1255,7 @@ test('a never-settling cleanup thenable fences only its consuming microtask', as
   assert.equal(instances.length, 2);
   assert.equal(controller.recognition, instances[1]);
   assert.equal(controller.isListening(), true);
-  assert.equal(clock.pending(), 1);
+  assert.equal(clock.pending(), 0);
   assert.deepEqual(events, []);
 });
 
@@ -1468,192 +1290,19 @@ test('a cleanup then getter trap fences its directly queued reentry before falli
   assert.equal(instances.length, 2);
 });
 
-test('an invalid synchronous advisory timer handle fences hostile clearTimer reentry without stopping', async () => {
-  const scenarios = [
-    {
-      name: 'clearTimer call',
-      clearTimer(controller) { controller.start(); },
-    },
-    {
-      name: 'clearTimer then getter',
-      fails: true,
-      clearTimer(controller) {
-        return Object.defineProperty({}, 'then', {
-          get() {
-            queueMicrotask(() => controller.start());
-            throw new Error('clear then getter');
-          },
-        });
-      },
-    },
-    {
-      name: 'clearTimer noncallable then getter',
-      clearTimer(controller) {
-        return Object.defineProperty({}, 'then', {
-          get() {
-            queueMicrotask(() => controller.start());
-            return undefined;
-          },
-        });
-      },
-    },
-    {
-      name: 'clearTimer then call',
-      fails: true,
-      clearTimer(controller) {
-        return {
-          then() {
-            queueMicrotask(() => controller.start());
-            throw new Error('clear then call');
-          },
-        };
-      },
-    },
-    {
-      name: 'clearTimer then direct microtask',
-      clearTimer(controller) {
-        return { then() { queueMicrotask(() => controller.start()); } };
-      },
-    },
-  ];
-
-  for (const scenario of scenarios) {
-    const events = [];
-    const instances = [];
-    let arms = 0;
-    let controller;
-    class Recognition {
-      constructor() { instances.push(this); }
-      start() { this.startCount = (this.startCount ?? 0) + 1; }
-      stop() {
-        this.stopCount = (this.stopCount ?? 0) + 1;
-        this.onend();
-      }
-      abort() { this.abortCount = (this.abortCount ?? 0) + 1; }
-    }
-    controller = createSpeechController({
-      Recognition,
-      onEvent: event => events.push(event),
-      setTimer(callback, delay) {
-        assert.equal(delay, 1500, scenario.name);
-        arms += 1;
-        if (arms === 1) callback();
-        return arms;
-      },
-      clearTimer() { return scenario.clearTimer(controller); },
-    });
-
-    assert.doesNotThrow(() => controller.start(), scenario.name);
-    await settleMicrotasks();
-
-    assert.equal(arms, 1, scenario.name);
-    assert.equal(instances.length, 1, scenario.name);
-    assert.equal(instances[0].stopCount ?? 0, 0, scenario.name);
-    assert.equal(controller.recognition, scenario.fails ? null : instances[0], scenario.name);
-    assert.equal(controller.isListening(), !scenario.fails, scenario.name);
-    assert.deepEqual(events, scenario.fails ? [errorEvent('SPEECH_FAILED', true)] : [], scenario.name);
-  }
-});
-
-test('a natural end clearTimer fences reentry while the same recognizer restarts and awaits explicit stop', async () => {
+test('natural end restarts in place without touching watchdog timer dependencies', () => {
+  const clock = fakeClock();
   const events = [];
-  const instances = [];
-  let controller;
-  class Recognition {
-    constructor() { instances.push(this); }
-    start() { this.startCount = (this.startCount ?? 0) + 1; }
-    stop() { this.stopCount = (this.stopCount ?? 0) + 1; }
-    abort() { this.abortCount = (this.abortCount ?? 0) + 1; }
-  }
-  controller = createSpeechController({
-    Recognition,
-    onEvent: event => events.push(event),
-    setTimer: () => 41,
-    clearTimer() {
-      return { then() { queueMicrotask(() => controller.start()); } };
-    },
-  });
-
-  controller.start();
-  instances[0].onend();
-  await settleMicrotasks();
-
-  assert.equal(instances.length, 1);
-  assert.equal(controller.recognition, instances[0]);
-  assert.equal(controller.isListening(), true);
-  assert.equal(instances[0].startCount, 2);
-  assert.deepEqual(events, []);
-
-  controller.start();
-  assert.equal(instances.length, 1);
-  controller.stop();
-  assert.equal(instances[0].stopCount, 1);
-  assert.deepEqual(events, []);
-  instances[0].onend();
-  assert.deepEqual(events, [{ type: 'empty' }]);
-  await settleMicrotasks();
-  controller.start();
-  assert.equal(instances.length, 2);
-  assert.equal(controller.recognition, instances[1]);
-  assert.equal(controller.isListening(), true);
-});
-
-test('a natural end clearTimer noncallable then getter cannot replace the restarted run', async () => {
-  const events = [];
-  const instances = [];
-  let controller;
-  class Recognition {
-    constructor() { instances.push(this); }
-    start() { this.startCount = (this.startCount ?? 0) + 1; }
-    stop() { this.stopCount = (this.stopCount ?? 0) + 1; }
-  }
-  controller = createSpeechController({
-    Recognition,
-    onEvent: event => events.push(event),
-    setTimer: () => 43,
-    clearTimer() {
-      return Object.defineProperty({}, 'then', {
-        get() {
-          queueMicrotask(() => controller.start());
-          return undefined;
-        },
-      });
-    },
-  });
-
-  controller.start();
-  instances[0].onend();
-  await settleMicrotasks();
-
-  assert.equal(instances.length, 1);
-  assert.equal(controller.recognition, instances[0]);
-  assert.equal(controller.isListening(), true);
-  assert.equal(instances[0].startCount, 2);
-  assert.deepEqual(events, []);
-  controller.stop();
-  assert.equal(instances[0].stopCount, 1);
-  assert.equal(controller.recognition, instances[0]);
-  instances[0].onend();
-  assert.equal(controller.recognition, null);
-  assert.deepEqual(events, [{ type: 'empty' }]);
-});
-
-test('a void natural-end clearTimer restarts in place and keeps public start inert until explicit stop', () => {
-  const events = [];
-  const instances = [];
-  class Recognition {
-    constructor() { instances.push(this); }
-    start() { this.startCount = (this.startCount ?? 0) + 1; }
-    stop() { this.stopCount = (this.stopCount ?? 0) + 1; }
-  }
+  const { Recognition, instances } = recognitionClass();
   const controller = createSpeechController({
     Recognition,
     onEvent: event => events.push(event),
-    setTimer: () => 59,
-    clearTimer() {},
+    setTimer: clock.setTimer,
+    clearTimer: clock.clearTimer,
   });
 
   controller.start();
+  assert.deepEqual(clock.delays, []);
   instances[0].onend();
   controller.start();
 
@@ -1661,15 +1310,19 @@ test('a void natural-end clearTimer restarts in place and keeps public start ine
   assert.equal(controller.recognition, instances[0]);
   assert.equal(controller.isListening(), true);
   assert.equal(instances[0].startCount, 2);
+  assert.deepEqual(clock.delays, []);
+  assert.deepEqual(clock.clears, []);
   assert.deepEqual(events, []);
+
   controller.stop();
   assert.equal(instances[0].stopCount, 1);
+  assert.deepEqual(clock.delays, [5000]);
+  assert.equal(clock.pending(), 1);
   assert.deepEqual(events, []);
   instances[0].onend();
   assert.deepEqual(events, [{ type: 'empty' }]);
-  controller.start();
-  assert.equal(instances.length, 2);
-  assert.equal(controller.recognition, instances[1]);
+  assert.equal(clock.pending(), 0);
+  assert.deepEqual(clock.clears, [1]);
 });
 
 test('an abort then call return rejection is consumed and falls back exactly once without an unhandled rejection', () => {

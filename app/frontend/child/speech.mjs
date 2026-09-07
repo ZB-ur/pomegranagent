@@ -1,4 +1,3 @@
-const SILENCE_MS = 1500;
 const STOP_SETTLE_MS = 5000;
 const SCHEDULING = Symbol('speech timer scheduling');
 
@@ -78,14 +77,12 @@ export function createSpeechController(deps) {
       return;
     }
     if (!assignRecognition(run, 'onresult', event => handleResult(run, event))) return;
-    if (!assignRecognition(run, 'onspeechend', () => handleSpeechEnd(run))) return;
     if (!assignRecognition(run, 'onerror', event => handleError(run, event))) return;
     if (!assignRecognition(run, 'onend', () => handleEnd(run))) return;
     if (!assignRecognition(run, 'lang', 'zh-CN')) return;
     if (!assignRecognition(run, 'interimResults', true)) return;
     if (!assignRecognition(run, 'continuous', true)) return;
-    if (!startRecognition(run)) return;
-    if (isListeningRun(run) && !run.recognitionEnded) arm(run);
+    startRecognition(run);
   }
 
   function assignRecognition(run, property, value) {
@@ -166,11 +163,6 @@ export function createSpeechController(deps) {
     }
     if (!isCurrent(run)) return;
     emit({ type: 'partial', text });
-    if (isListeningRun(run) && !run.recognitionEnded) arm(run);
-  }
-
-  function handleSpeechEnd(run) {
-    if (isListeningRun(run) && !run.recognitionEnded && !run.waitingForEnd) arm(run);
   }
 
   function handleError(run, event) {
@@ -184,7 +176,6 @@ export function createSpeechController(deps) {
     if (eventToEmit.type === 'empty'
       && (run.phase === 'listening' || run.phase === 'stopping')) {
       run.waitingForEnd = true;
-      if (run.phase === 'listening') releaseTimer(run, false, false);
       return;
     }
     terminal(run, eventToEmit, { cleanupRecognition: false });
@@ -207,9 +198,7 @@ export function createSpeechController(deps) {
     // user-visible recording session alive until the explicit stop action.
     commitTranscriptSegment(run);
     run.waitingForEnd = false;
-    releaseTimer(run, false, false);
-    if (!isListeningRun(run) || !startRecognition(run)) return;
-    if (isListeningRun(run) && !run.recognitionEnded) arm(run);
+    if (isListeningRun(run)) startRecognition(run);
   }
 
   function commitTranscriptSegment(run) {
@@ -277,39 +266,6 @@ export function createSpeechController(deps) {
     return errorEvent('SPEECH_FAILED', true);
   }
 
-  function arm(run) {
-    if (!isListeningRun(run) || run.recognitionEnded) return;
-    if (!releaseTimer(run, true, true) || !isListeningRun(run)) return;
-
-    run.timer = SCHEDULING;
-    let handle;
-    try {
-      handle = setTimer(() => timerFired(run, handle), SILENCE_MS);
-      consumeThenable(handle, {
-        onRejected() {
-          if (isCurrent(run)) fail(run, true);
-        },
-      });
-    } catch {
-      if (run.timer === SCHEDULING) run.timer = null;
-      if (isCurrent(run)) fail(run, true);
-      return;
-    }
-
-    if (!isListeningRun(run) || run.timer !== SCHEDULING) {
-      clearReturnedHandle(run, handle);
-      return;
-    }
-    run.timer = handle;
-  }
-
-  function timerFired(run, handle) {
-    if (!isCurrent(run) || (run.timer !== SCHEDULING && run.timer !== handle)) return;
-    run.timer = null;
-    // Silence expiry is advisory only and must never stop recognition.
-    // The user's second click or Space press owns normal completion.
-  }
-
   function clearReturnedHandle(run, handle) {
     invokeClearTimer(handle, {
       cleanupBoundary: true,
@@ -322,12 +278,6 @@ export function createSpeechController(deps) {
   function requestStop(run) {
     if (!isListeningRun(run)) return;
     run.phase = 'stopping';
-    const released = releaseTimer(run, true, false);
-    if (!released && run.timerFailure) {
-      stopRecognition(run, true);
-      return;
-    }
-    if (!isCurrent(run) || run.phase !== 'stopping') return;
 
     if (run.recognitionEnded) {
       terminal(run, terminalTranscriptEvent(run), { cleanupRecognition: false });
