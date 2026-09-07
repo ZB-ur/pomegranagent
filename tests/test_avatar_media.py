@@ -787,6 +787,114 @@ def test_store_compensates_the_final_file_when_database_commit_fails(db_session,
     assert _stored_files() == []
 
 
+def test_windows_path_backend_uploads_reads_and_never_enters_posix_dir_fd_path(
+    client,
+    monkeypatch,
+) -> None:
+    from app.backend.services import avatar_media
+
+    monkeypatch.setattr(avatar_media, "_use_windows_path_backend", lambda: True)
+
+    def fail_posix_root(*_args, **_kwargs):
+        raise AssertionError("Windows storage must not enter the POSIX dir_fd backend")
+
+    monkeypatch.setattr(avatar_media, "_secure_open_media_root_fd", fail_posix_root)
+    _unlock(client)
+    response = _upload(client, _image_bytes("PNG"), "image/png")
+    assert response.status_code == 200
+    payload = response.json()
+
+    fetched = client.get(payload["url"])
+    assert fetched.status_code == 200
+    assert fetched.headers["content-type"] == "image/webp"
+    assert fetched.content
+    headed = client.head(payload["url"])
+    assert headed.status_code == 200
+    assert headed.content == b""
+    assert headed.headers["etag"] == fetched.headers["etag"]
+
+
+def test_windows_path_backend_retries_existing_final_without_overwrite(
+    db_session,
+    monkeypatch,
+) -> None:
+    from app.backend.services import avatar_media
+
+    fixed = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
+    temporary_one = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1")
+    replacement = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1")
+    temporary_two = UUID("bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2")
+    queued = iter([fixed, temporary_one, replacement, temporary_two])
+    original_uuid4 = avatar_media.uuid4
+    attacker = b"existing Windows avatar must survive"
+    MEDIA_ROOT.mkdir(parents=True)
+    occupied = MEDIA_ROOT / f"{fixed}.webp"
+    occupied.write_bytes(attacker)
+
+    monkeypatch.setattr(avatar_media, "_use_windows_path_backend", lambda: True)
+    monkeypatch.setattr(
+        avatar_media,
+        "uuid4",
+        lambda: next(queued, original_uuid4()),
+    )
+    stored = avatar_media.store_avatar(
+        db_session,
+        _direct_upload(_image_bytes("PNG"), "image/png"),
+        media_root=MEDIA_ROOT,
+        now=CAPTURED_NOW,
+    )
+
+    assert stored.id == str(replacement)
+    assert occupied.read_bytes() == attacker
+    assert avatar_media.load_avatar(
+        db_session,
+        stored.id,
+        media_root=MEDIA_ROOT,
+    ).content == (MEDIA_ROOT / stored.file_name).read_bytes()
+
+
+def test_windows_path_backend_commit_failure_cleans_owned_file_and_reparse_root_fails(
+    db_session,
+    monkeypatch,
+    tmp_path,
+) -> None:
+    from app.backend.services import avatar_media
+
+    monkeypatch.setattr(avatar_media, "_use_windows_path_backend", lambda: True)
+
+    def fail_commit() -> None:
+        raise OSError("synthetic Windows database failure")
+
+    monkeypatch.setattr(db_session, "commit", fail_commit)
+    with pytest.raises(APIError) as error:
+        avatar_media.store_avatar(
+            db_session,
+            _direct_upload(_image_bytes("PNG"), "image/png"),
+            media_root=MEDIA_ROOT,
+            now=CAPTURED_NOW,
+        )
+    assert error.value.code == "AVATAR_STORAGE_UNAVAILABLE"
+    assert _stored_files() == []
+
+    avatar_media.close_pinned_media_roots()
+    target = tmp_path / "windows-media-target"
+    target.mkdir()
+    linked_root = tmp_path / "windows-media-link"
+    try:
+        linked_root.symlink_to(target, target_is_directory=True)
+    except (NotImplementedError, OSError):
+        pytest.skip("symbolic links are unavailable on this host")
+    with pytest.raises(APIError) as linked_error:
+        avatar_media.store_avatar(
+            db_session,
+            _direct_upload(_image_bytes("PNG"), "image/png"),
+            media_root=linked_root,
+            now=CAPTURED_NOW,
+        )
+    assert linked_error.value.code == "AVATAR_STORAGE_UNAVAILABLE"
+    assert list(target.iterdir()) == []
+
+
 def test_atomic_publish_never_overwrites_boundary_attacker_and_retries_uuid(
     db_session,
     monkeypatch,

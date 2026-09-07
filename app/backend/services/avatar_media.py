@@ -88,9 +88,20 @@ class _PinnedMediaRoot:
     lock: RLock
 
 
+@dataclass
+class _WindowsMediaRoot:
+    """A process-local lock and stable identity for a Windows media root."""
+
+    path: Path
+    identity: tuple[int, int]
+    lock: RLock
+
+
 _PINNED_ROOTS: dict[str, _PinnedMediaRoot] = {}
 _PINNED_ROOTS_LOCK = RLock()
 _PINNED_ROOTS_PID = os.getpid()
+_WINDOWS_ROOTS: dict[str, _WindowsMediaRoot] = {}
+_WINDOWS_ROOTS_LOCK = RLock()
 
 
 def _invalid_avatar() -> APIError:
@@ -114,8 +125,110 @@ def _absolute_without_symlink_resolution(path: Path) -> Path:
     return Path(os.path.abspath(os.fspath(path.expanduser())))
 
 
+def _use_windows_path_backend() -> bool:
+    """Keep the hardened descriptor backend on POSIX and branch on Windows."""
+
+    return os.name == "nt"
+
+
 def _root_error(*, create: bool) -> APIError:
     return _storage_unavailable() if create else _not_found()
+
+
+def _is_reparse_point(file_stat: os.stat_result) -> bool:
+    attributes = getattr(file_stat, "st_file_attributes", 0)
+    marker = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(marker and attributes & marker)
+
+
+def _windows_root_chain(root: Path) -> tuple[Path, ...]:
+    chain: list[Path] = []
+    current = root
+    while True:
+        chain.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    chain.reverse()
+    return tuple(chain)
+
+
+def _validate_windows_root_path(media_root: Path, *, create: bool) -> tuple[Path, os.stat_result]:
+    """Create and validate a path-based Windows root without following reparse points.
+
+    Python does not expose a portable Windows equivalent of POSIX directory-fd
+    pinning. The Windows backend therefore rejects symlinks/reparse points and
+    serializes every operation in this process while retaining the hardened
+    descriptor implementation on POSIX.
+    """
+
+    root = _absolute_without_symlink_resolution(Path(media_root))
+    if not root.is_absolute():
+        raise _root_error(create=create)
+    try:
+        for component in _windows_root_chain(root):
+            try:
+                component_stat = component.lstat()
+            except FileNotFoundError:
+                continue
+            if stat.S_ISLNK(component_stat.st_mode) or _is_reparse_point(component_stat):
+                raise _root_error(create=create)
+        if create:
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+        root_stat = root.lstat()
+        if (
+            not stat.S_ISDIR(root_stat.st_mode)
+            or stat.S_ISLNK(root_stat.st_mode)
+            or _is_reparse_point(root_stat)
+        ):
+            raise _root_error(create=create)
+        for component in _windows_root_chain(root):
+            component_stat = component.lstat()
+            if stat.S_ISLNK(component_stat.st_mode) or _is_reparse_point(component_stat):
+                raise _root_error(create=create)
+        return root, root_stat
+    except APIError:
+        raise
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
+        raise _root_error(create=create) from None
+
+
+@contextmanager
+def _windows_media_root_lease(media_root: Path, *, create: bool):
+    root = _absolute_without_symlink_resolution(Path(media_root))
+    key = os.path.normcase(os.fspath(root))
+    registry_lock = _WINDOWS_ROOTS_LOCK
+    pinned: _WindowsMediaRoot | None = None
+    acquired = False
+    registry_lock.acquire()
+    try:
+        pinned = _WINDOWS_ROOTS.get(key)
+        if pinned is None:
+            validated_root, root_stat = _validate_windows_root_path(root, create=create)
+            pinned = _WindowsMediaRoot(
+                path=validated_root,
+                identity=_inode_identity(root_stat),
+                lock=RLock(),
+            )
+            _WINDOWS_ROOTS[key] = pinned
+        pinned.lock.acquire()
+        acquired = True
+        validated_root, root_stat = _validate_windows_root_path(pinned.path, create=create)
+        if validated_root != pinned.path or _inode_identity(root_stat) != pinned.identity:
+            _WINDOWS_ROOTS.pop(key, None)
+            raise _root_error(create=create)
+    except Exception:
+        if acquired and pinned is not None:
+            pinned.lock.release()
+            acquired = False
+        raise
+    finally:
+        registry_lock.release()
+    try:
+        yield pinned
+    finally:
+        if acquired:
+            pinned.lock.release()
 
 
 def _secure_open_media_root_fd(media_root: Path, *, create: bool) -> int:
@@ -311,6 +424,16 @@ def close_pinned_media_roots() -> None:
             try:
                 _close_pinned_media_root(key, pinned)
             finally:
+                pinned.lock.release()
+    windows_registry_lock = _WINDOWS_ROOTS_LOCK
+    with windows_registry_lock:
+        entries = list(_WINDOWS_ROOTS.values())
+        for pinned in entries:
+            pinned.lock.acquire()
+        try:
+            _WINDOWS_ROOTS.clear()
+        finally:
+            for pinned in reversed(entries):
                 pinned.lock.release()
 
 
@@ -620,6 +743,189 @@ def _remove_owned_entry(
     return True
 
 
+def _windows_remove_owned_entry(
+    path: Path,
+    identity: tuple[int, int] | None,
+) -> bool:
+    """Best-effort cleanup after an immediate identity check."""
+
+    if identity is None:
+        return False
+    try:
+        path_stat = path.lstat()
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or stat.S_ISLNK(path_stat.st_mode)
+            or _is_reparse_point(path_stat)
+            or _inode_identity(path_stat) != identity
+        ):
+            return False
+        path.unlink()
+        return True
+    except (FileNotFoundError, OSError, ValueError):
+        return False
+
+
+def _validate_windows_lease(pinned: _WindowsMediaRoot, *, create: bool) -> None:
+    root, root_stat = _validate_windows_root_path(pinned.path, create=create)
+    if root != pinned.path or _inode_identity(root_stat) != pinned.identity:
+        raise _root_error(create=create)
+
+
+def _windows_open_exclusive(path: Path) -> int:
+    flags = (
+        os.O_WRONLY
+        | os.O_CREAT
+        | os.O_EXCL
+        | getattr(os, "O_BINARY", 0)
+        | getattr(os, "O_NOINHERIT", 0)
+    )
+    return os.open(path, flags, 0o600)
+
+
+def _store_avatar_windows(
+    db: Session,
+    *,
+    encoded: bytes,
+    width: int,
+    height: int,
+    now: datetime,
+    pinned: _WindowsMediaRoot,
+) -> StoredAvatar:
+    """Publish one avatar through Windows-compatible absolute path operations."""
+
+    media_id: str | None = None
+    file_name: str | None = None
+    temporary_path: Path | None = None
+    temporary_identity: tuple[int, int] | None = None
+    final_path: Path | None = None
+    final_identity: tuple[int, int] | None = None
+    placeholder_identity: tuple[int, int] | None = None
+    try:
+        for _attempt in range(128):
+            _validate_windows_lease(pinned, create=True)
+            media_id = str(uuid4())
+            file_name = f"{media_id}.webp"
+            final_path = pinned.path / file_name
+            final_identity = None
+            placeholder_identity = None
+            temporary_path = None
+            temporary_identity = None
+
+            candidate_row = models.AvatarMedia(
+                id=media_id,
+                file_name=file_name,
+                mime_type="image/webp",
+                width=width,
+                height=height,
+                size_bytes=len(encoded),
+                sha256=sha256(encoded).hexdigest(),
+                created_at=now.astimezone(UTC).replace(tzinfo=None),
+            )
+            db.add(candidate_row)
+            try:
+                db.flush()
+            except IntegrityError:
+                db.rollback()
+                continue
+
+            for _temp_attempt in range(128):
+                candidate_temp = pinned.path / f".avatar-{uuid4()}.tmp"
+                try:
+                    descriptor = _windows_open_exclusive(candidate_temp)
+                except FileExistsError:
+                    continue
+                temporary_path = candidate_temp
+                break
+            else:
+                raise _storage_unavailable()
+
+            raw_descriptor: int | None = descriptor
+            try:
+                temporary_stat = os.fstat(raw_descriptor)
+                if not stat.S_ISREG(temporary_stat.st_mode):
+                    raise _storage_unavailable()
+                temporary_identity = _inode_identity(temporary_stat)
+                try:
+                    output = os.fdopen(raw_descriptor, "wb")
+                except Exception:
+                    os.close(raw_descriptor)
+                    raw_descriptor = None
+                    raise
+                raw_descriptor = None
+                with output:
+                    output.write(encoded)
+                    output.flush()
+                    os.fsync(output.fileno())
+            finally:
+                if raw_descriptor is not None:
+                    os.close(raw_descriptor)
+
+            try:
+                placeholder = _windows_open_exclusive(final_path)
+            except FileExistsError:
+                db.rollback()
+                _windows_remove_owned_entry(temporary_path, temporary_identity)
+                temporary_path = None
+                temporary_identity = None
+                continue
+            try:
+                placeholder_identity = _inode_identity(os.fstat(placeholder))
+            finally:
+                os.close(placeholder)
+
+            try:
+                os.replace(temporary_path, final_path)
+            except Exception:
+                _windows_remove_owned_entry(final_path, placeholder_identity)
+                placeholder_identity = None
+                raise
+            temporary_path = None
+            final_identity = temporary_identity
+            temporary_identity = None
+            placeholder_identity = None
+
+            installed_stat = final_path.lstat()
+            if (
+                not stat.S_ISREG(installed_stat.st_mode)
+                or stat.S_ISLNK(installed_stat.st_mode)
+                or _is_reparse_point(installed_stat)
+                or _inode_identity(installed_stat) != final_identity
+                or installed_stat.st_size != len(encoded)
+            ):
+                raise _storage_unavailable()
+            with final_path.open("rb") as installed:
+                if sha256(installed.read(len(encoded) + 1)).hexdigest() != candidate_row.sha256:
+                    raise _storage_unavailable()
+            _validate_windows_lease(pinned, create=True)
+            snapshot = StoredAvatar(
+                id=candidate_row.id,
+                file_name=candidate_row.file_name,
+                mime_type=candidate_row.mime_type,
+                width=candidate_row.width,
+                height=candidate_row.height,
+                size_bytes=candidate_row.size_bytes,
+                sha256=candidate_row.sha256,
+            )
+            db.commit()
+            return snapshot
+        raise _storage_unavailable()
+    except APIError:
+        db.rollback()
+        if final_path is not None:
+            _windows_remove_owned_entry(final_path, final_identity or placeholder_identity)
+        if temporary_path is not None:
+            _windows_remove_owned_entry(temporary_path, temporary_identity)
+        raise
+    except Exception:
+        db.rollback()
+        if final_path is not None:
+            _windows_remove_owned_entry(final_path, final_identity or placeholder_identity)
+        if temporary_path is not None:
+            _windows_remove_owned_entry(temporary_path, temporary_identity)
+        raise _storage_unavailable() from None
+
+
 def store_avatar(
     db: Session,
     upload: UploadFile,
@@ -634,6 +940,16 @@ def store_avatar(
         raise APIError(415, "AVATAR_TYPE_UNSUPPORTED", "仅支持 JPEG、PNG 或 WebP 头像")
     raw = _read_bounded(upload.file)
     encoded, width, height = _transcode(raw, declared_type)
+    if _use_windows_path_backend():
+        with _windows_media_root_lease(Path(media_root), create=True) as pinned:
+            return _store_avatar_windows(
+                db,
+                encoded=encoded,
+                width=width,
+                height=height,
+                now=now,
+                pinned=pinned,
+            )
     with _media_root_lease(Path(media_root), create=True) as pinned:
         return _store_avatar_under_lease(
             db,
@@ -852,6 +1168,60 @@ def _validate_stored_webp(content: bytes, row: models.AvatarMedia) -> None:
         raise _not_found() from None
 
 
+def _load_avatar_windows_content(
+    row: models.AvatarMedia,
+    *,
+    pinned: _WindowsMediaRoot,
+) -> bytes:
+    """Read one row-backed file without Windows-unsupported dir_fd calls."""
+
+    path = pinned.path / row.file_name
+    descriptor: int | None = None
+    try:
+        _validate_windows_lease(pinned, create=False)
+        path_stat = path.lstat()
+        if (
+            not stat.S_ISREG(path_stat.st_mode)
+            or stat.S_ISLNK(path_stat.st_mode)
+            or _is_reparse_point(path_stat)
+            or path_stat.st_nlink != 1
+        ):
+            raise _not_found()
+        flags = (
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOINHERIT", 0)
+        )
+        descriptor = os.open(path, flags)
+        opened_stat = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_stat.st_mode)
+            or opened_stat.st_nlink != 1
+            or _inode_identity(opened_stat) != _inode_identity(path_stat)
+        ):
+            raise _not_found()
+        with os.fdopen(descriptor, "rb", closefd=False) as source:
+            content = source.read(row.size_bytes + 1)
+        finished_stat = os.fstat(descriptor)
+        if (
+            finished_stat.st_nlink != 1
+            or _inode_identity(finished_stat) != _inode_identity(opened_stat)
+        ):
+            raise _not_found()
+        _validate_windows_lease(pinned, create=False)
+        return content
+    except APIError:
+        raise
+    except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
+        raise _not_found() from None
+    finally:
+        if descriptor is not None:
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+
 def load_avatar(
     db: Session,
     media_id: str | UUID,
@@ -878,6 +1248,13 @@ def load_avatar(
         raise _not_found()
 
     try:
+        if _use_windows_path_backend():
+            with _windows_media_root_lease(Path(media_root), create=False) as pinned:
+                content = _load_avatar_windows_content(row, pinned=pinned)
+            if len(content) != row.size_bytes or sha256(content).hexdigest() != row.sha256:
+                raise _not_found()
+            _validate_stored_webp(content, row)
+            return AvatarBlob(media=row, content=content)
         with _media_root_lease(Path(media_root), create=False) as pinned:
             path_stat = os.stat(
                 row.file_name,
