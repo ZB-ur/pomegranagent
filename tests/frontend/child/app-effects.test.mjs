@@ -236,6 +236,11 @@ async function flushMicrotasks() {
   for (let count = 0; count < 8; count += 1) await Promise.resolve();
 }
 
+function explicitlyStopAndEmitSpeech(app, fixture, event) {
+  app.recordToggle();
+  fixture.emitSpeech(event);
+}
+
 function childRecord(id = 7, name = '小雨') {
   return { id, name, nickname: null, avatar: null };
 }
@@ -1777,7 +1782,7 @@ test('two record toggles in one tick persist listening then stop the already-reg
   assert.equal(fixture.calls.speechStop, 1);
 });
 
-test('a synchronous final from speech.start drains after the registered start boundary and launches one chat', async () => {
+test('a synchronous final from speech.start is unauthorized and cannot launch chat', async () => {
   const fixture = createFixture();
   const chat = deferred();
   fixture.speech.start = () => {
@@ -1797,8 +1802,40 @@ test('a synchronous final from speech.start drains after the registered start bo
 
   app.recordToggle();
   assert.equal(fixture.calls.speechStart, 1);
-  assert.equal(app.getSnapshot().value, 'submitting');
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().stopRequested, false);
   assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+  await flushMicrotasks();
+  assert.equal(fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'chat').length, 0);
+});
+
+test('final and empty require the current recording generation explicit-stop grant', async () => {
+  const fixture = createFixture();
+  fixture.deps.api.getTodayRoster = () => Promise.resolve([childRecord()]);
+  fixture.deps.api.getActiveConversation = () => Promise.resolve({ conversation: null });
+  const app = createChildApp(fixture.deps);
+  await app.initialize();
+  await app.start();
+  await app.selectChild(7);
+
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '未授权最终稿' });
+  fixture.emitSpeech({ type: 'empty' });
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().stopRequested, false);
+  assert.equal(fixture.calls.speechStop, 0);
+  assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
+
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'empty' });
+  assert.equal(app.getSnapshot().value, 'ready');
+
+  app.recordToggle();
+  fixture.emitSpeech({ type: 'final', text: '上一轮停止授权不可复用' });
+  fixture.emitSpeech({ type: 'empty' });
+  assert.equal(app.getSnapshot().value, 'listening');
+  assert.equal(app.getSnapshot().stopRequested, false);
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '当前轮明确结束' });
+  assert.equal(app.getSnapshot().value, 'submitting');
   await flushMicrotasks();
   assert.equal(fixture.calls.api.filter(call => Array.isArray(call) && call[0] === 'chat').length, 1);
 });
@@ -1820,7 +1857,7 @@ test('current speech partials only announce, empty settles ready, and errors ent
   assert.equal(fixture.calls.store.filter(item => Array.isArray(item) && item[0] === 'save').length, savesBeforePartial + 1);
   assert.equal(fixture.calls.api.some(call => Array.isArray(call) && call[0] === 'chat'), false);
 
-  fixture.emitSpeech({ type: 'empty' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'empty' });
   assert.equal(app.getSnapshot().value, 'ready');
   assert.equal(fixture.calls.store.at(-1)[1].value, 'ready');
 
@@ -1881,7 +1918,7 @@ test('a current final creates one canonical draft, persists submitting, then lau
   await app.selectChild(7);
 
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '  我给小鸭换了水  ' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '  我给小鸭换了水  ' });
   fixture.emitSpeech({ type: 'final', text: 'duplicate must be inert' });
 
   assert.equal(app.getSnapshot().value, 'submitting');
@@ -1918,7 +1955,7 @@ test('a malformed draft result is treated as DRAFT_CREATION_FAILED without launc
   await app.selectChild(7);
   app.recordToggle();
 
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   assert.equal(app.getSnapshot().value, 'recovery');
   assert.deepEqual(app.getSnapshot().error, {
     code: 'DRAFT_CREATION_FAILED',
@@ -1954,7 +1991,7 @@ test('a persisted successful chat starts one reply TTS and its settlement advanc
   await app.selectChild(7);
 
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   chat.resolve(chatResult());
   await flushMicrotasks();
@@ -1988,7 +2025,7 @@ test('a speaking-state save failure starts no reply TTS and remains LOCAL_STORAG
   await app.selectChild(7);
 
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
 
   assert.equal(app.getSnapshot().value, 'recovery');
@@ -2024,7 +2061,7 @@ test('a retryable chat failure normalizes REQUEST_IN_PROGRESS and retries the ex
   await app.selectChild(7);
 
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   firstChat.reject({ code: 'REQUEST_IN_PROGRESS', retryable: false, message: 'private' });
   await flushMicrotasks();
@@ -2088,7 +2125,7 @@ test('chat failures force approved retryability and ignore hostile error accesso
     await app.start();
     await app.selectChild(7);
     app.recordToggle();
-    fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+    explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
     await flushMicrotasks();
 
     assert.equal(app.getSnapshot().value, 'recovery');
@@ -2117,7 +2154,7 @@ test('a replayed acknowledgement dedupes existing message IDs without a new UUID
 
   for (let attempt = 0; attempt < 2; attempt += 1) {
     app.recordToggle();
-    fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+    explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
     await flushMicrotasks();
     assert.equal(app.getSnapshot().value, 'ready');
   }
@@ -2140,12 +2177,12 @@ test('a replay conflicting with acknowledged history becomes CHAT_RESPONSE_CONFL
   await app.selectChild(7);
 
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   const replyTTSBeforeConflict = fixture.calls.tts.filter(([kind, text]) => kind === 'speak' && text === '真棒！').length;
 
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '这次内容不同' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '这次内容不同' });
   await flushMicrotasks();
 
   assert.equal(app.getSnapshot().value, 'recovery');
@@ -2183,7 +2220,7 @@ test('an ended reply persists saving_conversation before one exact completion re
   await app.selectChild(7);
 
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
 
   assert.equal(app.getSnapshot().value, 'saving_conversation');
@@ -2219,7 +2256,7 @@ test('a completed-save failure remains the no-write LOCAL_STORAGE_FAILED recover
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   assert.equal(app.getSnapshot().value, 'saving_conversation');
 
@@ -2245,7 +2282,7 @@ test('an invalid completion response enters COMPLETE_RESPONSE_INVALID while pres
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   await flushMicrotasks();
 
@@ -2276,7 +2313,7 @@ test('an ordinary completion failure preserves IDs and messages with only a sani
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   await flushMicrotasks();
 
@@ -2328,7 +2365,7 @@ test('CONVERSATION_CHANGED rereads the durable completion boundary through a fre
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   assert.equal(app.getSnapshot().value, 'saving_conversation');
 
@@ -2371,7 +2408,7 @@ test('a late changed-conversation recovery load after destruction cannot launch 
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   completion.reject({ code: 'CONVERSATION_CHANGED', retryable: true });
   await flushMicrotasks();
@@ -2570,7 +2607,7 @@ test('destroy cancels a registered chat before API invocation', async () => {
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
 
   assert.equal(controllerCount(), 5);
@@ -2594,7 +2631,7 @@ test('destroy cancels a registered reply TTS before speak invocation', async () 
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
 
   assert.equal(controllerCount(), 6);
@@ -2616,7 +2653,7 @@ test('destroy cancels registered completion before API invocation', async () => 
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   await flushMicrotasks();
 
@@ -2645,7 +2682,7 @@ test('destroy cancels registered changed-conversation recovery before its reload
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   await flushMicrotasks();
 
@@ -2714,7 +2751,7 @@ test('a late chat fulfillment after destruction is inert and cannot launch reply
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   assert.equal(app.getSnapshot().value, 'submitting');
   const savesAtDestroy = fixture.calls.store.length;
@@ -2764,7 +2801,7 @@ test('a late completion fulfillment after destruction is inert', async () => {
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   assert.equal(app.getSnapshot().value, 'saving_conversation');
   const savesAtDestroy = fixture.calls.store.length;
@@ -3135,7 +3172,7 @@ test('failure to save TTS_SETTLED into saving_conversation invokes complete zero
   await app.start();
   await app.selectChild(7);
   app.recordToggle();
-  fixture.emitSpeech({ type: 'final', text: '我给小鸭换了水' });
+  explicitlyStopAndEmitSpeech(app, fixture, { type: 'final', text: '我给小鸭换了水' });
   await flushMicrotasks();
   assert.equal(app.getSnapshot().value, 'speaking');
 

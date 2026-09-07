@@ -333,6 +333,19 @@ def test_natural_recognition_end_restarts_and_preserves_text_until_user_finish(
     assert page.evaluate("window.__childTest.recognition.stops") == 0
 
     page.evaluate("window.__childTest.recognition.emitResult(0, '清水。', true)")
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.wait_for_function("window.__childTest.recognition.starts === 3")
+    page.evaluate("window.__childTest.recognition.emitResult(0, '我还给小鸭', true)")
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.wait_for_function("window.__childTest.recognition.starts === 4")
+    # Chromium's no-speech notification must remain internal to this recording
+    # generation. Its matching onend transparently resumes recognition.
+    page.evaluate("window.__childTest.recognition.emitError('no-speech')")
+    assert page.locator(".child-view").get_attribute("data-state") == "listening"
+    assert chat_requests == []
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.wait_for_function("window.__childTest.recognition.starts === 5")
+    page.evaluate("window.__childTest.recognition.emitResult(0, '添了水。', true)")
     assert chat_requests == []
     page.keyboard.press("Space")
     page.wait_for_function("window.__childTest.recognition.stops === 1")
@@ -342,12 +355,12 @@ def test_natural_recognition_end_restarts_and_preserves_text_until_user_finish(
         page.evaluate("window.__childTest.recognition.emitEnd()")
     page.get_by_role("button", name="重新发送", exact=True).wait_for()
     assert len(chat_requests) == 1
-    assert chat_requests[0]["text"] == "我给小鸭换了清水。"
+    assert chat_requests[0]["text"] == "我给小鸭换了清水。我还给小鸭添了水。"
     serialized = page.evaluate(
         "sessionStorage.getItem('duck-diary.child-session.v1')"
     )
     assert serialized is not None
-    assert "我给小鸭换了清水。" in serialized
+    assert "我给小鸭换了清水。我还给小鸭添了水。" in serialized
 
     page.evaluate("window.__childTest.recognition.emitResult(0, '重复结果', true)")
     page.evaluate("window.__childTest.recognition.emitEnd()")
@@ -405,7 +418,7 @@ def test_manual_space_stop_requires_one_explicit_end(child_page, exact_fixture_u
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
-def test_explicit_stop_without_end_recovers_once_at_5000ms_without_chat(
+def test_explicit_stop_without_end_remains_pending_without_timer_or_chat(
     child_page, exact_fixture_url, viewport
 ):
     page = child_page.page
@@ -435,22 +448,14 @@ def test_explicit_stop_without_end_recovers_once_at_5000ms_without_chat(
     assert page.locator(".child-view").get_attribute("data-state") == "listening"
     assert chat_requests == []
 
-    page.clock.fast_forward(4_999)
+    assert page.get_by_role("button", name="正在结束…", exact=True).is_disabled()
+    page.clock.fast_forward(600_000)
     assert page.locator(".child-view").get_attribute("data-state") == "listening"
-    assert chat_requests == []
-
-    page.clock.fast_forward(1)
-    page.wait_for_function(
-        "document.querySelector('.child-view')?.dataset.state === 'recovery'"
-    )
-    assert chat_requests == []
-    page.clock.fast_forward(5_000)
-    assert page.locator(".child-view").get_attribute("data-state") == "recovery"
     assert chat_requests == []
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])
-def test_silence_clock_never_stops_or_submits_without_explicit_finish(
+def test_sixty_seconds_of_silence_never_stops_or_submits_without_explicit_finish(
     child_page, exact_fixture_url, viewport
 ):
     page = child_page.page
@@ -476,9 +481,7 @@ def test_silence_clock_never_stops_or_submits_without_explicit_finish(
     record.click()
     page.wait_for_function("window.__childTest.recognition.starts === 1")
 
-    page.clock.fast_forward(1499)
-    assert page.evaluate("window.__childTest.recognition.stops") == 0
-    page.clock.fast_forward(1)
+    page.clock.fast_forward(60_000)
     assert page.evaluate("window.__childTest.recognition.stops") == 0
     assert page.locator(".child-view").get_attribute("data-state") == "listening"
     assert chat_requests == []
@@ -489,6 +492,184 @@ def test_silence_clock_never_stops_or_submits_without_explicit_finish(
     page.evaluate("window.__childTest.recognition.emitEnd()")
     page.get_by_role("button", name="开始说话", exact=True).wait_for()
     assert chat_requests == []
+
+
+@pytest.mark.parametrize(
+    ("start_input", "stop_input"),
+    [
+        ("space", "space"),
+        ("click", "click"),
+        ("space", "click"),
+        ("click", "space"),
+    ],
+)
+def test_explicit_record_toggle_inputs_submit_once_and_disable_stopping_button(
+    child_page, exact_fixture_url, start_input, stop_input
+):
+    """Every supported explicit input is one toggle, never a second implicit one."""
+    page = child_page.page
+    port = child_page.server.port
+    chat_requests = []
+    child_page.fulfill_json("**/api/roster/today", [SYNTHETIC_CHILD])
+    child_page.fulfill_json("**/api/children/1/active-conversation", SYNTHETIC_ACTIVE)
+
+    def chat(route):
+        assert exact_fixture_url(route.request.url, port)
+        chat_requests.append(route.request.post_data_json)
+        route.fulfill(status=503, content_type="application/json", body="{}")
+
+    page.route("**/api/chat", chat)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="开始", exact=True).click()
+    record = page.get_by_role("button", name="开始说话", exact=True)
+    record.wait_for()
+
+    if start_input == "space":
+        page.locator("#app-title").focus()
+        page.keyboard.press("Space")
+    else:
+        record.click()
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+    page.evaluate("window.__childTest.recognition.emitResult(0, '这轮只能发送一次。', true)")
+
+    if stop_input == "space":
+        page.locator("#app-title").focus()
+        page.keyboard.press("Space")
+    else:
+        page.get_by_role("button", name="结束说话", exact=True).click()
+    page.wait_for_function("window.__childTest.recognition.stops === 1")
+    stopping = page.get_by_role("button", name="正在结束…", exact=True)
+    assert stopping.is_disabled()
+    assert chat_requests == []
+
+    # A held key can be followed by a browser-synthesized click after the
+    # render. Neither that click, repeat keydown, nor keyup may add a toggle.
+    page.dispatch_event("#record-button", "click")
+    page.dispatch_event("#record-button", "keydown", {"code": "Space", "key": " ", "repeat": True})
+    page.dispatch_event("#record-button", "keyup", {"code": "Space", "key": " "})
+    assert page.evaluate(
+        "({ starts: window.__childTest.recognition.starts, stops: window.__childTest.recognition.stops })"
+    ) == {"starts": 1, "stops": 1}
+
+    with page.expect_request(lambda request: request.url.endswith("/api/chat")):
+        page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.get_by_role("button", name="重新发送", exact=True).wait_for()
+    page.locator("#app-title").focus()
+    page.dispatch_event("#app-title", "keydown", {"code": "Space", "key": " ", "repeat": True})
+    page.dispatch_event("#app-title", "keyup", {"code": "Space", "key": " "})
+    assert len(chat_requests) == 1
+    assert page.evaluate(
+        "({ starts: window.__childTest.recognition.starts, stops: window.__childTest.recognition.stops })"
+    ) == {"starts": 1, "stops": 1}
+
+
+def test_non_explicit_recognition_events_never_submit_or_leave_listening(child_page, exact_fixture_url):
+    page = child_page.page
+    port = child_page.server.port
+    chat_requests = []
+    child_page.fulfill_json("**/api/roster/today", [SYNTHETIC_CHILD])
+    child_page.fulfill_json("**/api/children/1/active-conversation", SYNTHETIC_ACTIVE)
+
+    def chat(route):
+        assert exact_fixture_url(route.request.url, port)
+        chat_requests.append(route.request.post_data_json)
+        route.fulfill(status=503, content_type="application/json", body="{}")
+
+    page.route("**/api/chat", chat)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="开始", exact=True).click()
+    page.get_by_role("button", name="开始说话", exact=True).click()
+    page.wait_for_function("window.__childTest.recognition.starts === 1")
+
+    page.evaluate("window.__childTest.recognition.emitResult(0, 'interim', false)")
+    page.evaluate("window.__childTest.recognition.emitResult(0, 'final', true)")
+    page.evaluate("window.__childTest.recognition.emitSpeechEnd()")
+    assert page.locator(".child-view").get_attribute("data-state") == "listening"
+    assert chat_requests == []
+
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.wait_for_function("window.__childTest.recognition.starts === 2")
+    page.evaluate("window.__childTest.recognition.emitError('no-speech')")
+    assert page.locator(".child-view").get_attribute("data-state") == "listening"
+    assert chat_requests == []
+    page.evaluate("window.__childTest.recognition.emitEnd()")
+    page.wait_for_function("window.__childTest.recognition.starts === 3")
+    assert page.locator(".child-view").get_attribute("data-state") == "listening"
+    assert chat_requests == []
+
+
+def test_three_recording_generations_ignore_late_prior_callbacks(child_page, exact_fixture_url):
+    page = child_page.page
+    port = child_page.server.port
+    chat_requests = []
+    child_page.fulfill_json("**/api/roster/today", [SYNTHETIC_CHILD])
+    child_page.fulfill_json("**/api/children/1/active-conversation", SYNTHETIC_ACTIVE)
+
+    def chat(route):
+        assert exact_fixture_url(route.request.url, port)
+        body = route.request.post_data_json
+        chat_requests.append(body)
+        message_offset = (len(chat_requests) - 1) * 2
+        route.fulfill(
+            status=200,
+            content_type="application/json",
+            body=json.dumps({
+                "request_id": body["request_id"],
+                "conversation_id": 17,
+                "child_message_id": 103 + message_offset,
+                "diary_message_id": 104 + message_offset,
+                "reply": "今天的小鸭很开心。",
+                "round": 1,
+                "ended": False,
+                "end_reason": None,
+                "replayed": False,
+            }),
+        )
+
+    def tts(route):
+        assert exact_fixture_url(route.request.url, port)
+        route.fulfill(status=200, content_type="audio/mpeg", body=b"synthetic-audio")
+
+    page.route("**/api/chat", chat)
+    page.route("**/api/tts?*", tts)
+    page.goto(f"{child_page.server.base_url}/", wait_until="domcontentloaded")
+    page.get_by_role("button", name="开始", exact=True).click()
+
+    round_texts = ["第一轮独立。", "第二轮独立。", "第三轮独立。"]
+    for round_index, text in enumerate(round_texts):
+        page.get_by_role("button", name="开始说话", exact=True).click()
+        page.wait_for_function(f"window.__childTest.recognition.starts === {round_index + 1}")
+        if round_index:
+            # These are all late callbacks from the terminal preceding
+            # generation, delivered while the next one is actively listening.
+            page.evaluate(
+                "([instance, text]) => window.__childTest.recognition.emitResultFrom(instance, 0, text, true)",
+                [round_index - 1, "旧轮不得进入新轮。"],
+            )
+            page.evaluate(
+                "instance => window.__childTest.recognition.emitEndFrom(instance)",
+                round_index - 1,
+            )
+            page.dispatch_event("#record-button", "keydown", {"code": "Space", "key": " ", "repeat": True})
+            page.dispatch_event("#record-button", "keyup", {"code": "Space", "key": " "})
+            assert page.locator(".child-view").get_attribute("data-state") == "listening"
+            assert len(chat_requests) == round_index
+        page.evaluate(
+            "([index, text]) => window.__childTest.recognition.emitResult(0, text, true)",
+            [round_index, text],
+        )
+        page.keyboard.press("Space")
+        page.wait_for_function(f"window.__childTest.recognition.stops === {round_index + 1}")
+        page.evaluate("window.__childTest.recognition.emitEnd()")
+        page.wait_for_function(f"window.__childTest.audio.instances.length === {round_index + 1}")
+        page.evaluate("index => window.__childTest.audio.emitPlaying(index)", round_index)
+        page.evaluate("index => window.__childTest.audio.emitEnded(index)", round_index)
+        page.get_by_role("button", name="开始说话", exact=True).wait_for()
+
+    assert [body["text"] for body in chat_requests] == round_texts
+    assert page.evaluate(
+        "({ starts: window.__childTest.recognition.starts, stops: window.__childTest.recognition.stops })"
+    ) == {"starts": 3, "stops": 3}
 
 
 @pytest.mark.parametrize("viewport", VIEWPORTS, ids=["1024x576", "1280x720"])

@@ -122,9 +122,11 @@ export function transition(snapshot, event) {
       return replace(snapshot, { stopRequested: true });
 
     case 'listening:SPEECH_EMPTY':
+      if (snapshot.stopRequested !== true) return snapshot;
       return replace(snapshot, { value: 'ready', error: null });
 
     case 'listening:SPEECH_FINAL':
+      if (snapshot.stopRequested !== true) return snapshot;
       return replace(snapshot, {
         value: 'submitting',
         draft: normalizeDraft(event.draft),

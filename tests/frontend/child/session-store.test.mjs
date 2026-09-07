@@ -445,6 +445,7 @@ test('pending completion keeps the remote completion boundary and never reopens 
 
 test('ended chat saved through the machine restores only the completion path', () => {
   let state = createInitialSnapshot({ value: 'listening', child: child() });
+  state = transition(state, { type: 'RECORD_TOGGLE' });
   state = transition(state, { type: 'SPEECH_FINAL', draft: draft() });
   state = transition(state, {
     type: 'SUBMIT_SUCCEEDED',

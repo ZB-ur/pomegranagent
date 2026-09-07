@@ -196,8 +196,10 @@ def test_browser_entry_speech_factory():
     assert "createSpeech: ({ onEvent }) => createSpeechController({" in source
     assert "Recognition: globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null" in source
     assert "onEvent," in source
-    assert source.count("setTimer: globalThis.setTimeout.bind(globalThis)") == 2
-    assert source.count("clearTimer: globalThis.clearTimeout.bind(globalThis)") == 2
+    # Timers remain exclusive to TTS; speech recording has no watchdog or
+    # automatic completion timer.
+    assert source.count("setTimer: globalThis.setTimeout.bind(globalThis)") == 1
+    assert source.count("clearTimer: globalThis.clearTimeout.bind(globalThis)") == 1
 
 
 def test_browser_entry_view_dom_composition():

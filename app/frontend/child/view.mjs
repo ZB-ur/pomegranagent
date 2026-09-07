@@ -889,6 +889,7 @@ export function createChildView(root, actions, dom) {
     if (!contains(root, actionElement) || !isNativeButton(actionElement) || actionElement.disabled === true) return;
     const token = safeGetAttribute(actionElement, 'data-child-action');
     if (!Object.hasOwn(ACTION_TOKEN_TO_KEY, token)) return;
+    if (token === 'record-toggle' && !isDirectClick(event)) return;
     const actionKey = ACTION_TOKEN_TO_KEY[token];
     if (!Object.hasOwn(actionCallbacks, actionKey)) return;
     const callback = actionCallbacks[actionKey];
@@ -900,6 +901,14 @@ export function createChildView(root, actions, dom) {
       return;
     }
     callback();
+  }
+
+  function isDirectClick(event) {
+    try {
+      return typeof event.detail === 'number' && event.detail > 0;
+    } catch {
+      return false;
+    }
   }
 
   function findActionElement(event) {

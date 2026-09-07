@@ -79,6 +79,7 @@ export function createChildApp(deps) {
   let criticalDepth = 0;
   let appEpoch = 0;
   let nextEffectEpoch = 0;
+  let nextRecordingGeneration = 0;
   let drainingSpeechEvents = false;
   let constructionReady = false;
   const effects = new Map();
@@ -791,6 +792,8 @@ export function createChildApp(deps) {
         } catch {}
         return;
       }
+      if ((event.type === 'empty' || event.type === 'final')
+        && !hasCurrentExplicitStop(entry)) return;
       if (event.type === 'empty') {
         if (!invalidateEffect('speech', entry)) return;
         commit({ type: 'SPEECH_EMPTY' });
@@ -822,6 +825,15 @@ export function createChildApp(deps) {
         }
         startChat();
       }
+    }
+
+    function hasCurrentExplicitStop(entry) {
+      return isCurrentEffect(entry)
+        && Number.isSafeInteger(entry.recordingGeneration)
+        && entry.recordingGeneration > 0
+        && entry.explicitStopRequested === entry.recordingGeneration
+        && snapshot.value === 'listening'
+        && snapshot.stopRequested === true;
     }
 
     function initialize() {
@@ -896,18 +908,23 @@ export function createChildApp(deps) {
         return undefined;
       }
       if (snapshot.value !== 'listening' || snapshot.stopRequested === true) return undefined;
-      const stopping = commit({ type: 'RECORD_TOGGLE' });
-      if (!stopping.ok) return undefined;
       const entry = effects.get('speech');
-      if (!isCurrentEffect(entry) || entry.manualStopRequested === true) return undefined;
-      entry.manualStopRequested = true;
-      try {
-        absorbThenable(callExternal(speechBinding.values.stop, speechBinding.owner, ['manual']));
-      } catch {
-        cancelEffect('speech');
-        beginRecovery({ code: 'SPEECH_FAILED', retryable: true });
-      }
-      return undefined;
+      if (!isCurrentEffect(entry)
+        || !Number.isSafeInteger(entry.recordingGeneration)
+        || entry.recordingGeneration <= 0
+        || entry.explicitStopRequested === entry.recordingGeneration) return undefined;
+      return withinBoundary(() => {
+        const stopping = commit({ type: 'RECORD_TOGGLE' });
+        if (!stopping.ok || !isCurrentEffect(entry)) return undefined;
+        entry.explicitStopRequested = entry.recordingGeneration;
+        try {
+          absorbThenable(callExternal(speechBinding.values.stop, speechBinding.owner, ['manual']));
+        } catch {
+          cancelEffect('speech');
+          beginRecovery({ code: 'SPEECH_FAILED', retryable: true });
+        }
+        return undefined;
+      });
     }
 
     function startSpeech() {
@@ -916,6 +933,8 @@ export function createChildApp(deps) {
         beginRecovery(effectControllerError());
         return;
       }
+      entry.recordingGeneration = ++nextRecordingGeneration;
+      entry.explicitStopRequested = null;
       try {
         absorbThenable(callExternal(speechBinding.values.start, speechBinding.owner));
       } catch {

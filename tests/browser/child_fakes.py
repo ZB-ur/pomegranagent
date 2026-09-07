@@ -3,7 +3,6 @@ from __future__ import annotations
 
 CONTROLLED_CHILD_FAKE_SCRIPT = r"""
 (() => {
-  const latest = values => values.length === 0 ? null : values[values.length - 1];
   const call = (target, key, event) => {
     const callback = target && target[key];
     if (typeof callback === 'function') callback.call(target, event);
@@ -16,7 +15,10 @@ CONTROLLED_CHILD_FAKE_SCRIPT = r"""
       stops: 0,
       aborts: 0,
       emitResult(index, text, isFinal) {
-        const instance = latest(this.instances);
+        this.emitResultFrom(this.instances.length - 1, index, text, isFinal);
+      },
+      emitResultFrom(instanceIndex, index, text, isFinal) {
+        const instance = this.instances[instanceIndex];
         if (!instance || !Number.isInteger(index) || index < 0) return;
         instance.results[index] = {
           0: { transcript: typeof text === 'string' ? text : '' },
@@ -28,10 +30,22 @@ CONTROLLED_CHILD_FAKE_SCRIPT = r"""
         });
       },
       emitEnd() {
-        call(latest(this.instances), 'onend', {});
+        this.emitEndFrom(this.instances.length - 1);
+      },
+      emitEndFrom(instanceIndex) {
+        call(this.instances[instanceIndex], 'onend', {});
       },
       emitError(code) {
-        call(latest(this.instances), 'onerror', { error: code });
+        this.emitErrorFrom(this.instances.length - 1, code);
+      },
+      emitErrorFrom(instanceIndex, code) {
+        call(this.instances[instanceIndex], 'onerror', { error: code });
+      },
+      emitSpeechEnd() {
+        this.emitSpeechEndFrom(this.instances.length - 1);
+      },
+      emitSpeechEndFrom(instanceIndex) {
+        call(this.instances[instanceIndex], 'onspeechend', {});
       },
     },
     tts: {

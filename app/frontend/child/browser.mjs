@@ -116,8 +116,6 @@ async function installChildApp() {
     createSpeech: ({ onEvent }) => createSpeechController({
       Recognition: globalThis.SpeechRecognition ?? globalThis.webkitSpeechRecognition ?? null,
       onEvent,
-      setTimer: globalThis.setTimeout.bind(globalThis),
-      clearTimer: globalThis.clearTimeout.bind(globalThis),
     }),
     keyboard,
     uuid: () => globalThis.crypto.randomUUID(),

@@ -2603,7 +2603,11 @@ _P6_UAT_INCIDENT_SELECTOR_ADDITIONS_TEXT = r"""browser | ^test_tts_11000ms_cold_
 browser | ^test_chat_11000ms_response_uses_same_request_and_audio_path\[(1024x576|1280x720)\]$ | 2 | 3,4,10,14
 backend | ^test_(llm_retry_fence_can_stop_the_second_transport_attempt|chat_reply_forwards_retry_fence_to_llm|chat_lease_renewal_requires_exact_owner_and_attempt_fence|chat_lease_guard_publishes_expiry_loss_atomically_with_renewal|terminal_chat_cas_checks_fresh_lease_time_without_changing_business_timestamps|terminal_chat_lease_clock_is_sampled_after_sqlite_writer_slot\[(success|failure)\]|fixed_max_round_route_uses_fresh_lease_time_before_terminal_write|pre_provider_failure_uses_fresh_lease_time_before_terminal_write\[(api|internal)\]|chat_heartbeat_recovers_after_one_transient_database_error|chat_heartbeat_marks_lease_lost_when_database_errors_outlive_expiry|chat_heartbeat_fences_one_failed_renewal_that_returns_after_lease_expiry|chat_heartbeat_marks_lost_before_any_post_miss_clock_work|chat_heartbeat_publishes_durable_renewal_before_retry_fence_rechecks|slow_chat_success_stays_owned_and_duplicate_cannot_reclaim_after_original_expiry|lost_chat_lease_discards_result_and_fences_provider_retry|slow_chat_failure_is_recorded_by_original_owner_after_lease_extension|chat_failure_reclaimed_after_heartbeat_join_returns_in_progress|chat_joins_inflight_heartbeat_before_terminal_database_write\[(success|failure)\])$ | 21 | 3,4,14
 browser | ^test_natural_recognition_end_restarts_and_preserves_text_until_user_finish\[(1024x576|1280x720)\]$ | 2 | 10,13
-browser | ^test_explicit_stop_without_end_recovers_once_at_5000ms_without_chat\[(1024x576|1280x720)\]$ | 2 | 10,13,14
+browser | ^test_explicit_stop_without_end_remains_pending_without_timer_or_chat\[(1024x576|1280x720)\]$ | 2 | 13,14
+browser | ^test_sixty_seconds_of_silence_never_stops_or_submits_without_explicit_finish\[(1024x576|1280x720)\]$ | 2 | 13,14
+browser | ^test_explicit_record_toggle_inputs_submit_once_and_disable_stopping_button\[(space-space|click-click|space-click|click-space)\]$ | 4 | 13,14
+browser | ^test_non_explicit_recognition_events_never_submit_or_leave_listening$ | 1 | 13,14
+browser | ^test_three_recording_generations_ignore_late_prior_callbacks$ | 1 | 13,14
 browser | ^test_held_global_space_does_not_stop_after_listening_focus_transition$ | 1 | 13"""
 
 _P5_CHAT_TIMEOUT_SELECTOR_ROW = (
@@ -2640,9 +2644,9 @@ _P5_SPEECH_SELECTOR_ROW = (
 )
 _P6_EXPLICIT_SPEECH_SELECTOR_ROW = (
     "child_node",
-    r"^start and result create no timer while explicit stop creates only the 5000 ms watchdog$",
+    r"^explicit stop stays pending without an onend and only onend settles the transcript$",
     1,
-    (10,),
+    (13, 14),
 )
 
 
@@ -2663,7 +2667,7 @@ _P6_AUDIT_FIX_SELECTOR_ADDITIONS_SHA256 = (
     "1f5be2060f97659b11bb8b92d140538446f22bf737a6b40af407817654e2237b"
 )
 _P6_UAT_INCIDENT_SELECTOR_ADDITIONS_SHA256 = (
-    "07760fd2c5f74fbe7cd59631ba2e1d7516bc972b575a3893cb01dccc73ece821"
+    "da5b8fdeb86a9165845cfb7f185b341674e74176f48911586ab3c4ed911c5de0"
 )
 
 
@@ -2816,7 +2820,7 @@ def test_literal_p5_selector_oracle_has_explicit_p6_timeout_replacements():
     assert len(p6_rows) == 56
     assert len(post_review_rows) == 5
     assert len(audit_fix_rows) == 31
-    assert len(uat_incident_rows) == 6
+    assert len(uat_incident_rows) == 10
     p6_end = len(p5_rows) + len(p6_rows)
     post_review_end = p6_end + len(post_review_rows)
     assert _P5_TTS_SELECTOR_ROW in p5_rows
@@ -2929,7 +2933,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
 
     assert actual_today_retry_rows == EXPECTED_TODAY_RETRY_SELECTOR_ROWS
     assert actual_rows == expected_rows
-    assert len(actual_rows) == 195
+    assert len(actual_rows) == 199
     assert module.GATE_TITLES == EXPECTED_GATE_TITLES
     assert tuple(
         (item.source, item.evidence_id, item.expected_count, item.gates)
@@ -2954,7 +2958,7 @@ def test_gate_manifest_has_all_frozen_rows_literal_parameters_and_reverse_index(
             ]
             assert len(matches) == 1
         materialized_count += len(node_ids)
-    assert materialized_count == 531
+    assert materialized_count == 539
 
     assert module.SELECTOR_TO_GATES == {
         (row.command_id, row.node_pattern): row.gates for row in module.SELECTOR_MANIFEST

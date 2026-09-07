@@ -246,8 +246,8 @@ function byId(root, id) {
   return root.querySelector(`#${id}`);
 }
 
-function dispatchClick(root, target) {
-  for (const listener of root.listeners.get('click') ?? []) listener({ target });
+function dispatchClick(root, target, detail = 1) {
+  for (const listener of root.listeners.get('click') ?? []) listener({ target, detail });
 }
 
 function dispatch(target, type, event = {}) {
@@ -580,7 +580,7 @@ test('uses exact diary partner copy without the legacy bare-duck phrases', () =>
   assert.equal(fake.root.textContent.includes('鸭鸭正在回答'), false);
 });
 
-test('uses one click-toggle PetOrb record action without any hold gesture contract', () => {
+test('uses direct detail-one record clicks and rejects synthesized detail-zero clicks', () => {
   const calls = [];
   const fake = createFakeDOM();
   const view = createChildView(fake.root, actions({ onRecordToggle: () => calls.push('toggle') }), fake.dom);
@@ -592,7 +592,9 @@ test('uses one click-toggle PetOrb record action without any hold gesture contra
   assert.equal(readyRecord.textContent, '开始说话');
   assert.equal(readyRecord.getAttribute('data-child-action'), 'record-toggle');
   assert.equal(findAll(readyOrb, node => node.getAttribute?.('data-child-action') === 'record-toggle').length, 1);
-  dispatchClick(fake.root, readyRecord);
+  dispatchClick(fake.root, readyRecord, 0);
+  assert.deepEqual(calls, []);
+  dispatchClick(fake.root, readyRecord, 1);
   assert.deepEqual(calls, ['toggle']);
 
   view.render(snapshotFor('listening'));
@@ -603,7 +605,7 @@ test('uses one click-toggle PetOrb record action without any hold gesture contra
   assert.equal(listeningRecord.getAttribute('data-child-action'), readyRecord.getAttribute('data-child-action'));
   assert.equal(listeningRecord.textContent, '结束说话');
   assert.equal(findAll(listeningOrb, node => node.getAttribute?.('data-child-action') === 'record-toggle').length, 1);
-  dispatchClick(fake.root, listeningRecord);
+  dispatchClick(fake.root, listeningRecord, 1);
   assert.deepEqual(calls, ['toggle', 'toggle']);
 
   for (const type of ['mousedown', 'pointerdown', 'pointerup', 'touchstart', 'touchend']) {

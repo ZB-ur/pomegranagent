@@ -130,6 +130,7 @@ test('one event path reaches saved completion through every required state', () 
   step({ type: 'CHILD_SELECTED', childId: 7 });
   step({ type: 'TTS_SETTLED' });
   step({ type: 'RECORD_TOGGLE' });
+  step({ type: 'RECORD_TOGGLE' });
   step({ type: 'SPEECH_FINAL', draft: draft() });
   step({ type: 'SUBMIT_SUCCEEDED', result: chatResult() });
   assert.equal(s.lastMessageId, 42);
@@ -138,7 +139,7 @@ test('one event path reaches saved completion through every required state', () 
 
   assert.deepEqual(visited, [
     'welcome', 'loading_roster', 'selecting_child', 'opening', 'ready',
-    'listening', 'submitting', 'speaking', 'saving_conversation', 'completed',
+    'listening', 'listening', 'submitting', 'speaking', 'saving_conversation', 'completed',
   ]);
   assert.equal(s.draft, null);
   assert.equal(s.reply, null);
@@ -161,8 +162,8 @@ test('every explicitly legal transition accepts its documented source', () => {
     [createInitialSnapshot({ value: 'ready' }), { type: 'RECORD_TOGGLE' }, 'listening'],
     [createInitialSnapshot({ value: 'listening', child: child() }), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [createInitialSnapshot({ value: 'listening' }), { type: 'RECORD_TOGGLE' }, 'listening'],
-    [createInitialSnapshot({ value: 'listening' }), { type: 'SPEECH_EMPTY' }, 'ready'],
-    [createInitialSnapshot({ value: 'listening' }), { type: 'SPEECH_FINAL', draft: draft() }, 'submitting'],
+    [createInitialSnapshot({ value: 'listening', stopRequested: true }), { type: 'SPEECH_EMPTY' }, 'ready'],
+    [createInitialSnapshot({ value: 'listening', stopRequested: true }), { type: 'SPEECH_FINAL', draft: draft() }, 'submitting'],
     [submittingSnapshot(), { type: 'BEGIN_RECOVERY', error: error() }, 'recovery'],
     [submittingSnapshot(), { type: 'SUBMIT_SUCCEEDED', result: chatResult({ ended: false, end_reason: null }) }, 'speaking'],
     [submittingSnapshot(), { type: 'SUBMIT_FAILED', error: error() }, 'submission_failed'],
@@ -235,7 +236,7 @@ test('loading the roster validates children and keeps each first occurrence in o
 
 test('retryable failure retains the normalized draft and retries its exact request identity', () => {
   const originalDraft = draft({ text: '  我换了水  ', request_id: 'same-id' });
-  let s = transition(createInitialSnapshot({ value: 'listening', child: child() }), {
+  let s = transition(createInitialSnapshot({ value: 'listening', child: child(), stopRequested: true }), {
     type: 'SPEECH_FINAL', draft: originalDraft,
   });
   s = transition(s, { type: 'SUBMIT_FAILED', error: error() });
@@ -384,6 +385,17 @@ test('stopRequested is temporary and cannot leak into a fresh listening cycle', 
   assert.equal(s.stopRequested, false);
 });
 
+test('speech final and empty cannot settle listening before an explicit stop request', () => {
+  const listening = createInitialSnapshot({ value: 'listening', child: child() });
+  assert.equal(transition(listening, { type: 'SPEECH_EMPTY' }), listening);
+  assert.equal(transition(listening, { type: 'SPEECH_FINAL', draft: draft() }), listening);
+
+  const stopping = transition(listening, { type: 'RECORD_TOGGLE' });
+  assert.equal(stopping.stopRequested, true);
+  assert.equal(transition(stopping, { type: 'SPEECH_EMPTY' }).value, 'ready');
+  assert.equal(transition(stopping, { type: 'SPEECH_FINAL', draft: draft() }).value, 'submitting');
+});
+
 test('recovery resolution validates then copies and freezes the supplied snapshot', () => {
   const supplied = {
     value: 'ready', roster: [child()], child: child(), conversationId: 9, revision: null,
@@ -436,6 +448,7 @@ test('event-owned nested data cannot mutate a reducer-owned snapshot', () => {
 
   s = transition(s, { type: 'CHILD_SELECTED', childId: 7 });
   s = transition(s, { type: 'TTS_SETTLED' });
+  s = transition(s, { type: 'RECORD_TOGGLE' });
   s = transition(s, { type: 'RECORD_TOGGLE' });
   const incomingDraft = draft();
   s = transition(s, { type: 'SPEECH_FINAL', draft: incomingDraft });

@@ -1,14 +1,9 @@
-const STOP_SETTLE_MS = 5000;
-const SCHEDULING = Symbol('speech timer scheduling');
-
 export function createSpeechController(deps) {
   if (!deps || typeof deps !== 'object') throw new TypeError('speech dependencies must be an object');
 
   const Recognition = deps.Recognition;
   const onEvent = deps.onEvent;
-  const setTimer = deps.setTimer === undefined ? globalThis.setTimeout : deps.setTimer;
-  const clearTimer = deps.clearTimer === undefined ? globalThis.clearTimeout : deps.clearTimer;
-  if (typeof onEvent !== 'function' || typeof setTimer !== 'function' || typeof clearTimer !== 'function') {
+  if (typeof onEvent !== 'function') {
     throw new TypeError('speech dependencies require functions');
   }
 
@@ -55,8 +50,8 @@ export function createSpeechController(deps) {
       recognitionEnded: false,
       startInProgress: false,
       waitingForEnd: false,
-      timer: null,
-      timerFailure: false,
+      naturalRestartQueued: false,
+      consecutiveSynchronousEnds: 0,
       cleanupStarted: false,
       cleanupFallbackStarted: false,
       stopAttempted: false,
@@ -124,9 +119,15 @@ export function createSpeechController(deps) {
       run.startInProgress = false;
     }
     if (isListeningRun(run) && run.recognitionEnded) {
-      fail(run, true);
-      return false;
+      run.consecutiveSynchronousEnds += 1;
+      if (run.consecutiveSynchronousEnds > 1) {
+        fail(run, true);
+        return false;
+      }
+      queueNaturalRestart(run);
+      return isListeningRun(run);
     }
+    run.consecutiveSynchronousEnds = 0;
     return isListeningRun(run);
   }
 
@@ -201,6 +202,22 @@ export function createSpeechController(deps) {
     if (isListeningRun(run)) startRecognition(run);
   }
 
+  function queueNaturalRestart(run) {
+    if (!isListeningRun(run) || !run.recognitionEnded || run.naturalRestartQueued) return;
+    run.naturalRestartQueued = true;
+    const restart = () => {
+      run.naturalRestartQueued = false;
+      if (isListeningRun(run) && run.recognitionEnded) restartAfterNaturalEnd(run);
+    };
+    try {
+      Promise.resolve().then(restart).catch(() => {
+        if (isListeningRun(run)) fail(run, true);
+      });
+    } catch {
+      if (isListeningRun(run)) fail(run, true);
+    }
+  }
+
   function commitTranscriptSegment(run) {
     run.committedText = transcript(run);
     run.finalByIndex.clear();
@@ -266,15 +283,6 @@ export function createSpeechController(deps) {
     return errorEvent('SPEECH_FAILED', true);
   }
 
-  function clearReturnedHandle(run, handle) {
-    invokeClearTimer(handle, {
-      cleanupBoundary: true,
-      onRejected() {
-        if (isCurrent(run)) fail(run, true);
-      },
-    });
-  }
-
   function requestStop(run) {
     if (!isListeningRun(run)) return;
     run.phase = 'stopping';
@@ -284,135 +292,41 @@ export function createSpeechController(deps) {
       return;
     }
 
-    if (!armStopWatchdog(run)) return;
-
     // A no-speech error is followed by onend. Do not stop an already-ending
-    // native recognizer; wait for that boundary under the same watchdog.
+    // native recognizer; the explicit request remains pending for that event.
     if (run.waitingForEnd) return;
 
-    stopRecognition(run, false);
+    stopRecognition(run);
   }
 
-  function armStopWatchdog(run) {
-    if (!isCurrent(run) || run.phase !== 'stopping') return false;
-    run.timer = SCHEDULING;
-    let handle;
-    try {
-      handle = setTimer(() => stopWatchdogFired(run, handle), STOP_SETTLE_MS);
-      consumeThenable(handle, {
-        onRejected() {
-          if (isCurrent(run)) fail(run, true, run.stopAttempted);
-        },
-      });
-    } catch {
-      if (run.timer === SCHEDULING) run.timer = null;
-      if (isCurrent(run)) fail(run, true, run.stopAttempted);
-      return false;
-    }
-
-    if (!isCurrent(run) || run.phase !== 'stopping' || run.timer !== SCHEDULING) {
-      clearReturnedHandle(run, handle);
-      return false;
-    }
-    run.timer = handle;
-    return true;
-  }
-
-  function stopWatchdogFired(run, handle) {
-    if (!isCurrent(run) || run.phase !== 'stopping'
-      || (run.timer !== SCHEDULING && run.timer !== handle)) return;
-    run.timer = null;
-    fail(run, true, run.stopAttempted);
-  }
-
-  function stopRecognition(run, terminalCleanup) {
-    if (terminalCleanup) {
-      const previous = suppressing;
-      suppressing = true;
-      try {
-        stopRecognitionAtBoundary(run, true);
-      } finally {
-        suppressing = previous;
-      }
-      return;
-    }
-    stopRecognitionAtBoundary(run, false);
-  }
-
-  function stopRecognitionAtBoundary(run, terminalCleanup) {
+  function stopRecognition(run) {
     const recognition = run.recognition;
     let stopMethod;
     try {
       stopMethod = recognition.stop;
-    } catch (error) {
-      handleStopFailure(run, terminalCleanup);
+    } catch {
+      handleStopFailure(run);
       return;
     }
-    if (!terminalCleanup && (!isCurrent(run) || run.phase !== 'stopping')) return;
+    if (!isCurrent(run) || run.phase !== 'stopping') return;
     if (typeof stopMethod !== 'function') {
-      handleStopFailure(run, terminalCleanup);
+      handleStopFailure(run);
       return;
     }
     run.stopAttempted = true;
     try {
       consumeThenable(stopMethod.call(recognition), {
         onRejected() {
-          handleStopFailure(run, terminalCleanup);
+          handleStopFailure(run);
         },
       });
-    } catch (error) {
-      handleStopFailure(run, terminalCleanup);
-    }
-  }
-
-  function handleStopFailure(run, terminalCleanup) {
-    if (isCurrent(run)) {
-      fail(run, true, run.stopAttempted);
-    } else if (terminalCleanup && run.timerFailure) {
-      cleanupWithSuppression(run, run.stopAttempted);
-    }
-  }
-
-  function releaseTimer(run, reportFailure, cleanupRecognition) {
-    const handle = run.timer;
-    run.timer = null;
-    if (handle === null || handle === SCHEDULING) return true;
-    try {
-      let rejected = false;
-      invokeClearTimer(handle, {
-        cleanupBoundary: suppressing,
-        onRejected() {
-          rejected = true;
-          timerFailure(run, reportFailure, cleanupRecognition);
-        },
-      });
-      return !rejected;
     } catch {
-      timerFailure(run, reportFailure, cleanupRecognition);
-      return false;
+      handleStopFailure(run);
     }
   }
 
-  function invokeClearTimer(handle, { cleanupBoundary, onRejected }) {
-    const previous = suppressing;
-    if (cleanupBoundary) suppressing = true;
-    try {
-      const value = clearTimer(handle);
-      consumeThenable(value, { keepCleanupFence: cleanupBoundary, onRejected });
-    } catch (error) {
-      try {
-        onRejected(error);
-      } catch {}
-    } finally {
-      if (cleanupBoundary) suppressing = previous;
-    }
-  }
-
-  function timerFailure(run, reportFailure, cleanupRecognition) {
-    if (reportFailure && isCurrent(run)) {
-      run.timerFailure = true;
-      fail(run, cleanupRecognition);
-    }
+  function handleStopFailure(run) {
+    if (isCurrent(run)) fail(run, true, run.stopAttempted);
   }
 
   function fail(run, cleanupRecognition, stopAlreadyAttempted = false) {
@@ -426,7 +340,6 @@ export function createSpeechController(deps) {
     const previous = suppressing;
     suppressing = true;
     try {
-      releaseTimer(run, false, false);
       if (cleanupRecognition) cleanup(run, stopAlreadyAttempted);
     } finally {
       suppressing = previous;
@@ -441,7 +354,6 @@ export function createSpeechController(deps) {
     const previous = suppressing;
     suppressing = true;
     try {
-      releaseTimer(run, false, false);
       cleanup(run, false);
     } finally {
       suppressing = previous;
